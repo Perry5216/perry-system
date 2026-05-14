@@ -1,0 +1,39 @@
+# Environment and Secrets
+.env
+secrets/
+.cloudflared-my-n8n.json
+my-n8n-config.yml
+n8nac-config.json
+
+# Large model files and local DBs
+.ollama-models/
+qdrant_storage/
+postgres_data/
+
+# Local logs and temporary files
+perry_logs.txt
+telemetry.txt
+telemetry_dump.txt
+temp_scene.txt
+*.log
+
+# Node and VSCode
+node_modules/
+.vscode/
+
+# Ignore heavy output files inside the perry app
+perry/node_modules/
+perry/scratch/
+perry/logs.txt
+perry/workspace_style_dna.json
+
+# Massive AI Models and Tensor weights in Workspace
+*.safetensors
+*.gguf
+*.pth
+*.pt
+*.bin
+*.db-wal
+*.db-shm
+perry/workspace/training/*/lora-adapter/
+perry/workspace/training/*/gguf/

@@ -1,0 +1,33 @@
+{
+  "server": {
+    "port": 3847
+  },
+  "ai": {
+    "ollama": {
+      "enabled": true,
+      "endpoint": "http://localhost:11434",
+      "model": "perry-writer",
+      "contextWindow": 32768
+    },
+    "gemini": {
+      "model": "gemini-2.5-flash"
+    },
+    "claude": {
+      "model": "claude-sonnet-4-5-20250929"
+    },
+    "openai": {
+      "model": "gpt-4o"
+    },
+    "deepseek": {
+      "model": "deepseek-chat"
+    },
+    "openrouter": {
+      "model": "anthropic/claude-sonnet-4-5"
+    }
+  },
+  "projects": {
+    "defaultChapters": 25,
+    "defaultWordsPerChapter": 3000,
+    "maxRetries": 3
+  }
+}

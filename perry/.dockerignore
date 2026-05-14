@@ -1,0 +1,10 @@
+node_modules/
+packages/*/node_modules/
+packages/*/dist/
+workspace/
+config/user.json
+.config/
+.env
+.git/
+*.tsbuildinfo
+**/*.tsbuildinfo

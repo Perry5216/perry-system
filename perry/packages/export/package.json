@@ -1,0 +1,18 @@
+{
+  "name": "@perry/export",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@perry/core": "*",
+    "docx": "^9.0.0",
+    "adm-zip": "^0.5.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.0"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}

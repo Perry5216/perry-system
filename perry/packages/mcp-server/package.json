@@ -1,0 +1,23 @@
+{
+  "name": "@perry/mcp-server",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "node --import tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "@perry/ai": "*",
+    "@perry/core": "*",
+    "@perry/projects": "*",
+    "@perry/rag": "*",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3"
+  }
+}

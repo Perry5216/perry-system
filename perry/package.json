@@ -1,0 +1,28 @@
+{
+  "name": "perry-system",
+  "version": "2.0.0",
+  "private": true,
+  "description": "P.E.R.R.Y. System — Decoupled AI Novel Writing Engine",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "node --import tsx packages/dashboard-api/src/index.ts",
+    "dev:ui": "npm run dev --workspace=@perry/dashboard",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:ui\"",
+    "build": "tsc --build && npm run build --workspace=@perry/dashboard",
+    "clean": "rm -rf packages/*/dist",
+    "test": "node --import tsx packages/tests/pipeline.test.ts",
+    "mcp": "node --import tsx packages/mcp-server/src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3"
+  }
+}

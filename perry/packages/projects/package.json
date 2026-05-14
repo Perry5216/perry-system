@@ -1,0 +1,22 @@
+{
+  "name": "@perry/projects",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@perry/core": "*",
+    "@perry/ai": "*",
+    "@perry/rag": "*",
+    "jimp": "^1.6.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}

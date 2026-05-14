@@ -1,0 +1,16 @@
+{
+  "gemma4:31b":         { "contextWindow": 65536,   "safeOutput": 16384 },
+  "gemma3:27b":         { "contextWindow": 32768,   "safeOutput": 6144  },
+  "gemma3:12b":         { "contextWindow": 32768,   "safeOutput": 6144  },
+  "llama3.2":           { "contextWindow": 131072,  "safeOutput": 8192  },
+  "llama3.1:8b":        { "contextWindow": 131072,  "safeOutput": 8192  },
+  "qwen2.5:32b":        { "contextWindow": 32768,   "safeOutput": 8192  },
+  "qwen3:32b":          { "contextWindow": 131072,  "safeOutput": 8192  },
+  "perry-writer":       { "contextWindow": 131072,  "safeOutput": 8192  },
+  "gemini-2.5-flash":   { "contextWindow": 1048576, "safeOutput": 65536 },
+  "gemini-2.5-pro":     { "contextWindow": 1048576, "safeOutput": 65536 },
+  "claude-sonnet-4-5":  { "contextWindow": 200000,  "safeOutput": 16384 },
+  "claude-opus-4":      { "contextWindow": 200000,  "safeOutput": 16384 },
+  "gpt-4o":             { "contextWindow": 128000,  "safeOutput": 16384 },
+  "deepseek-chat":      { "contextWindow": 65536,   "safeOutput": 8192  }
+}
