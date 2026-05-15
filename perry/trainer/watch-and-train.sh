@@ -1,72 +1,161 @@
 #!/bin/bash
-# P.E.R.R.Y. Auto-Trainer — watch-and-train.sh
-# Polls for READY_TO_FINETUNE.flag every 5 minutes.
-# When found, kicks off the LoRA fine-tune on GPU 0 (5090, 32GB).
+# P.E.R.R.Y. Auto-Trainer — watch-and-train.sh (v2: pen-name aware)
 #
-# Recovery: If merged safetensors exist but no .gguf, skips training
-# and jumps straight to GGUF export.
+# Polls for READY_TO_FINETUNE.flag every 5 minutes. Resolves the pen-name slug
+# for the training directory from projects.db (via meta['pen_name_records'] +
+# projects.context.penNameSlug), then registers the new LoRA as
+# perry-{slug}:v{N} where {N} is the next unused version. Does NOT overwrite
+# previous LoRAs and does NOT auto-switch user.json — writer model selection
+# is a deliberate user choice.
+#
+# Recovery: if merged safetensors exist but no .gguf, skips training and
+# jumps to GGUF export + Ollama registration.
+
+set -uo pipefail
 
 WORKSPACE="/workspace"
-CHECK_INTERVAL=300  # 5 minutes
+PROJECTS_DB="${WORKSPACE}/.config/projects.db"
+OLLAMA_ENDPOINT="${OLLAMA_ENDPOINT:-http://ollama:11434}"
+BASE_MODEL="${BASE_MODEL:-hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M}"
+CHECK_INTERVAL="${CHECK_INTERVAL:-300}"
+DEFAULT_PEN_SLUG="${DEFAULT_PEN_SLUG:-default}"
+MIN_TRAINING_PAIRS="${MIN_TRAINING_PAIRS:-20}"
 
-echo "=========================================="
-echo " P.E.R.R.Y. Auto-Trainer — Watching..."
-echo " GPU: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo " Interval: ${CHECK_INTERVAL}s"
-echo "=========================================="
+export PROJECTS_DB BASE_MODEL OLLAMA_ENDPOINT
 
-# Check GPU
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+# ═════════════════════════════════════════════════════════════════════════
+# Helpers (all use python3 for JSON safety + sqlite3 access)
+# ═════════════════════════════════════════════════════════════════════════
 
-while true; do
-    # ─── Phase 0: Check for GGUF-only recovery ────────────────────────────
-    # If a previous run merged safetensors but crashed during GGUF export,
-    # skip training entirely and just compress.
-    RECOVERY_DIR=$(find "${WORKSPACE}/training" -mindepth 1 -maxdepth 1 -type d -name "project-*" | while read dir; do
-        GGUF_DIR="${dir}/gguf"
-        if [ -d "${GGUF_DIR}" ]; then
-            HAS_SAFETENSORS=$(ls "${GGUF_DIR}"/*.safetensors 2>/dev/null | head -1)
-            HAS_GGUF=$(ls "${GGUF_DIR}"/*.gguf 2>/dev/null | head -1)
-            if [ -n "${HAS_SAFETENSORS}" ] && [ -z "${HAS_GGUF}" ]; then
-                echo "${dir}"
-                break
-            fi
-        fi
-    done)
+# Look up pen-name slug for a project ID. Echoes slug to stdout or empty.
+lookup_pen_slug() {
+    local project_id="$1"
+    python3 - "$project_id" <<'PYEOF'
+import sys, sqlite3, json, re, os
+project_id = sys.argv[1]
+db_path = os.environ['PROJECTS_DB']
+try:
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    # 1) projects.context.penNameSlug
+    r = db.execute("SELECT data FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if r:
+        ctx = (json.loads(r['data']).get('context') or {})
+        if ctx.get('penNameSlug'):
+            print(ctx['penNameSlug']); sys.exit(0)
+        name = ctx.get('penName')
+        if name:
+            m = db.execute("SELECT value FROM meta WHERE key='pen_name_records'").fetchone()
+            if m:
+                for pn in json.loads(m['value']).get('penNames', []):
+                    if pn.get('displayName') == name:
+                        print(pn['slug']); sys.exit(0)
+            slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+            if slug:
+                print(slug); sys.exit(0)
+    # 2) meta['pen_name_records'].associatedProjects
+    m = db.execute("SELECT value FROM meta WHERE key='pen_name_records'").fetchone()
+    if m:
+        for pn in json.loads(m['value']).get('penNames', []):
+            for ap in pn.get('associatedProjects', []):
+                if ap.get('id') == project_id:
+                    print(pn['slug']); sys.exit(0)
+except Exception as e:
+    print(f"lookup_pen_slug error: {e}", file=sys.stderr)
+print('')
+PYEOF
+}
 
-    if [ -n "${RECOVERY_DIR}" ]; then
-        PROJECT_ID=$(basename "${RECOVERY_DIR}")
-        GGUF_DIR="${RECOVERY_DIR}/gguf"
-        MODEL_NAME="a.perry:latest"
-        OLLAMA_ENDPOINT="http://ollama:11434"
+# Get next LoRA version for a pen slug. Echoes integer.
+next_version() {
+    local slug="$1"
+    python3 - "$slug" <<'PYEOF'
+import sys, sqlite3, json, os
+slug = sys.argv[1]
+db = sqlite3.connect(os.environ['PROJECTS_DB'])
+db.row_factory = sqlite3.Row
+m = db.execute("SELECT value FROM meta WHERE key='pen_name_records'").fetchone()
+if not m:
+    print(1); sys.exit(0)
+for pn in json.loads(m['value']).get('penNames', []):
+    if pn.get('slug') == slug:
+        versions = [int(v.get('version', 0)) for v in pn.get('loraVersions', [])]
+        print(max(versions) + 1 if versions else 1); sys.exit(0)
+print(1)
+PYEOF
+}
 
-        echo ""
-        echo "[$(date)] RECOVERY MODE: Found merged safetensors without GGUF in ${GGUF_DIR}"
-        echo "[$(date)] Skipping training — jumping straight to GGUF compression..."
+# Append a new lora version to meta after a successful train.
+record_lora_version() {
+    local slug="$1" version="$2" tag="$3"
+    local gguf_path="$4" adapter_path="$5"
+    local training_pairs="$6" final_loss="$7" trained_at="$8"
+    python3 - "$slug" "$version" "$tag" "$gguf_path" "$adapter_path" \
+               "$training_pairs" "$final_loss" "$trained_at" <<'PYEOF'
+import sys, sqlite3, json, os
+slug, version, tag, gguf_path, adapter_path, pairs, loss, trained_at = sys.argv[1:9]
+db = sqlite3.connect(os.environ['PROJECTS_DB'])
+db.row_factory = sqlite3.Row
+m = db.execute("SELECT value FROM meta WHERE key='pen_name_records'").fetchone()
+rec = json.loads(m['value']) if m else {'version': 1, 'penNames': []}
+entry = {
+    'version': int(version),
+    'ollamaTag': tag,
+    'loraGgufPath': gguf_path,
+    'loraAdapterPath': adapter_path,
+    'trainingPairs': int(pairs) if pairs else None,
+    'finalLoss': float(loss) if loss else None,
+    'trainedAt': trained_at,
+    'promoted': True,
+}
+matched = False
+for pn in rec.get('penNames', []):
+    if pn.get('slug') == slug:
+        pn.setdefault('loraVersions', []).append(entry)
+        pn['currentLoraVersion'] = int(version)
+        matched = True
+        break
+if not matched:
+    rec.setdefault('penNames', []).append({
+        'id': f'pen-{slug}', 'slug': slug, 'displayName': slug,
+        'baseModel': os.environ.get('BASE_MODEL', ''),
+        'loraVersions': [entry],
+        'currentLoraVersion': int(version),
+    })
+db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+           ('pen_name_records', json.dumps(rec, ensure_ascii=False)))
+db.commit()
+print(f"meta record updated: {tag} (v{version}) for slug '{slug}'")
+PYEOF
+}
 
-        # Lock the pipeline
-        touch "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
+# Get optional per-pen-name Modelfile SYSTEM prompt override. Echoes content
+# or empty (caller falls back to the default below).
+get_system_prompt() {
+    local slug="$1"
+    python3 - "$slug" <<'PYEOF'
+import sys, sqlite3, json, os
+slug = sys.argv[1]
+db = sqlite3.connect(os.environ['PROJECTS_DB'])
+db.row_factory = sqlite3.Row
+m = db.execute("SELECT value FROM meta WHERE key='pen_name_records'").fetchone()
+if not m:
+    sys.exit(0)
+for pn in json.loads(m['value']).get('penNames', []):
+    if pn.get('slug') == slug:
+        sp = pn.get('modelfileSystemPrompt')
+        if sp:
+            print(sp)
+        break
+PYEOF
+}
 
-        # Flush VRAM
-        echo "[$(date)] Flushing VRAM on Writer GPU before GGUF export..."
-        curl -s -X POST http://ollama:11434/api/generate -d '{"model": "hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M", "keep_alive": 0}' > /dev/null
-
-        # Run the standalone GGUF exporter (bypasses Unsloth's buggy installer)
-        python3 /trainer/export-gguf.py --model-dir "${GGUF_DIR}" --quant q5_k_m
-        EXPORT_EXIT=$?
-
-        if [ ${EXPORT_EXIT} -eq 0 ]; then
-            GGUF_FILE=$(ls "${GGUF_DIR}"/*.gguf 2>/dev/null | head -1)
-            if [ -n "${GGUF_FILE}" ]; then
-                echo "[$(date)] GGUF compression succeeded: ${GGUF_FILE}"
-
-                # Register with Ollama via shared volume + API
-                echo "[$(date)] Copying GGUF to Ollama shared storage..."
-                SAFE_MODEL_NAME=$(echo "${MODEL_NAME}" | tr -d ' ' | tr ':' '-')
-                cp "${GGUF_FILE}" "/ollama_storage/models/${SAFE_MODEL_NAME}.gguf"
-
-                cat > /tmp/perry-tuned.Modelfile <<MODELEOF
-FROM /root/.ollama/models/${SAFE_MODEL_NAME}.gguf
+# Build the Modelfile text. Args: adapter_basename, system_prompt
+build_modelfile() {
+    local adapter_basename="$1" system_prompt="$2"
+    cat <<MODELFILE_EOF
+FROM ${BASE_MODEL}
+ADAPTER /root/.ollama/models/${adapter_basename}
 
 TEMPLATE """{{- if .System }}
 <|im_start|>system
@@ -80,10 +169,7 @@ TEMPLATE """{{- if .System }}
 """
 
 SYSTEM """
-You are a Deep POV science fiction author fine-tuned on Perry calibration data.
-NEVER use filter words (felt, thought, noticed, realized, saw, looked at, stared, remembered, imagined).
-NEVER name emotions — show them through somatic markers only.
-NEVER attribute internal states to non-POV characters.
+${system_prompt}
 """
 
 PARAMETER temperature 0.85
@@ -91,205 +177,318 @@ PARAMETER top_p 0.95
 PARAMETER top_k 40
 PARAMETER repeat_penalty 1.15
 PARAMETER num_ctx 32768
-MODELEOF
+MODELFILE_EOF
+}
 
-                echo "[$(date)] Registering model with Ollama via API..."
-                MODELFILE_CONTENT=$(python3 -c "import sys,json; print(json.dumps(open('/tmp/perry-tuned.Modelfile').read()))")
-                curl -s -X POST "${OLLAMA_ENDPOINT}/api/create" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"name\": \"${MODEL_NAME}\", \"modelfile\": ${MODELFILE_CONTENT}}"
+# Register Ollama tag via /api/create. Args: tag, modelfile_path.
+ollama_register() {
+    local tag="$1" mf_path="$2"
+    python3 - "$tag" "$mf_path" <<'PYEOF'
+import sys, json, urllib.request, urllib.error, os
+tag, mf_path = sys.argv[1:3]
+with open(mf_path) as f:
+    modelfile = f.read()
+body = json.dumps({'name': tag, 'modelfile': modelfile}).encode()
+req = urllib.request.Request(
+    f"{os.environ['OLLAMA_ENDPOINT']}/api/create",
+    data=body, method='POST',
+    headers={'Content-Type': 'application/json'})
+try:
+    resp = urllib.request.urlopen(req, timeout=600)
+    print(resp.read().decode()[:500])
+except urllib.error.HTTPError as e:
+    print(f"HTTP {e.code}: {e.read().decode()[:500]}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"register error: {e}", file=sys.stderr)
+    sys.exit(2)
+PYEOF
+}
 
-                echo ""
-                echo "[$(date)] Model ${MODEL_NAME} registered in Ollama!"
+# Validate model by generating a short test prompt. Args: tag.
+ollama_validate() {
+    local tag="$1"
+    python3 - "$tag" <<'PYEOF'
+import sys, json, urllib.request, os
+tag = sys.argv[1]
+body = json.dumps({
+    'model': tag,
+    'prompt': 'Test: describe a rusty sword in one sentence.',
+    'stream': False
+}).encode()
+try:
+    req = urllib.request.Request(
+        f"{os.environ['OLLAMA_ENDPOINT']}/api/generate",
+        data=body, method='POST',
+        headers={'Content-Type': 'application/json'})
+    resp = urllib.request.urlopen(req, timeout=180)
+    out = json.loads(resp.read()).get('response', '')[:160]
+    if out.strip():
+        print(out); sys.exit(0)
+    print('(empty response)', file=sys.stderr); sys.exit(2)
+except Exception as e:
+    print(f"validate error: {e}", file=sys.stderr); sys.exit(1)
+PYEOF
+}
 
-                # Update user.json natively (shared volume)
-                echo "[$(date)] Auto-switching dashboard config to use new custom author..."
-                python3 -c "import json, os; f='/workspace/.config/user.json'; d=json.load(open(f)) if os.path.exists(f) else {'ai':{'ollama':{}}}; d.setdefault('ai',{}).setdefault('ollama',{})['model']='${MODEL_NAME}'; json.dump(d, open(f,'w'), indent=2)"
+# Extract training stats from a dir. Echoes "pairs|loss" (either may be empty).
+get_training_stats() {
+    local train_dir="$1"
+    local pairs="" loss=""
+    if [ -f "${train_dir}/training_data.jsonl" ]; then
+        pairs=$(wc -l < "${train_dir}/training_data.jsonl" 2>/dev/null || echo "")
+    fi
+    if [ -f "${train_dir}/training_summary.md" ]; then
+        loss=$(grep -oE 'Final Loss: [0-9.]+' "${train_dir}/training_summary.md" 2>/dev/null \
+               | grep -oE '[0-9.]+' \
+               | head -1 || echo "")
+    fi
+    echo "${pairs}|${loss}"
+}
 
-                # Validate
-                echo "[$(date)] Validating new model integrity..."
-                VALIDATION_RESPONSE=$(curl -s -X POST "${OLLAMA_ENDPOINT}/api/generate" \
-                    -d "{\"model\": \"${MODEL_NAME}\", \"prompt\": \"Test prompt: describe a rusty sword in one sentence.\", \"stream\": false}" \
-                    | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('response','')[:100])" 2>/dev/null)
+# Resolve (slug, version, tag) for a training dir. Echoes "slug|version|tag".
+resolve_pen_target() {
+    local train_dir="$1"
+    local raw_name project_id slug version tag
+    raw_name=$(basename "${train_dir}")
+    # Tolerate the existing "project-project-N" double-prefix dir naming
+    # (cosmetic upstream bug; tracked separately). Strip ONE leading "project-".
+    project_id="${raw_name#project-}"
+    [[ "${project_id}" == project-* ]] || project_id="${raw_name}"
 
-                if [ -z "${VALIDATION_RESPONSE}" ]; then
-                    echo "[$(date)] 🔴 ERROR: Model validation failed."
-                else
-                    echo "[$(date)] ✅ Model validation passed! Output: ${VALIDATION_RESPONSE}"
+    slug=$(lookup_pen_slug "${project_id}")
+    if [ -z "${slug}" ]; then
+        slug="${DEFAULT_PEN_SLUG}"
+        echo "[$(date)] WARN: no pen-name slug for ${project_id}, falling back to '${slug}'" >&2
+    fi
+    version=$(next_version "${slug}")
+    tag="perry-${slug}:v${version}"
+    echo "${slug}|${version}|${tag}"
+}
 
-                    # Clean up safetensors to save disk
-                    echo "[$(date)] Cleaning up intermediate safetensors..."
-                    rm -f "${GGUF_DIR}"/*.safetensors
-                    rm -f "${GGUF_DIR}"/model.safetensors.index.json
+# Common post-train: export GGUF, register, validate, record. Args:
+# train_dir, slug, version, tag. Returns 0 on success.
+finalize_train() {
+    local train_dir="$1" slug="$2" version="$3" tag="$4"
+    local gguf_dir="${train_dir}/gguf"
+    local adapter_dir="${train_dir}/lora-adapter"
+    local gguf_basename="perry-${slug}-v${version}-lora.gguf"
+    local gguf_file="${gguf_dir}/${gguf_basename}"
+    local default_system_prompt="You are a Deep POV author fine-tuned on Perry calibration data.
+NEVER use filter words (felt, thought, noticed, realized, saw, looked at, stared, remembered, imagined).
+NEVER name emotions — show them through somatic markers only.
+NEVER attribute internal states to non-POV characters."
 
-                    # Write completion marker
-                    echo "Fine-tune completed: $(date)" > "${RECOVERY_DIR}/FINETUNE_COMPLETE.flag"
-                    echo "Model: ${MODEL_NAME}" >> "${RECOVERY_DIR}/FINETUNE_COMPLETE.flag"
-                    echo "GGUF: ${GGUF_FILE}" >> "${RECOVERY_DIR}/FINETUNE_COMPLETE.flag"
-                fi
-            fi
-        else
-            echo "[$(date)] ERROR: GGUF export failed with exit code ${EXPORT_EXIT}"
+    mkdir -p "${gguf_dir}"
+
+    # GGUF export (skip if already present — recovery path)
+    if [ ! -f "${gguf_file}" ]; then
+        echo "[$(date)] Exporting LoRA adapter -> GGUF (${gguf_basename})..."
+        python3 /opt/llama.cpp/convert_lora_to_gguf.py \
+            "${adapter_dir}" \
+            --outfile "${gguf_file}" \
+            --outtype f16
+        local export_exit=$?
+        if [ ${export_exit} -ne 0 ] || [ ! -f "${gguf_file}" ]; then
+            echo "[$(date)] ERROR: GGUF export failed (exit=${export_exit})" >&2
+            return 1
         fi
+    else
+        echo "[$(date)] GGUF already present: ${gguf_file}"
+    fi
 
-        # Unlock pipeline
+    echo "[$(date)] Copying GGUF to Ollama shared storage..."
+    cp "${gguf_file}" "/ollama_storage/models/${gguf_basename}"
+
+    local system_prompt
+    system_prompt=$(get_system_prompt "${slug}")
+    [ -z "${system_prompt}" ] && system_prompt="${default_system_prompt}"
+
+    local mf_path="/tmp/perry-${slug}-v${version}.Modelfile"
+    build_modelfile "${gguf_basename}" "${system_prompt}" > "${mf_path}"
+
+    echo "[$(date)] Registering ${tag} with Ollama..."
+    if ! ollama_register "${tag}" "${mf_path}"; then
+        echo "[$(date)] ERROR: Ollama registration failed for ${tag}" >&2
+        return 2
+    fi
+
+    echo "[$(date)] Validating ${tag}..."
+    local validation
+    validation=$(ollama_validate "${tag}")
+    local validate_exit=$?
+    if [ ${validate_exit} -ne 0 ]; then
+        echo "[$(date)] ERROR: Validation failed for ${tag} (exit=${validate_exit})" >&2
+        return 3
+    fi
+    echo "[$(date)] Validation output: ${validation}"
+
+    # Record in meta
+    local stats pairs loss
+    stats=$(get_training_stats "${train_dir}")
+    pairs="${stats%%|*}"
+    loss="${stats##*|}"
+    record_lora_version "${slug}" "${version}" "${tag}" \
+        "${gguf_file}" "${adapter_dir}" "${pairs}" "${loss}" \
+        "$(date -Iseconds)"
+
+    # Completion marker
+    {
+        echo "Fine-tune completed: $(date -Iseconds)"
+        echo "Pen slug: ${slug}"
+        echo "Version:  ${version}"
+        echo "Tag:      ${tag}"
+        echo "GGUF:     ${gguf_file}"
+        echo "Pairs:    ${pairs}"
+        echo "Loss:     ${loss}"
+    } > "${train_dir}/FINETUNE_COMPLETE.flag"
+
+    # Tidy intermediate safetensors only after validation passes
+    rm -f "${gguf_dir}"/*.safetensors
+    rm -f "${gguf_dir}/model.safetensors.index.json"
+
+    echo "[$(date)] ${tag} ready."
+    echo "[$(date)] NOTE: writer model NOT auto-switched. To use this LoRA,"
+    echo "[$(date)]   set user.json ai.ollama.model = \"${tag}\""
+    echo "[$(date)]   (or pick it in the dashboard model picker)."
+    return 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════
+# Main loop
+# ═════════════════════════════════════════════════════════════════════════
+
+echo "=========================================="
+echo " P.E.R.R.Y. Auto-Trainer v2 — Watching..."
+echo " GPU:               CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-?}"
+echo " Base model:        ${BASE_MODEL}"
+echo " Interval:          ${CHECK_INTERVAL}s"
+echo " Default pen slug:  ${DEFAULT_PEN_SLUG}"
+echo " Projects DB:       ${PROJECTS_DB}"
+echo " Min training pairs:${MIN_TRAINING_PAIRS}"
+echo "=========================================="
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
+
+while true; do
+    # ─── Phase 0: GGUF-only recovery ────────────────────────────────────
+    RECOVERY_DIR=""
+    for dir in "${WORKSPACE}/training"/project-*/; do
+        [ -d "${dir}" ] || continue
+        dir="${dir%/}"
+        if compgen -G "${dir}/gguf/*.safetensors" > /dev/null 2>&1 \
+           && ! compgen -G "${dir}/gguf/*.gguf" > /dev/null 2>&1; then
+            RECOVERY_DIR="${dir}"
+            break
+        fi
+    done
+
+    if [ -n "${RECOVERY_DIR}" ]; then
+        echo ""
+        echo "[$(date)] RECOVERY: merged safetensors without GGUF in ${RECOVERY_DIR}"
+        target=$(resolve_pen_target "${RECOVERY_DIR}")
+        slug="${target%%|*}"
+        rest="${target#*|}"
+        version="${rest%%|*}"
+        tag="${rest#*|}"
+        echo "[$(date)] Recovery target: slug=${slug} version=${version} tag=${tag}"
+
+        touch "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
+        echo "[$(date)] Flushing VRAM..."
+        curl -fsS -X POST "${OLLAMA_ENDPOINT}/api/generate" \
+            -H "Content-Type: application/json" \
+            --data "$(python3 -c "import json,os; print(json.dumps({'model':os.environ['BASE_MODEL'],'keep_alive':0}))")" \
+            > /dev/null || true
+
+        if finalize_train "${RECOVERY_DIR}" "${slug}" "${version}" "${tag}"; then
+            echo "[$(date)] Recovery complete: ${tag}"
+        else
+            echo "[$(date)] Recovery failed for ${RECOVERY_DIR}" >&2
+        fi
         rm -f "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
-        sleep ${CHECK_INTERVAL}
+        sleep "${CHECK_INTERVAL}"
         continue
     fi
 
-    # ─── Phase 1: Normal flag-based training ──────────────────────────────
-    FLAG_FILE=$(find "${WORKSPACE}/training" -name "READY_TO_FINETUNE.flag" | head -n 1)
+    # ─── Phase 1: Flag-based training ────────────────────────────────────
+    FLAG_FILE=""
+    while IFS= read -r f; do
+        FLAG_FILE="$f"
+        break
+    done < <(find "${WORKSPACE}/training" -name "READY_TO_FINETUNE.flag" -type f 2>/dev/null)
 
-    if [ -n "${FLAG_FILE}" ] && [ -f "${FLAG_FILE}" ]; then
-        TRAIN_DIR=$(dirname "${FLAG_FILE}")
-        PROJECT_ID=$(basename "${TRAIN_DIR}")
-        
-        # If it's directly in training, fall back to generic
-        if [ "${PROJECT_ID}" = "training" ]; then
-            MODEL_NAME="perry-writer:latest"
-        else
-            MODEL_NAME="a.perry:latest"
-        fi
-        
-        TRAINING_DATA="${TRAIN_DIR}/training_data.jsonl"
-        OUTPUT_DIR="${TRAIN_DIR}/lora-adapter"
-        GGUF_DIR="${TRAIN_DIR}/gguf"
-        OLLAMA_ENDPOINT="http://ollama:11434"
-
-        echo ""
-        echo "[$(date)] FLAG DETECTED in ${TRAIN_DIR} — Starting LoRA fine-tune for ${MODEL_NAME}..."
-        
-        # Check training data exists and has enough records
-        if [ ! -f "${TRAINING_DATA}" ]; then
-            echo "[$(date)] Training data not found at ${TRAINING_DATA}. Waiting..."
-            sleep ${CHECK_INTERVAL}
-            continue
-        fi
-        
-        LINE_COUNT=$(wc -l < "${TRAINING_DATA}")
-        echo "[$(date)] Training pairs found: ${LINE_COUNT}"
-        
-        if [ "${LINE_COUNT}" -lt 20 ]; then
-            echo "[$(date)] Not enough training pairs (${LINE_COUNT} < 20). Waiting for more..."
-            sleep ${CHECK_INTERVAL}
-            continue
-        fi
-        
-        # Remove flag to prevent re-triggering during training
-        rm -f "${FLAG_FILE}"
-        
-        # Create lock flag so the pipeline engine knows to pause
-        touch "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
-        
-        echo "[$(date)] Flushing VRAM on Writer GPU before training..."
-        curl -s -X POST http://ollama:11434/api/generate -d '{"model": "hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M", "keep_alive": 0}' > /dev/null
-        
-        echo "[$(date)] Starting fine-tuning with ${LINE_COUNT} training pairs..."
-        
-        # Run fine-tuning (trains LoRA + merges weights to safetensors)
-        # NOTE: The GGUF export inside finetune.py may fail due to llama.cpp deps.
-        # If it does, the recovery loop above will handle it on the next cycle.
-        python3 /trainer/finetune.py \
-            --data "${TRAINING_DATA}" \
-            --output "${OUTPUT_DIR}" \
-            --gguf-output "${GGUF_DIR}"
-        
-        TRAIN_EXIT=$?
-        
-        if [ ${TRAIN_EXIT} -eq 0 ]; then
-            echo "[$(date)] Fine-tuning + GGUF export complete!"
-            
-            GGUF_FILE=$(ls "${GGUF_DIR}"/*.gguf 2>/dev/null | head -1)
-            
-            if [ -n "${GGUF_FILE}" ]; then
-                echo "[$(date)] Creating Ollama model from GGUF: ${GGUF_FILE}"
-                
-                # Copy GGUF to Ollama shared storage
-                SAFE_MODEL_NAME=$(echo "${MODEL_NAME}" | tr -d ' ' | tr ':' '-')
-                cp "${GGUF_FILE}" "/ollama_storage/models/${SAFE_MODEL_NAME}.gguf"
-
-                cat > /tmp/perry-tuned.Modelfile <<MODELEOF
-FROM /root/.ollama/models/${SAFE_MODEL_NAME}.gguf
-
-TEMPLATE """{{- if .System }}
-<|im_start|>system
-{{ .System }}<|im_end|>
-{{- end }}
-{{- if .Prompt }}
-<|im_start|>user
-{{ .Prompt }}<|im_end|>
-{{- end }}
-<|im_start|>assistant
-"""
-
-SYSTEM """
-You are a Deep POV science fiction author fine-tuned on Perry calibration data.
-NEVER use filter words (felt, thought, noticed, realized, saw, looked at, stared, remembered, imagined).
-NEVER name emotions — show them through somatic markers only.
-NEVER attribute internal states to non-POV characters.
-"""
-
-PARAMETER temperature 0.85
-PARAMETER top_p 0.95
-PARAMETER top_k 40
-PARAMETER repeat_penalty 1.15
-PARAMETER num_ctx 32768
-MODELEOF
-
-                echo "[$(date)] Registering model with Ollama via API..."
-                MODELFILE_CONTENT=$(python3 -c "import sys,json; print(json.dumps(open('/tmp/perry-tuned.Modelfile').read()))")
-                curl -s -X POST "${OLLAMA_ENDPOINT}/api/create" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"name\": \"${MODEL_NAME}\", \"modelfile\": ${MODELFILE_CONTENT}}"
-
-                echo "[$(date)] Model ${MODEL_NAME} registered in Ollama!"
-                
-                # Update user.json natively (shared volume)
-                echo "[$(date)] Auto-switching dashboard config to use new custom author..."
-                python3 -c "import json, os; f='/workspace/.config/user.json'; d=json.load(open(f)) if os.path.exists(f) else {'ai':{'ollama':{}}}; d.setdefault('ai',{}).setdefault('ollama',{})['model']='${MODEL_NAME}'; json.dump(d, open(f,'w'), indent=2)"
-                
-                echo "[$(date)] Validating new model integrity..."
-                VALIDATION_RESPONSE=$(curl -s -X POST "${OLLAMA_ENDPOINT}/api/generate" \
-                    -d "{\"model\": \"${MODEL_NAME}\", \"prompt\": \"Test prompt: describe a rusty sword in one sentence.\", \"stream\": false}" \
-                    | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('response','')[:100])" 2>/dev/null)
-                
-                if [ -z "${VALIDATION_RESPONSE}" ]; then
-                    echo "[$(date)] 🔴 ERROR: Model validation failed."
-                    echo "Validation failed at $(date)" > "${FLAG_FILE}"
-                else
-                    echo "[$(date)] ✅ Model validation passed! Output: ${VALIDATION_RESPONSE}"
-                    
-                    echo "[$(date)] Cleaning up intermediate safetensors..."
-                    rm -f "${GGUF_DIR}"/*.safetensors
-                    rm -f "${GGUF_DIR}"/model.safetensors.index.json
-                    
-                    echo "Fine-tune completed: $(date)" > "${TRAIN_DIR}/FINETUNE_COMPLETE.flag"
-                    echo "Model: ${MODEL_NAME}" >> "${TRAIN_DIR}/FINETUNE_COMPLETE.flag"
-                    echo "Training pairs used: ${LINE_COUNT}" >> "${TRAIN_DIR}/FINETUNE_COMPLETE.flag"
-                    echo "GGUF: ${GGUF_FILE}" >> "${TRAIN_DIR}/FINETUNE_COMPLETE.flag"
-                fi
-            else
-                echo "[$(date)] ERROR: No GGUF file found in ${GGUF_DIR}"
-                echo "[$(date)] Will attempt recovery on next cycle..."
-            fi
-        else
-            echo "[$(date)] ERROR: Fine-tuning failed with exit code ${TRAIN_EXIT}"
-            # Check if merge succeeded but GGUF failed (partial success)
-            HAS_SAFETENSORS=$(ls "${GGUF_DIR}"/*.safetensors 2>/dev/null | head -1)
-            if [ -n "${HAS_SAFETENSORS}" ]; then
-                echo "[$(date)] Merged safetensors detected — recovery will run on next cycle."
-            else
-                # Full failure — restore flag so it retries training
-                echo "Previous run failed at $(date)" > "${FLAG_FILE}"
-            fi
-        fi
-        
-        # Remove lock flag whether success or failure
-        rm -f "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
-    else
-        echo "[$(date)] Watching... (no flag yet)"
+    if [ -z "${FLAG_FILE}" ] || [ ! -f "${FLAG_FILE}" ]; then
+        echo "[$(date)] Watching... (no flag)"
+        sleep "${CHECK_INTERVAL}"
+        continue
     fi
-    
-    sleep ${CHECK_INTERVAL}
+
+    TRAIN_DIR=$(dirname "${FLAG_FILE}")
+    echo ""
+    echo "[$(date)] FLAG DETECTED in ${TRAIN_DIR}"
+
+    target=$(resolve_pen_target "${TRAIN_DIR}")
+    slug="${target%%|*}"
+    rest="${target#*|}"
+    version="${rest%%|*}"
+    tag="${rest#*|}"
+    echo "[$(date)] Target: slug=${slug} version=${version} tag=${tag}"
+
+    TRAINING_DATA="${TRAIN_DIR}/training_data.jsonl"
+    OUTPUT_DIR="${TRAIN_DIR}/lora-adapter"
+    GGUF_DIR="${TRAIN_DIR}/gguf"
+
+    if [ ! -f "${TRAINING_DATA}" ]; then
+        echo "[$(date)] No training_data.jsonl. Waiting..."
+        sleep "${CHECK_INTERVAL}"
+        continue
+    fi
+    LINE_COUNT=$(wc -l < "${TRAINING_DATA}")
+    echo "[$(date)] Training pairs: ${LINE_COUNT}"
+    if [ "${LINE_COUNT}" -lt "${MIN_TRAINING_PAIRS}" ]; then
+        echo "[$(date)] Not enough pairs (<${MIN_TRAINING_PAIRS}). Waiting..."
+        sleep "${CHECK_INTERVAL}"
+        continue
+    fi
+
+    # Remove flag now so re-triggers won't fire during training
+    rm -f "${FLAG_FILE}"
+    touch "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
+
+    echo "[$(date)] Flushing VRAM..."
+    curl -fsS -X POST "${OLLAMA_ENDPOINT}/api/generate" \
+        -H "Content-Type: application/json" \
+        --data "$(python3 -c "import json,os; print(json.dumps({'model':os.environ['BASE_MODEL'],'keep_alive':0}))")" \
+        > /dev/null || true
+
+    export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+    echo "[$(date)] Starting fine-tune (${LINE_COUNT} pairs)..."
+    python3 /trainer/finetune.py \
+        --data "${TRAINING_DATA}" \
+        --output "${OUTPUT_DIR}" \
+        --gguf-output "${GGUF_DIR}"
+    TRAIN_EXIT=$?
+
+    if [ ${TRAIN_EXIT} -ne 0 ]; then
+        echo "[$(date)] ❌ Fine-tune failed (exit=${TRAIN_EXIT})" >&2
+        # If safetensors exist, recovery loop will retry; else restore flag.
+        if compgen -G "${GGUF_DIR}/*.safetensors" > /dev/null 2>&1; then
+            echo "[$(date)] Merged safetensors present — recovery will pick this up next cycle."
+        else
+            echo "Previous run failed at $(date -Iseconds), exit=${TRAIN_EXIT}" > "${FLAG_FILE}"
+        fi
+        rm -f "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
+        sleep "${CHECK_INTERVAL}"
+        continue
+    fi
+
+    echo "[$(date)] Fine-tune complete. Finalizing as ${tag}..."
+    if finalize_train "${TRAIN_DIR}" "${slug}" "${version}" "${tag}"; then
+        echo "[$(date)] ✅ ${tag} promoted."
+    else
+        echo "[$(date)] ❌ Finalize failed for ${tag}." >&2
+    fi
+
+    rm -f "${WORKSPACE}/training/TRAINING_IN_PROGRESS.flag"
+    sleep "${CHECK_INTERVAL}"
 done

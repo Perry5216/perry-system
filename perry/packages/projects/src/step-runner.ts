@@ -79,7 +79,7 @@ export class StepRunner {
     // Initialize extracted services
     const styleDna = new StyleDnaService(stateStore, log.child('style-dna'), config.workspaceDir);
     this.styleDna = styleDna;
-    this.autoLearning = new AutoLearningService(config.workspaceDir, styleDna, log.child('auto-learn'));
+    this.autoLearning = new AutoLearningService(config.workspaceDir, styleDna, log.child('auto-learn'), stateStore);
     this.povGate = new PovQualityGate(log.child('pov-gate'), eventBus, stateStore, styleDna);
     this.continuityGate = new ContinuityGate(log.child('continuity-gate'), eventBus, stateStore, config.workspaceDir);
     this.revisionGate = new RevisionGate(log.child('revision-gate'), eventBus, stateStore);
@@ -1134,15 +1134,18 @@ ${result}`;
           // Only audit creative output — analytical steps (pov_check, stat_update, etc.)
           // have structured formats the Auditor incorrectly rejects, causing retry loops.
           const AUDITABLE_TASKS = ['creative_writing', 'revision_execution'];
-          // Use the primary provider (5090) for the audit pass as it has better reasoning
-          if (provider && provider.id !== 'librarian' && AUDITABLE_TASKS.includes(step.taskType)) {
+          // Use the Librarian (5070 Ti) for the audit pass as a 'second set of eyes'
+          if (provider && AUDITABLE_TASKS.includes(step.taskType)) {
+            const auditProviderId = this.router.getProvider('librarian') ? 'librarian' : provider.id;
+            const auditProvider = this.router.getProvider(auditProviderId) || provider;
+            
             this.eventBus.emit('step:progress', {
               projectId: project.id,
               stepId: step.id,
-              message: `Generation complete. Running Quality Auditor Pass (5090)...`,
+              message: `Generation complete. Running Quality Auditor Pass (${auditProvider.name})...`,
             });
 
-            // We feed the exact same systemPrompt and currentMessage to the 5090
+            // We feed the exact same systemPrompt and currentMessage to the auditor
             // so it has the full project context (Bible, summaries) to accurately grade the output.
             const auditSystem = systemPrompt + `\n\n[ROLE OVERRIDE]: You are now acting as the strict Quality Control Auditor.`;
             const auditMessage = currentMessage + `\n\n==================================================\n` +
@@ -1157,8 +1160,8 @@ ${result}`;
               `VERDICT: PASS\n` +
               `VERDICT: FAIL`;
 
-            const auditResponse = await provider.complete({
-              provider: provider.id,
+            const auditResponse = await auditProvider.complete({
+              provider: auditProvider.id,
               system: auditSystem,
               messages: [{ role: 'user', content: auditMessage }],
               maxTokens: 1024,
@@ -1263,11 +1266,14 @@ ${result}`;
           this.log.warn('Score tracking failed (non-fatal)', { error: (err as Error).message })
         );
 
-        // ── Auto-source 3: Full PASS Scene Injection ─────────────────────
-        // If this scene earned a PASS, find the compiled scene and mine it
-        // as a long-form positive training example for the LoRA trainer.
-        const verdictMatch = result.match(/\*\*Verdict\*\*:\s*(PASS|REVISE|REWRITE)/i);
-        if (verdictMatch?.[1]?.toUpperCase() === 'PASS') {
+        // ── Auto-source 3: Full Scene Injection (PASS or high-scoring REVISE) ──
+        // Mine scenes with PASS verdict or REVISE + Deep POV ≥ 8 as positive training examples.
+        const verdictMatch = result.match(/Verdict(?:[\s:*]+)(PASS|REVISE|REWRITE)/i);
+        const deepPovMatch = result.match(/Deep POV(?: Score)?(?:[\s:*]+)(\d+)/i);
+        const verdict = verdictMatch?.[1]?.toUpperCase() || 'UNKNOWN';
+        const deepPovScore = deepPovMatch ? parseInt(deepPovMatch[1]) : 0;
+
+        if (verdict === 'PASS' || (verdict === 'REVISE' && deepPovScore >= 8)) {
           const sceneTypeMatch = step.label.match(/\b(Action|Dialogue|Introspection|Setting)\b/i);
           const sceneType = sceneTypeMatch ? sceneTypeMatch[1].toLowerCase() : 'scene';
           const compiledStep = project.steps.find(
@@ -1276,7 +1282,7 @@ ${result}`;
                  s.status === 'completed' && s.result
           );
           if (compiledStep?.result) {
-            this.autoLearning.minePassedScene(project.id, sceneType, compiledStep.result, 'PASS').catch(err =>
+            this.autoLearning.minePassedScene(project.id, sceneType, compiledStep.result, verdict, deepPovScore).catch(err =>
               this.log.warn('Full scene mining failed (non-fatal)', { error: (err as Error).message })
             );
           }
@@ -1870,17 +1876,22 @@ ${result}`;
 
     if (step.taskType === 'creative_writing' || step.taskType === 'revision_execution') {
       // ── Prose Output ──
-      content = [
-        `# ${step.label}`,
-        ``,
-        `> **Model:** ${this.config.workspaceDir ? 'perry-writer' : 'unknown'} | **Generated:** ${new Date().toISOString().split('T')[0]}`,
-        ``,
-        `---`,
-        ``,
-        `## 📝 Generated Prose`,
-        ``,
-        cleanResult,
-      ].join('\n');
+      if (isCalibration) {
+        // Pure prose only for training data — no headers, no metadata
+        content = cleanResult;
+      } else {
+        content = [
+          `# ${step.label}`,
+          ``,
+          `> **Model:** ${this.config.workspaceDir ? 'perry-writer' : 'unknown'} | **Generated:** ${new Date().toISOString().split('T')[0]}`,
+          ``,
+          `---`,
+          ``,
+          `## 📝 Generated Prose`,
+          ``,
+          cleanResult,
+        ].join('\n');
+      }
     } else if (step.taskType === 'pov_check') {
       // ── Critic / Analysis Output ──
       content = [

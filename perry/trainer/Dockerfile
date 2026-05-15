@@ -9,36 +9,41 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
 
-# Install PyTorch with CUDA 12.4 (Pinned to 2.5.1 for torchao compatibility)
+# Install HuggingFace training stack (NO Unsloth)
 RUN pip install --no-cache-dir \
-    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu124
-
-# Install Unsloth from PyPI (latest release) + training stack
-RUN pip install --no-cache-dir \
-    "unsloth>=2026.5" \
     trl transformers accelerate peft bitsandbytes \
-    datasets sentencepiece protobuf
+    datasets sentencepiece protobuf gguf
+
+# Install PyTorch Nightly with CUDA 12.8 (Blackwell sm_120 support)
+RUN pip install --pre --no-cache-dir --upgrade \
+    torch \
+    --index-url https://download.pytorch.org/whl/nightly/cu128
 
 # Install llama.cpp python bindings for GGUF export
-# CPU-only compilation since GGUF export does not require a GPU
 RUN pip install --no-cache-dir llama-cpp-python
 
 # Pre-install llama.cpp from source (for standalone GGUF export fallback)
-RUN git clone --depth=1 https://github.com/ggml-org/llama.cpp.git /root/.unsloth/llama.cpp \
-    && mkdir -p /root/.unsloth/llama.cpp/build \
-    && cd /root/.unsloth/llama.cpp/build \
+RUN git clone --depth=1 https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp \
+    && mkdir -p /opt/llama.cpp/build \
+    && cd /opt/llama.cpp/build \
     && cmake .. -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build . --config Release -j$(nproc) \
-    && pip install --no-cache-dir -r /root/.unsloth/llama.cpp/requirements.txt 2>/dev/null || true
+    && cmake --build . --config Release -j$(nproc)
 
-COPY finetune.py /trainer/finetune.py
-COPY export-gguf.py /trainer/export-gguf.py
-COPY watch-and-train.sh /trainer/watch-and-train.sh
+COPY finetune.py export-gguf.py watch-and-train.sh /trainer/
 RUN chmod +x /trainer/watch-and-train.sh
 
-# CUDA_VISIBLE_DEVICES=1 targets 5070 Ti
+# Drop privileges. Build-time installs above run as root; runtime does not.
+# UID 1000 matches the typical host user; Docker Desktop bind mounts on
+# Windows/macOS allow read+write from any UID, so volume mounts continue to work.
+# On Linux hosts, ensure ./perry/workspace, ./perry/config, ./data/ollama,
+# ./data/trainer_cache are writable by UID 1000 (or override with compose `user:`).
+RUN groupadd -g 1000 perry \
+    && useradd -u 1000 -g 1000 -m -s /bin/bash perry \
+    && chown -R perry:perry /trainer
+
 ENV CUDA_VISIBLE_DEVICES=1
 ENV HF_HOME=/trainer/hf_cache
+
+USER perry
 
 CMD ["/trainer/watch-and-train.sh"]

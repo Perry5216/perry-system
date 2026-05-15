@@ -39,7 +39,7 @@ export class ConfigService {
   /**
    * Get a config value by dot-path. Returns the default if not found.
    *
-   * Example: config.get('ai.ollama.model', 'gemma3:27b')
+   * Example: config.get('ai.ollama.model', 'qwen3.6:27b')
    */
   get<T = unknown>(path: string, defaultValue?: T): T {
     const parts = path.split('.');

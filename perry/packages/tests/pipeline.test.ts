@@ -70,7 +70,7 @@ test('estimateTokens handles empty string', () => {
 });
 
 test('calculateBudget reserves space for system + output', () => {
-  const provider = { id: 'test', model: 'gemma3:27b', contextWindow: 32768, safeOutputTokens: 6144 };
+  const provider = { id: 'test', model: 'qwen3.6:27b', contextWindow: 32768, safeOutputTokens: 6144 };
   const budget = budgetMgr.calculateBudget(provider as any, 'You are a helpful assistant', 4096);
   
   assert(budget.availableForContent > 0, 'should have content budget');

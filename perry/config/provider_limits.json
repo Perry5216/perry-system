@@ -1,6 +1,6 @@
 {
   "gemma4:31b":         { "contextWindow": 65536,   "safeOutput": 16384 },
-  "gemma3:27b":         { "contextWindow": 32768,   "safeOutput": 6144  },
+  "qwen3.6:27b":        { "contextWindow": 32768,   "safeOutput": 6144  },
   "gemma3:12b":         { "contextWindow": 32768,   "safeOutput": 6144  },
   "llama3.2":           { "contextWindow": 131072,  "safeOutput": 8192  },
   "llama3.1:8b":        { "contextWindow": 131072,  "safeOutput": 8192  },

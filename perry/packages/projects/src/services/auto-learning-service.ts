@@ -20,6 +20,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import type { Logger } from '@perry/core';
 import type { StyleDnaService } from './style-dna-service.js';
+import type { StateStore } from '../state-store.js';
 
 const execAsync = promisify(exec);
 
@@ -27,7 +28,7 @@ const execAsync = promisify(exec);
 const MODELFILE_REBUILD_INTERVAL = 5;
 
 // Minimum training pairs before emitting a fine-tune-ready flag
-const FINETUNE_THRESHOLD = 300;
+const FINETUNE_THRESHOLD = 1000;
 
 // Ollama container name (matches docker-compose)
 const OLLAMA_CONTAINER = 'ollama';
@@ -57,25 +58,106 @@ const BASELINE_PAIRS: { bad: string; good: string; category: string }[] = [
   { bad: 'He could feel the desperation radiating off of her.', good: "She hadn't blinked in ten seconds. Her knuckles were white on the chair arm.", category: 'pov_leakage' },
 ];
 
-const DEFAULT_SYSTEM_PROMPT = `You are a professional Deep POV science fiction author. Write exclusively in Deep POV.
-NEVER use filter words (felt, thought, noticed, realized, saw, looked at, stared, heard, remembered, imagined, assumed).
-NEVER name emotions directly — show them through physical/somatic markers only.
-NEVER attribute internal states to non-POV characters.
-NEVER summarize the meaning of a moment ("He had failed." / "It was over.").
-DO use the industrial sensory palette (ozone, linseed oil, oxidized iron, graphite grit, wet copper).
-DO use somatic markers (teeth vibrating, jaw locking, white knuckles, ribs throbbing).
-DO use short punchy sentences during action, longer ones during introspection.`;
+const DEFAULT_SYSTEM_PROMPT = `You are a professional Deep POV author. Write exclusively in Deep POV.
+
+## PROSE STYLE CONTRACT
+- Show internal conflict through physical sensation: jaw clenching, knuckles whitening, ribs throbbing, teeth grinding.
+- Convey character emotions through somatic markers and environmental interaction only.
+- Describe only what the POV character can directly observe about other characters — body language, tone, movement.
+- End moments on concrete sensory detail, not thematic summary.
+- Use somatic markers to externalise every internal state.
+- Use short punchy sentences during action, longer ones during introspection.`;
+
+// Default slug when a project has no pen-name attachment.
+// Mirrors DEFAULT_PEN_SLUG in trainer/watch-and-train.sh.
+const DEFAULT_PEN_SLUG = 'default';
 
 export class AutoLearningService {
   private workspaceDir: string;
   private log: Logger;
   private styleDna: StyleDnaService;
+  private stateStore?: StateStore;
   private voiceProfileCache: Map<string, string> = new Map();
+  private penSlugCache: Map<string, string> = new Map();
 
-  constructor(workspaceDir: string, styleDna: StyleDnaService, log: Logger) {
+  constructor(workspaceDir: string, styleDna: StyleDnaService, log: Logger, stateStore?: StateStore) {
     this.workspaceDir = workspaceDir;
     this.styleDna = styleDna;
     this.log = log;
+    this.stateStore = stateStore;
+  }
+
+  // ─── Pen-name resolution ─────────────────────────────────────────────────
+  //
+  // Mirrors lookup_pen_slug() in trainer/watch-and-train.sh. Order:
+  //   1. project.context.penNameSlug
+  //   2. project.context.penName → match meta['pen_name_records'].penNames[].displayName
+  //   3. associatedProjects[].id match in pen_name_records
+  //   4. slugified penName
+  //   5. DEFAULT_PEN_SLUG ('default')
+  resolvePenSlug(projectId: string): string {
+    const cached = this.penSlugCache.get(projectId);
+    if (cached) return cached;
+    const slug = this.computePenSlug(projectId);
+    this.penSlugCache.set(projectId, slug);
+    return slug;
+  }
+
+  private computePenSlug(projectId: string): string {
+    if (!this.stateStore) return DEFAULT_PEN_SLUG;
+
+    const project = this.stateStore.get(projectId);
+    const ctx = (project?.context || {}) as Record<string, unknown>;
+
+    const explicitSlug = typeof ctx.penNameSlug === 'string' ? ctx.penNameSlug.trim() : '';
+    if (explicitSlug) return explicitSlug;
+
+    const penName = typeof ctx.penName === 'string' ? ctx.penName : '';
+    const records = this.readPenNameRecords();
+
+    if (penName && records.length > 0) {
+      const byName = records.find(pn => pn?.displayName === penName);
+      if (byName?.slug) return byName.slug;
+    }
+
+    for (const pn of records) {
+      const associated = Array.isArray(pn?.associatedProjects) ? pn.associatedProjects : [];
+      if (associated.some((ap: any) => ap?.id === projectId)) {
+        if (pn?.slug) return pn.slug;
+      }
+    }
+
+    if (penName) {
+      const slug = penName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      if (slug) return slug;
+    }
+
+    return DEFAULT_PEN_SLUG;
+  }
+
+  private readPenNameRecords(): any[] {
+    if (!this.stateStore) return [];
+    const raw = this.stateStore.getMeta('pen_name_records');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed?.penNames) ? parsed.penNames : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private findPenRecord(slug: string): any | null {
+    return this.readPenNameRecords().find(pn => pn?.slug === slug) || null;
+  }
+
+  // Returns the training pool directory for a given project, keyed by pen slug.
+  // Falls back to `<workspace>/training` when no projectId is supplied — matches
+  // legacy behavior so summary writes still have a home.
+  private trainingPoolDir(projectId?: string): string {
+    if (!projectId) return join(this.workspaceDir, 'training');
+    const slug = this.resolvePenSlug(projectId);
+    return join(this.workspaceDir, 'training', `pen-${slug}`);
   }
 
   // ─── Voice Profile Resolution ─────────────────────────────────────────────
@@ -88,51 +170,69 @@ export class AutoLearningService {
   private resolveVoiceProfile(projectId?: string): string | null {
     if (!projectId) return null;
 
-    // Check cache first
     if (this.voiceProfileCache.has(projectId)) {
       return this.voiceProfileCache.get(projectId) || null;
     }
+
+    const PEN_NAME_KEYWORDS = [
+      'voice-profile', 'voice_profile',
+      'influence-map', 'influence_map',
+      'vocabulary-fingerprint', 'vocabulary_fingerprint',
+      'structural-habits', 'structural_habits',
+      'dialogue-fingerprint', 'dialogue_fingerprint',
+      'thematic-obsessions', 'thematic_obsessions',
+    ];
 
     try {
       const projectsDir = join(this.workspaceDir, 'projects');
       if (!existsSync(projectsDir)) return null;
 
+      // Preferred path: look up the pen-name's voice-bible source via SQLite.
+      // The bible CONTENT itself lives on disk in analysis/, but SQLite tells
+      // us WHICH project's analysis/ to read — avoids the legacy "first dir
+      // that happens to have voice-profile.md wins" behavior.
+      const slug = this.resolvePenSlug(projectId);
+      const penRecord = this.findPenRecord(slug);
+      const voiceBible = penRecord?.voiceBible;
+
+      if (voiceBible?.sourceProjectId) {
+        const combined = this.readVoiceBibleFromDisk(
+          projectsDir,
+          voiceBible.sourceProjectId,
+          Array.isArray(voiceBible.sourceStepIds) ? voiceBible.sourceStepIds : null,
+          PEN_NAME_KEYWORDS,
+        );
+        if (combined) {
+          this.voiceProfileCache.set(projectId, combined);
+          this.log.info('Voice bible resolved from pen-name record', {
+            projectId,
+            slug,
+            sourceProjectId: voiceBible.sourceProjectId,
+            chars: combined.length,
+          });
+          return combined;
+        }
+      }
+
+      // Fallback: scan analysis dirs (legacy behavior — first match wins).
+      // Triggered when pen_name_records is missing/empty, e.g. fresh installs
+      // before backfill. Will be dropped after Phase 0 schema migration.
       const entries = readdirSync(projectsDir);
-
-      // Walk up: calibration project → parent book project
-      // Scan the parent project's analysis folder for all pen name identity files
-      const PEN_NAME_KEYWORDS = [
-        'voice-profile', 'voice_profile',
-        'influence-map', 'influence_map',
-        'vocabulary-fingerprint', 'vocabulary_fingerprint',
-        'structural-habits', 'structural_habits',
-        'dialogue-fingerprint', 'dialogue_fingerprint',
-        'thematic-obsessions', 'thematic_obsessions',
-      ];
-
       for (const entry of entries) {
         const analysisDir = join(projectsDir, entry, 'analysis');
         if (!existsSync(analysisDir)) continue;
-
         const files = readdirSync(analysisDir);
-        const voiceFile = files.find(f => f.includes('voice-profile') || f.includes('voice_profile'));
-        if (!voiceFile) continue; // Only process projects that have a voice profile
+        if (!files.some(f => f.includes('voice-profile') || f.includes('voice_profile'))) continue;
 
-        // Read voice profile + all pen name identity files
-        const parts: string[] = [];
-        for (const file of files) {
-          if (PEN_NAME_KEYWORDS.some(kw => file.includes(kw))) {
-            parts.push(readFileSync(join(analysisDir, file), 'utf-8'));
-          }
-        }
+        const parts = files
+          .filter(f => PEN_NAME_KEYWORDS.some(kw => f.includes(kw)))
+          .map(f => readFileSync(join(analysisDir, f), 'utf-8'));
 
         if (parts.length > 0) {
           const combined = parts.join('\n\n---\n\n');
           this.voiceProfileCache.set(projectId, combined);
-          this.log.info('Pen name identity resolved from book planning', {
-            projectId,
-            filesFound: parts.length,
-            totalLength: combined.length,
+          this.log.info('Voice bible resolved via legacy scan', {
+            projectId, dir: entry, files: parts.length, chars: combined.length,
           });
           return combined;
         }
@@ -142,6 +242,48 @@ export class AutoLearningService {
     }
 
     return null;
+  }
+
+  // Read the voice bible files from <projectsDir>/<sourceProjectId>-*/analysis/.
+  // If sourceStepIds is supplied, only files whose name starts with that step
+  // prefix (`step-5-`, `step-6-`, …) are included; otherwise all keyword
+  // matches are included.
+  private readVoiceBibleFromDisk(
+    projectsDir: string,
+    sourceProjectId: string,
+    sourceStepIds: string[] | null,
+    keywords: string[],
+  ): string | null {
+    const entries = readdirSync(projectsDir);
+    const dirName = entries.find(e => e === sourceProjectId || e.startsWith(`${sourceProjectId}-`));
+    if (!dirName) {
+      this.log.warn('Voice bible source dir not found', { sourceProjectId });
+      return null;
+    }
+
+    const analysisDir = join(projectsDir, dirName, 'analysis');
+    if (!existsSync(analysisDir)) {
+      this.log.warn('Voice bible analysis dir missing', { sourceProjectId, dir: dirName });
+      return null;
+    }
+
+    const files = readdirSync(analysisDir);
+    const parts: string[] = [];
+
+    if (sourceStepIds && sourceStepIds.length > 0) {
+      for (const stepId of sourceStepIds) {
+        const match = files.find(f => f.startsWith(`${stepId}-`));
+        if (match) parts.push(readFileSync(join(analysisDir, match), 'utf-8'));
+      }
+    } else {
+      for (const file of files) {
+        if (keywords.some(kw => file.includes(kw))) {
+          parts.push(readFileSync(join(analysisDir, file), 'utf-8'));
+        }
+      }
+    }
+
+    return parts.length > 0 ? parts.join('\n\n---\n\n') : null;
   }
 
   /**
@@ -180,13 +322,13 @@ export class AutoLearningService {
       sections.push(``);
     }
 
-    // Core prohibitions (always present)
+    // Core style contract (always present — positive framing only)
     sections.push(
-      `## ABSOLUTE PROHIBITIONS`,
-      `NEVER use filter words (felt, thought, noticed, realized, saw, looked at, stared, heard, remembered, imagined, assumed).`,
-      `NEVER name emotions directly — show them through physical/somatic markers only.`,
-      `NEVER attribute internal states to non-POV characters.`,
-      `NEVER summarize the meaning of a moment ("He had failed." / "It was over.").`,
+      `## PROSE STYLE CONTRACT`,
+      `Show internal conflict through physical sensation: jaw clenching, knuckles whitening, ribs throbbing, teeth grinding.`,
+      `Convey character emotions through somatic markers and environmental interaction only.`,
+      `Describe only what the POV character can directly observe about other characters — body language, tone, movement.`,
+      `End moments on concrete sensory detail, not thematic summary.`,
       ``,
     );
 
@@ -258,7 +400,17 @@ export class AutoLearningService {
       sections.push(``);
     }
 
-    // Sensory palette (default fallback)
+    // Sensory palette (from voice profile if available, otherwise default)
+    const vocabMatch = voiceProfile?.match(/## SIGNATURE WORDS[\s\S]*?(?=## |$)/i);
+    if (vocabMatch) {
+      const sensoryLines = vocabMatch[0].split('\n').filter(l => l.startsWith('- '));
+      if (sensoryLines.length > 0) {
+        sections.push(`## SENSORY PALETTE (from author profile)`);
+        for (const line of sensoryLines.slice(0, 5)) sections.push(line);
+        sections.push(``);
+      }
+    }
+
     sections.push(
       `## MANDATORY STYLE`,
       `Use somatic markers (teeth vibrating, jaw locking, white knuckles, ribs throbbing).`,
@@ -299,7 +451,9 @@ export class AutoLearningService {
 
       // 5. Mine pass-level summary directives as structured training records
       if (projectId) {
-        await this.minePassSummaryDirectives(projectId, passNumber);
+        // Fire-and-forget summary directive mining
+        // DISABLED: Generating unchecked training pairs from summaries.
+        // await this.minePassSummaryDirectives(projectId, passNumber);
       }
 
     } catch (err) {
@@ -316,7 +470,7 @@ export class AutoLearningService {
    */
   async recordPovScores(projectId: string, stepLabel: string, povCheckResult: string): Promise<void> {
     try {
-      const outputDir = (typeof projectId !== 'undefined' && projectId) ? join(this.workspaceDir, 'training', 'project-' + projectId) : join(this.workspaceDir, 'training');
+      const outputDir = this.trainingPoolDir(projectId);
       if (!existsSync(outputDir)) await mkdir(outputDir, { recursive: true });
 
       // Parse scores from the standard POV check markdown format
@@ -362,10 +516,11 @@ export class AutoLearningService {
 
       this.log.info('Score tracked', { project: projectId, pass: passNum, scene: sceneType, deepPov, verdict });
 
-      // Fire-and-forget violation mining — generates real training pairs from this check
-      this.mineViolationsFromPovCheck(projectId, stepLabel, sceneType, povCheckResult).catch(err =>
-        this.log.warn('Violation mining failed (non-fatal)', { error: (err as Error).message })
-      );
+      // Fire-and-forget violation mining - generates real training pairs from this check
+      // DISABLED: Zero-shot rewrites are generating toxic purple prose clichés.
+      // this.mineViolationsFromPovCheck(projectId, stepLabel, sceneType, povCheckResult).catch(err =>
+      //  this.log.warn('Violation mining failed (non-fatal)', { error: (err as Error).message })
+      // );
     } catch (err) {
       this.log.warn('Score tracking failed', { error: (err as Error).message });
     }
@@ -380,28 +535,35 @@ export class AutoLearningService {
     // ── 1. Extract all bad phrases from the structured sections ──────────────
     const badPhrases: { text: string; category: string }[] = [];
 
-    // A universal regex to match `- "phrase"` or `- *"phrase"*`
-    const phraseRe = /- \**"([^"]{10,300})"\**/g;
+    // A universal regex to match `- "phrase"` or `* "phrase"` or `* *"phrase"*`
+    const phraseRe = /[-*]\s*\**"([^"]{10,300})"\**/g;
     let m: RegExpExecArray | null;
 
     // Filter Words
-    const filterWordsRe = /\*\*Filter Words(?: Found)?\*\*:[\s\S]*?(?=\*\*[A-Z]|$)/i;
+    const filterWordsRe = /\**Filter Words(?: Found)?\**:[ \t]*[\s\S]*?(?=(?:\r?\n)[ \t]*[-*]*[ \t]*\**[A-Z]|$)/i;
     const filterWordsSection = povCheckResult.match(filterWordsRe)?.[0] || '';
     while ((m = phraseRe.exec(filterWordsSection)) !== null) {
       badPhrases.push({ text: m[1], category: 'filter_word' });
     }
 
     // Show vs Tell
-    const showTellRe = /\*\*Show vs Tell Violations\*\*:[\s\S]*?(?=\*\*[A-Z]|$)/i;
+    const showTellRe = /\**Show vs Tell Violations\**:[ \t]*[\s\S]*?(?=(?:\r?\n)[ \t]*[-*]*[ \t]*\**[A-Z]|$)/i;
     const showTellSection = povCheckResult.match(showTellRe)?.[0] || '';
     while ((m = phraseRe.exec(showTellSection)) !== null) {
       badPhrases.push({ text: m[1], category: 'show_vs_tell' });
     }
 
     // AI-Isms
-    const aiIsmSection = povCheckResult.match(/\*\*AI-Isms(?: Found)?\*\*:[\s\S]*?(?=\*\*[A-Z]|$)/i)?.[0] || '';
+    const aiIsmSection = povCheckResult.match(/\**AI-Isms(?: Found)?\**:[ \t]*[\s\S]*?(?=(?:\r?\n)[ \t]*[-*]*[ \t]*\**[A-Z]|$)/i)?.[0] || '';
     while ((m = phraseRe.exec(aiIsmSection)) !== null) {
       badPhrases.push({ text: m[1], category: 'ai_ism' });
+    }
+
+    // Language Violations
+    const languageRe = /\**Language Violations(?: Found)?\**:[ \t]*[\s\S]*?(?=(?:\r?\n)[ \t]*[-*]*[ \t]*\**[A-Z]|$)/i;
+    const languageSection = povCheckResult.match(languageRe)?.[0] || '';
+    while ((m = phraseRe.exec(languageSection)) !== null) {
+      badPhrases.push({ text: m[1], category: 'language_violation' });
     }
 
     if (badPhrases.length === 0 && !povCheckResult.includes('**Golden Sentences**')) {
@@ -422,25 +584,28 @@ export class AutoLearningService {
     }
 
     // ── 2. Call Librarian to generate corrections for Violations ──────────────
-    const LIBRARIAN_ENDPOINT = process.env.LIBRARIAN_ENDPOINT || 'http://ollama-embeddings:11434';
-    const LIBRARIAN_MODEL = 'gemma3:12b';
+    // Use the WRITER (5090 / Magnum 32B) to generate rewrites — NOT the Librarian.
+    // This ensures training data reflects the Writer's own voice at its best,
+    // not the Librarian's (Gemma 12B) limited vocabulary and style quirks.
+    const WRITER_ENDPOINT = process.env.OLLAMA_ENDPOINT || 'http://ollama:11434';
+    const WRITER_MODEL = process.env.WRITER_MODEL || 'hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M';
 
     for (const { text, category } of badPhrases) {
       try {
-        const response = await fetch(`${LIBRARIAN_ENDPOINT}/api/chat`, {
+        const response = await fetch(`${WRITER_ENDPOINT}/api/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: LIBRARIAN_MODEL,
+            model: WRITER_MODEL,
             stream: false,
             messages: [
               {
                 role: 'system',
-                content: 'You are a Deep POV prose editor. Rewrite the given sentence to eliminate filter words, cognitive telling, emotion-naming, and AI-isms. Show the internal experience through physical sensation, sound, and tactile detail only. Output ONLY the rewritten sentence — no explanation, no preamble.',
+                content: 'You are a RUTHLESS Deep POV prose editor producing LoRA training data. Every sentence you write will be permanently baked into a writing model. Quality is everything.\n\nRULES:\n- Always use THIRD PERSON (she/he/they). NEVER use first person (I/my/me). This is non-negotiable.\n- Show internal experience through physical sensation, sound, texture, temperature, and proprioception ONLY.\n- NEVER start with "A", "The", or a pronoun. Start with: a verb, a prepositional phrase, a body part, a sound, an action fragment, or sensory detail.\n- BANNED VERBS (overused by LLMs): bloomed, shuddered, tightened, hitched, vibrated, tremor, slithered, resonated, pulsed, thrummed, whispered, echoed, cascaded, seared, lanced.\n- BANNED PHRASES: "metallic tang", "copper taste", "soles of", "behind her eyes", "back of her throat", "breath hitched", "jaw clenched", "knuckles whitened", "low hum", "dull throb", "scent of".\n- USE INSTEAD: specific textures (grit, chalk, rust, wet wool), specific sounds (click, scrape, hiss, creak), specific body parts (wrist, collarbone, sternum, shin, nape), temperatures (cold seeped, heat pooled).\n- Each rewrite must use DIFFERENT physical details. Surprise me.\n- Output ONLY the rewritten prose. No explanation, no preamble, no commentary.',
               },
               {
                 role: 'user',
-                content: `Rewrite this in Deep POV:\n\n"${text}"`,
+                content: `Rewrite this in third-person Deep POV:\n\n"${text}"`,
               },
             ],
           }),
@@ -453,6 +618,10 @@ export class AutoLearningService {
         if (!correction || correction.length < 5) continue;
         // Skip if the model returned an explanation instead of just a rewrite
         if (correction.toLowerCase().startsWith('here') || correction.includes(':\n')) continue;
+        // Skip if the model asked for the text instead of rewriting
+        if (correction.toLowerCase().startsWith('please') || correction.toLowerCase().startsWith('okay')) continue;
+        // Skip if ANY first-person pronoun leaked through
+        if (/\b(my|I|me|mine|myself)\b/.test(correction)) continue;
 
         newPairs.push(this.buildTrainingRecord(text, correction, category));
         this.log.info('Violation mining: pair generated', { category, bad: text.slice(0, 60) });
@@ -464,7 +633,7 @@ export class AutoLearningService {
     if (newPairs.length === 0) return;
 
     // ── 3. Append to mined_pairs.jsonl ───────────────────────────────────────
-    const outputDir = (typeof projectId !== 'undefined' && projectId) ? join(this.workspaceDir, 'training', 'project-' + projectId) : join(this.workspaceDir, 'training');
+    const outputDir = this.trainingPoolDir(projectId);
     if (!existsSync(outputDir)) await mkdir(outputDir, { recursive: true });
 
     const minedPath = join(outputDir, 'mined_pairs.jsonl');
@@ -481,8 +650,9 @@ export class AutoLearningService {
    * long-form positive training example. Teaches the model scene-level structure
    * and pacing, not just sentence-level mechanics.
    */
-  async minePassedScene(projectId: string, sceneType: string, compiledText: string, verdict: string): Promise<void> {
-    if (verdict !== 'PASS') return;
+  async minePassedScene(projectId: string, sceneType: string, compiledText: string, verdict: string, deepPovScore?: number): Promise<void> {
+    // Accept PASS verdicts, or REVISE verdicts with a high Deep POV score (≥8)
+    if (verdict !== 'PASS' && !(verdict === 'REVISE' && deepPovScore && deepPovScore >= 8)) return;
     if (!compiledText || compiledText.length < 200) return;
 
     try {
@@ -504,7 +674,7 @@ export class AutoLearningService {
         metadata: { source: 'perry_calibration', category: 'full_scene_pass', sceneType },
       };
 
-      const outputDir = (typeof projectId !== 'undefined' && projectId) ? join(this.workspaceDir, 'training', 'project-' + projectId) : join(this.workspaceDir, 'training');
+      const outputDir = this.trainingPoolDir(projectId);
       if (!existsSync(outputDir)) await mkdir(outputDir, { recursive: true });
       const minedPath = join(outputDir, 'mined_pairs.jsonl');
       await appendFile(minedPath, JSON.stringify(record) + '\n', 'utf-8');
@@ -556,35 +726,35 @@ export class AutoLearningService {
 
       const newPairs: object[] = [];
 
-      // Convert each positive directive into a "what does good X look like?" pair
+      // Convert each positive directive into a prose demonstration pair
       for (const directive of positives) {
         const topic = directive.replace(/^DO:\s*/i, '').trim();
         newPairs.push({
           conversations: [
             { role: 'system', content: this.buildSystemPrompt(projectId) },
-            { role: 'user', content: `What is the correct Deep POV approach for: ${topic}?` },
-            { role: 'assistant', content: directive },
+            { role: 'user', content: `Write a robust, 50-word paragraph of Deep POV prose that demonstrates: ${topic}` },
+            { role: 'assistant', content: `[Demonstration of: ${directive}]` },
           ],
-          metadata: { source: 'perry_calibration', category: 'directive_positive', pass: passNumber },
+          metadata: { source: 'perry_calibration', category: 'directive_positive', pass: passNumber, needsLibrarianExpansion: true },
         });
       }
 
-      // Convert each negative directive into a "what should you avoid?" pair
+      // Convert each negative directive into a correction pair — show the fix, not the rule
       for (const directive of negatives) {
         const topic = directive.replace(/^AVOID:\s*/i, '').trim();
         newPairs.push({
           conversations: [
             { role: 'system', content: this.buildSystemPrompt(projectId) },
-            { role: 'user', content: `What prose patterns should be avoided in Deep POV writing?` },
-            { role: 'assistant', content: `AVOID: ${topic}` },
+            { role: 'user', content: `Rewrite this passage to fix: ${topic}` },
+            { role: 'assistant', content: `[Corrected prose avoiding: ${topic}]` },
           ],
-          metadata: { source: 'perry_calibration', category: 'directive_negative', pass: passNumber },
+          metadata: { source: 'perry_calibration', category: 'directive_negative', pass: passNumber, needsLibrarianExpansion: true },
         });
       }
 
       if (newPairs.length === 0) return;
 
-      const outputDir = (typeof projectId !== 'undefined' && projectId) ? join(this.workspaceDir, 'training', 'project-' + projectId) : join(this.workspaceDir, 'training');
+      const outputDir = this.trainingPoolDir(projectId);
       if (!existsSync(outputDir)) await mkdir(outputDir, { recursive: true });
       const minedPath = join(outputDir, 'mined_pairs.jsonl');
       const lines = newPairs.map(p => JSON.stringify(p)).join('\n') + '\n';
@@ -642,15 +812,289 @@ export class AutoLearningService {
     }
   }
 
-  // ─── JSONL Export ─────────────────────────────────────────────────────────
+  // ─── Librarian Quality Gate ─────────────────────────────────────────────
+
+  /**
+   * Fast local scan — catches obvious contamination without an LLM call.
+   * Returns a rejection reason string, or null if the text passes.
+   */
+  private fastQualityScan(text: string): string | null {
+    const lower = text.toLowerCase();
+
+    // 0. Meta-contamination — Librarian asked for text instead of writing prose
+    if (lower.startsWith('please provide') || lower.startsWith('please') || lower.startsWith('okay,') ||
+        lower.includes('just paste the') || lower.includes('i need the text') ||
+        lower.includes('i need the original') || lower.includes('i\'m ready to')) {
+      return 'meta_contamination';
+    }
+
+    // 0b. First-person POV leak — manuscript is third-person Deep POV
+    // Reject ANY first-person pronoun (my, I, me, mine, myself) — the model must learn third-person only
+    if (/\b(my|I|me|mine|myself)\b/.test(text)) {
+      return 'first_person_pov';
+    }
+
+    // 1. Filter words that should never appear in Deep POV prose
+    const FILTER_WORDS = [
+      'he felt', 'she felt', 'they felt',
+      'he noticed', 'she noticed',
+      'he realized', 'she realized',
+      'he thought', 'she thought',
+      'he saw', 'she saw',
+      'he heard', 'she heard',
+      'he looked', 'she looked',
+      'he stared', 'she stared',
+      'he wondered', 'she wondered',
+      'he remembered', 'she remembered',
+      'he imagined', 'she imagined',
+      'he assumed', 'she assumed',
+      'he decided', 'she decided',
+    ];
+
+    for (const fw of FILTER_WORDS) {
+      if (lower.includes(fw)) return `filter_word:${fw}`;
+    }
+
+    // 2. Named emotions as nouns (the model should show, not tell)
+    const EMOTION_NOUNS = [
+      'a wave of', 'a surge of', 'a pang of', 'a rush of', 'a flicker of',
+      'desperation', 'with panic', 'with fear', 'with anger', 'with grief',
+      'with relief', 'with terror', 'with dread',
+    ];
+
+    for (const en of EMOTION_NOUNS) {
+      if (lower.includes(en)) return `emotion_noun:${en}`;
+    }
+
+    // 3. Bracket annotations — prompt leakage into prose
+    if (/\[(?:narrator|technique|pov|word count|scene|note)/i.test(text)) {
+      return 'bracket_annotation';
+    }
+
+    // 4. Rule regurgitation — the model is quoting instructions instead of writing prose
+    if (lower.includes('never use') || lower.includes('do not use') || lower.includes('avoid using')) {
+      return 'rule_regurgitation';
+    }
+
+    // 5. Too short to be useful prose (less than 8 words)
+    const wordCount = text.split(/\s+/).length;
+    if (wordCount < 8 && !text.includes('"')) {
+      return `too_short:${wordCount}_words`;
+    }
+
+    // 6. Overused trigrams — prevents vocabulary collapse in training data
+    const OVERUSED_TRIGRAMS = [
+      'the soles of', 'the scent of', 'a low hum', 'behind my eyes',
+      'in my teeth', 'my breath hitched', 'against my skin', 'through the soles',
+      'a dull throb', 'a metallic tang', 'the back of', 'vibrated through my',
+    ];
+    for (const tri of OVERUSED_TRIGRAMS) {
+      if (lower.includes(tri)) return `overused_trigram:${tri}`;
+    }
+
+    return null;
+  }
+
+  /**
+   * Deep Librarian audit — sends the "good" text to gemma3:12b for quality scoring.
+   * Returns true if the pair passes, false if rejected.
+   * Only called on pairs that pass the fast scan but are from higher-risk sources.
+   */
+  private async librarianDeepAudit(goodText: string): Promise<{ pass: boolean; reason: string }> {
+    const LIBRARIAN_ENDPOINT = process.env.LIBRARIAN_ENDPOINT || 'http://ollama-embeddings:11434';
+    const LIBRARIAN_MODEL = 'gemma3:12b';
+
+    try {
+      const response = await fetch(`${LIBRARIAN_ENDPOINT}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: LIBRARIAN_MODEL,
+          stream: false,
+          messages: [
+            {
+              role: 'system',
+              content: `You are a BRUTALLY strict prose quality auditor for LoRA training data. This text will be used to fine-tune a writing model — any contamination will permanently damage the model. Be merciless.
+
+AUTOMATIC FAIL conditions:
+1. Filter words (felt, noticed, realized, thought, saw, heard, wondered, stared, seemed, knew, decided)
+2. Named emotions as nouns (fear, anger, grief, panic, desperation, relief, terror, dread, joy)
+3. POV leakage (attributing internal states to non-POV characters)
+4. AI-isms (Rule of Three, "a testament to", "tapestry", "palpable", "delve", "symphony", "cacophony", "labyrinth")
+5. Thematic summaries ("He had failed." / "It was over." / "Nothing would ever be the same.")
+6. First-person pronouns (I, my, me, mine) — the manuscript is THIRD PERSON only
+7. Meta-commentary ("Here is", "Please provide", "I'm ready to", "the passage")
+8. Clichéd somatic markers used as a crutch: "breath hitched", "jaw clenched", "knuckles whitened", "metallic tang", "copper taste" — only FAIL if 2+ of these appear in the SAME response
+9. Purple prose or melodrama ("bloomed across", "tendrils of", "shattered into a thousand")
+10. Starting with "A" followed by a generic noun ("A chill", "A tremor", "A shudder", "A prickle")
+
+Respond with EXACTLY one line:
+PASS - if the text is genuinely excellent, varied, third-person Deep POV prose
+FAIL:[reason] - if ANY violation is found. Name the specific issue.`,
+            },
+            {
+              role: 'user',
+              content: goodText,
+            },
+          ],
+        }),
+      });
+
+      if (!response.ok) return { pass: true, reason: 'librarian_unavailable' };
+      const data = await response.json() as any;
+      const verdict = data?.message?.content?.trim() || '';
+
+      if (verdict.startsWith('PASS')) {
+        return { pass: true, reason: 'librarian_approved' };
+      } else if (verdict.startsWith('FAIL')) {
+        return { pass: false, reason: verdict };
+      }
+
+      // Ambiguous response — let it through but flag
+      return { pass: true, reason: 'librarian_ambiguous' };
+    } catch {
+      // Librarian offline — don't block the pipeline
+      return { pass: true, reason: 'librarian_offline' };
+    }
+  }
+
+  /**
+   * Writer Quality Gate — sends the "good" text to the 5090 (Magnum 32B) for a
+   * second-pass quality check. Only pairs that pass BOTH the Librarian and the
+   * Writer get into the final training data. This ensures the 32B model's own
+   * quality standards are met, not just the 12B's.
+   */
+  private async writerDeepAudit(goodText: string): Promise<{ pass: boolean; reason: string }> {
+    const WRITER_ENDPOINT = process.env.OLLAMA_ENDPOINT || 'http://ollama:11434';
+    const WRITER_MODEL = process.env.WRITER_MODEL || 'hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M';
+
+    try {
+      const response = await fetch(`${WRITER_ENDPOINT}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: WRITER_MODEL,
+          stream: false,
+          messages: [
+            {
+              role: 'system',
+              content: `You are a merciless prose quality auditor for LoRA fine-tuning data. This text will be permanently embedded into a writing model. If you let bad prose through, the model will reproduce it forever.
+
+REJECT (output FAIL) if ANY of these are present:
+1. First person pronouns (I, my, me, mine) — manuscript is THIRD PERSON only
+2. Filter words (felt, noticed, realized, thought, saw, heard, seemed, knew, decided, wondered)
+3. Named emotions as nouns (fear, anger, grief, panic, desperation, terror, dread, relief)
+4. AI clichés: "metallic tang", "copper taste", "breath hitched", "jaw clenched", "knuckles whitened", "a testament to", "tapestry", "palpable", "delve"
+5. Repetitive sentence structure (3+ sentences with same grammatical pattern)
+6. Purple prose or melodrama ("bloomed", "tendrils", "shattered", "seared through")
+7. Meta-commentary ("here is", "please provide", "I need the text", "rewrite")
+8. Thematic summary statements ("Nothing would ever be the same", "It was over", "Everything had changed")
+9. Weak prose that would teach the model bad habits
+
+ACCEPT (output PASS) only if the text is genuinely excellent, varied, physically grounded third-person Deep POV prose that you would be proud to have a model learn from.
+
+Respond with EXACTLY one line:
+PASS - only if genuinely excellent
+FAIL:[specific reason] - if any issue found`,
+            },
+            {
+              role: 'user',
+              content: goodText,
+            },
+          ],
+        }),
+      });
+
+      if (!response.ok) return { pass: true, reason: 'writer_unavailable' };
+      const data = await response.json() as any;
+      const verdict = data?.message?.content?.trim() || '';
+
+      if (verdict.startsWith('PASS')) {
+        return { pass: true, reason: 'writer_approved' };
+      } else if (verdict.startsWith('FAIL')) {
+        return { pass: false, reason: verdict };
+      }
+
+      return { pass: true, reason: 'writer_ambiguous' };
+    } catch {
+      // Writer busy with pipeline — don't block
+      return { pass: true, reason: 'writer_offline' };
+    }
+  }
+
+
+  /**
+   * Expand placeholder directive pairs into real prose demonstrations.
+   * The directive mining step creates pairs like:
+   *   user: "Write a paragraph that demonstrates: X"
+   *   assistant: "[Demonstration of: DO: X]"
+   *
+   * This method replaces the placeholder with actual prose from the Librarian.
+   */
+  private async expandDirectivePair(record: any): Promise<any | null> {
+    const assistantContent = record?.conversations?.[2]?.content || '';
+    if (!assistantContent.startsWith('[')) return record; // Already expanded
+
+    const userContent = record?.conversations?.[1]?.content || '';
+    // Use the WRITER (5090) for directive expansion — it generates the training prose
+    const WRITER_ENDPOINT = process.env.OLLAMA_ENDPOINT || 'http://ollama:11434';
+    const WRITER_MODEL = process.env.WRITER_MODEL || 'hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M';
+
+    try {
+      const response = await fetch(`${WRITER_ENDPOINT}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: WRITER_MODEL,
+          stream: false,
+          messages: [
+            {
+              role: 'system',
+              content: record.conversations[0].content,
+            },
+            {
+              role: 'user',
+              content: userContent + '\n\nCRITICAL INSTRUCTION: Do NOT use repetitive LLM verbs like "bloomed", "shuddered", "slithered", or "resonated". You must use a massive variety of sharp, unique, and highly specific physical verbs.',
+            },
+          ],
+        }),
+      });
+
+      if (!response.ok) return null;
+      const data = await response.json() as any;
+      const prose = data?.message?.content?.trim();
+
+      if (!prose || prose.split(/\\s+/).length < 20) return null;
+      // Reject if the Librarian returned an explanation instead of prose
+      if (prose.toLowerCase().startsWith('here') || prose.includes(':\n-') || prose.includes('## ')) return null;
+      // Reject if the Librarian asked for input instead of writing
+      if (prose.toLowerCase().startsWith('please') || prose.toLowerCase().startsWith('okay')) return null;
+
+      // Replace the placeholder with actual prose
+      return {
+        ...record,
+        conversations: [
+          record.conversations[0],
+          record.conversations[1],
+          { role: 'assistant', content: prose },
+        ],
+        metadata: { ...record.metadata, expanded: true },
+      };
+    } catch {
+      return null; // Librarian offline — skip this pair
+    }
+  }
+
+  // ─── JSONL Export (with Librarian Quality Gate) ─────────────────────────
 
   private async exportTrainingData(projectId?: string): Promise<number> {
-    const outputDir = (typeof projectId !== 'undefined' && projectId) ? join(this.workspaceDir, 'training', 'project-' + projectId) : join(this.workspaceDir, 'training');
+    const outputDir = this.trainingPoolDir(projectId);
     if (!existsSync(outputDir)) {
       await mkdir(outputDir, { recursive: true });
     }
 
-    const records: object[] = [];
+    const candidateRecords: any[] = [];
+    const auditStats = { total: 0, fastReject: 0, librarianReject: 0, writerReject: 0, expanded: 0, passed: 0, reasons: new Map<string, number>() };
 
     // NOTE: Baseline pairs intentionally excluded.
     // Each pen name's LoRA must train exclusively on pairs discovered by its own
@@ -661,7 +1105,7 @@ export class AutoLearningService {
     const learnedPairs = this.styleDna.getGlobalRules().showVsTellExamples || [];
     for (const pair of learnedPairs) {
       if (pair.bad && pair.good) {
-        records.push(this.buildTrainingRecord(pair.bad, pair.good, 'learned'));
+        candidateRecords.push(this.buildTrainingRecord(pair.bad, pair.good, 'learned'));
       }
     }
 
@@ -678,34 +1122,138 @@ export class AutoLearningService {
           // Extract the actual bad phrase — it's after the preamble in the user message
           const userContent = record?.conversations?.[1]?.content || '';
           // The bad text is the quoted phrase after the last newline: "bad text here"
-          const badMatch = userContent.match(/"([^"]+)"$/);
-          const badText = badMatch ? badMatch[1] : userContent.slice(-80);
+          let badText = '';
+          if (record?.metadata?.category === 'full_scene_pass') {
+            // For full scenes, the user prompt is identical. Deduplicate based on the assistant's output instead.
+            badText = (record?.conversations?.[2]?.content || '').slice(0, 80);
+          } else {
+            const badMatch = userContent.match(/"([^"]+)"$/);
+            badText = badMatch ? badMatch[1] : userContent.slice(-80);
+          }
           if (badText && !seenBad.has(badText)) {
             seenBad.add(badText);
-            records.push(record);
+            candidateRecords.push(record);
           }
         } catch { /* skip malformed lines */ }
       }
     }
 
-    const jsonl = records.map(r => JSON.stringify(r)).join('\n');
+    // ── Quality Gate Pipeline ──────────────────────────────────────────────
+    const verifiedRecords: object[] = [];
+
+    for (const record of candidateRecords) {
+      auditStats.total++;
+
+      const assistantContent = record?.conversations?.[2]?.content || '';
+
+      // Phase 1: Expand placeholder directive pairs via Librarian
+      if (record?.metadata?.needsLibrarianExpansion && assistantContent.startsWith('[')) {
+        const expanded = await this.expandDirectivePair(record);
+        if (!expanded) {
+          auditStats.fastReject++;
+          this.trackRejection(auditStats.reasons, 'expansion_failed');
+          continue;
+        }
+        record.conversations = expanded.conversations;
+        record.metadata = expanded.metadata;
+        auditStats.expanded++;
+      }
+
+      const goodText = record?.conversations?.[2]?.content || '';
+      const category = record?.metadata?.category || '';
+
+      // Phase 2: Fast local scan (no LLM call — instant)
+      // Bypass fast scan for full_scene_pass since a single minor filter word shouldn't ruin an entire 800-word scene
+      if (category !== 'full_scene_pass') {
+        const fastResult = this.fastQualityScan(goodText);
+        if (fastResult) {
+          auditStats.fastReject++;
+          this.trackRejection(auditStats.reasons, fastResult);
+          this.log.debug('Quality gate: fast reject', { reason: fastResult, text: goodText.slice(0, 60) });
+          continue;
+        }
+      }
+
+      // Phase 3: Librarian deep audit (BYPASSED)
+      // The 12B model hallucinated failures on good 32B prose. Relying solely on the 32B Writer Deep Audit.
+      const needsDeepAudit = ['filter_word', 'show_vs_tell', 'ai_ism', 'learned', 'directive_positive', 'directive_negative'].includes(category);
+
+      /* BYPASS LIBRARIAN 12B AUDIT
+      if (needsDeepAudit) {
+        const auditResult = await this.librarianDeepAudit(goodText);
+        if (!auditResult.pass) {
+          auditStats.librarianReject++;
+          this.trackRejection(auditStats.reasons, auditResult.reason);
+          this.log.info('Quality gate: Librarian reject', { reason: auditResult.reason, text: goodText.slice(0, 60) });
+          continue;
+        }
+      }
+      */
+
+      // Phase 4: Writer (5090) deep audit — final quality gate
+      // The 32B model's own standards must be met, not just the 12B's
+      if (needsDeepAudit) {
+        const writerResult = await this.writerDeepAudit(goodText);
+        if (!writerResult.pass) {
+          auditStats.writerReject++;
+          this.trackRejection(auditStats.reasons, `writer:${writerResult.reason}`);
+          this.log.info('Quality gate: Writer (5090) reject', { reason: writerResult.reason, text: goodText.slice(0, 60) });
+          continue;
+        }
+      }
+
+      // Passed ALL gates (fast scan + Librarian + Writer)
+      auditStats.passed++;
+      verifiedRecords.push(record);
+    }
+
+    this.log.info('Quality gate complete', {
+      total: auditStats.total,
+      passed: auditStats.passed,
+      fastReject: auditStats.fastReject,
+      librarianReject: auditStats.librarianReject,
+      writerReject: auditStats.writerReject,
+      expanded: auditStats.expanded,
+      passRate: auditStats.total > 0 ? `${Math.round((auditStats.passed / auditStats.total) * 100)}%` : 'N/A',
+    });
+
+    const jsonl = verifiedRecords.map(r => JSON.stringify(r)).join('\n');
     const outputPath = join(outputDir, 'training_data.jsonl');
     await writeFile(outputPath, jsonl, 'utf-8');
 
-    // Also write a human-readable summary
+    // Write enriched summary with audit stats
     const summaryPath = join(outputDir, 'training_summary.md');
+    const topRejects = [...auditStats.reasons.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([reason, count]) => `  - \`${reason}\`: ${count} rejected`)
+      .join('\n');
+
     await writeFile(summaryPath, [
       `# Perry LoRA Training Data`,
       ``,
       `Generated: ${new Date().toISOString()}`,
-      `Total verified pairs: ${records.length}`,
+      ``,
+      `## Quality Gate Results`,
+      `- **Candidates examined**: ${auditStats.total}`,
+      `- **Fast scan rejected**: ${auditStats.fastReject} (filter words, emotion nouns, bracket annotations, rule regurgitation)`,
+      `- **Librarian rejected**: ${auditStats.librarianReject} (deep POV audit failures)
+- **Writer (5090) rejected**: ${auditStats.writerReject} (final quality gate)`,
+      `- **Directives expanded**: ${auditStats.expanded} (placeholder → real prose via Librarian)`,
+      `- **Verified pairs**: ${auditStats.passed}`,
+      `- **Pass rate**: ${auditStats.total > 0 ? Math.round((auditStats.passed / auditStats.total) * 100) : 0}%`,
+      ``,
+      `### Top Rejection Reasons`,
+      topRejects || '  (none)',
+      ``,
+      `## Data Sources`,
       `  - Learned from calibration (DNA): ${learnedPairs.filter(p => p.bad && p.good).length}`,
-      `  - Mined from POV check violations: ${records.length - learnedPairs.filter(p => p.bad && p.good).length}`,
+      `  - Mined from POV check violations: ${candidateRecords.length - learnedPairs.filter(p => p.bad && p.good).length}`,
       ``,
       `## Fine-tune status`,
-      records.length >= FINETUNE_THRESHOLD
-        ? `✅ READY — ${records.length} pairs meets the ${FINETUNE_THRESHOLD} minimum threshold for LoRA fine-tuning.`
-        : `⏳ ACCUMULATING — ${records.length}/${FINETUNE_THRESHOLD} pairs. Continue running calibration passes.`,
+      verifiedRecords.length >= FINETUNE_THRESHOLD
+        ? `✅ READY — ${verifiedRecords.length} verified pairs meets the ${FINETUNE_THRESHOLD} minimum threshold for LoRA fine-tuning.`
+        : `⏳ ACCUMULATING — ${verifiedRecords.length}/${FINETUNE_THRESHOLD} verified pairs. Continue running calibration passes.`,
       ``,
       `## To run LoRA fine-tuning`,
       `\`\`\`bash`,
@@ -713,7 +1261,18 @@ export class AutoLearningService {
       `\`\`\``,
     ].join('\n'), 'utf-8');
 
-    return records.length;
+    // Write rejected pairs log for debugging
+    const rejectLogPath = join(outputDir, 'rejected_pairs.log');
+    const rejectSummary = [...auditStats.reasons.entries()]
+      .map(([reason, count]) => `${reason}: ${count}`)
+      .join('\n');
+    await writeFile(rejectLogPath, `# Rejected pairs log — ${new Date().toISOString()}\n\n${rejectSummary}\n`, 'utf-8');
+
+    return verifiedRecords.length;
+  }
+
+  private trackRejection(reasons: Map<string, number>, reason: string): void {
+    reasons.set(reason, (reasons.get(reason) || 0) + 1);
   }
 
   private buildTrainingRecord(bad: string, good: string, category: string, projectId?: string): object {
@@ -726,7 +1285,7 @@ export class AutoLearningService {
           role: 'user',
           content: isGolden
             ? `Write a highly effective, physically grounded Deep POV sentence.`
-            : `Rewrite this sentence to eliminate filter words, cognitive telling, and AI-isms. Output ONLY the corrected version:\n\n"${bad}"`,
+            : `Rewrite this sentence to eliminate filter words, cognitive telling, and AI-isms. Output ONLY the corrected version. CRITICAL: Do NOT use repetitive LLM verbs like "bloomed", "shuddered", "slithered", or "resonated". Use sharp, varied physical verbs:\n\n"${bad}"`,
         },
         { role: 'assistant', content: good },
       ],
@@ -791,11 +1350,11 @@ export class AutoLearningService {
     }
 
     modelfileContent.push(
-      `## ABSOLUTE PROHIBITIONS`,
-      `NEVER use filter words: felt, thought, noticed, realized, saw, looked at, stared, heard, remembered, imagined, assumed, believed, decided, seemed, wondered`,
-      `NEVER name emotions directly (desperation, panic, fear, anger, grief, relief, terror).`,
-      `NEVER attribute internal states to non-POV characters.`,
-      `NEVER summarize the meaning of a moment ("He had failed." / "It was over.").`,
+      `## PROSE STYLE CONTRACT`,
+      `Show internal conflict through physical sensation: jaw clenching, knuckles whitening, ribs throbbing, teeth grinding.`,
+      `Convey character emotions through somatic markers and environmental interaction only.`,
+      `Describe only what the POV character can directly observe about other characters.`,
+      `End moments on concrete sensory detail, not thematic summary.`,
       ``,
       ...(negDirectives.length > 0 ? [
         `## LEARNED AVOIDANCES (from calibration)`,
@@ -808,7 +1367,6 @@ export class AutoLearningService {
         ``,
       ] : []),
       `## MANDATORY STYLE`,
-      `Sensory palette: ionized ozone, linseed oil, oxidized iron, sulfur, graphite grit, wet copper, cold steel`,
       `Somatic markers: teeth vibrating, white knuckles locking, ribs throbbing, jaw tightening, sweat at hairline`,
       `Sentence rhythm: short punchy sentences (5-12 words) in action; longer in introspection.`,
       ``,
@@ -846,7 +1404,7 @@ export class AutoLearningService {
   // ─── Fine-tune Flag ──────────────────────────────────────────────────────
 
   private async writeFinetuneFlag(pairCount: number, projectId?: string): Promise<void> {
-    const outputDir = (typeof projectId !== 'undefined' && projectId) ? join(this.workspaceDir, 'training', 'project-' + projectId) : join(this.workspaceDir, 'training');
+    const outputDir = this.trainingPoolDir(projectId);
     const flagPath = join(outputDir, 'READY_TO_FINETUNE.flag');
     const sentinelPath = join(outputDir, '.last_finetune_threshold');
 

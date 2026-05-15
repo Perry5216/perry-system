@@ -57,6 +57,7 @@ export interface ProjectContext {
   planning?: string;
   config?: Record<string, unknown>;
   penName?: string;
+  penNameSlug?: string;
   coverVariants?: number;
   coverFont?: string;
   brandColor?: string;

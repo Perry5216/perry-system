@@ -679,6 +679,13 @@ export class ProjectEngine {
    * Execute the next pending step in a project.
    */
   async executeNextStep(projectId: string): Promise<string | null> {
+    // 🔒 Per-project lock: wait for any in-flight execution to fully drain 🔒
+    const existingLock = this.executingProjects.get(projectId);
+    if (existingLock) {
+      this.log.info('Waiting for previous execution loop to drain before single step', { projectId });
+      await existingLock.promise;
+    }
+
     const project = this.stateStore.get(projectId);
     if (!project) throw new Error(`Project not found: ${projectId}`);
 
@@ -688,7 +695,17 @@ export class ProjectEngine {
       return null;
     }
 
-    return await this.stepRunner.execute(project, step);
+    // Create a new lock for this execution
+    let lockResolve!: () => void;
+    const lockPromise = new Promise<void>(r => { lockResolve = r; });
+    this.executingProjects.set(projectId, { resolve: lockResolve, promise: lockPromise });
+
+    try {
+      return await this.stepRunner.execute(project, step);
+    } finally {
+      this.executingProjects.delete(projectId);
+      lockResolve();
+    }
   }
 
   /**

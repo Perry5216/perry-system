@@ -24,6 +24,13 @@ export class ProseSanitizer {
     // Strip <pre_flight>...</pre_flight> Chain of Thought blocks used to enforce negative constraints.
     clean = clean.replace(/<pre_flight>[\s\S]*?<\/pre_flight>/gi, '');
 
+    // Strip Markdown code blocks (```...```) - manuscript prose should never have code blocks.
+    // This catches fake [WARNING: PROSE STYLE CONTRACT VIOLATION DETECTED] linter blocks.
+    clean = clean.replace(/```[\s\S]*?```/gi, '');
+
+    // Strip [WARNING: ...] style linter blocks that might appear without markdown code blocks.
+    clean = clean.replace(/\[WARNING:[\s\S]*?(?:CORRECTION REQUIRED.*|\]\n+)/gi, '');
+
     // Fix 4: Replace ALL common Markdown scene-break forms (including ---) with ⁂.
     // Previously --- fell through to the meta-pattern stripper and was deleted entirely.
     // Now all scene break variants are normalised here first.
@@ -67,15 +74,33 @@ export class ProseSanitizer {
     clean = clean.replace(/\s*\(Continued\)/gi, '');
 
     // Aggressive strip for conversational filler
-    clean = clean.replace(/^(Okay,? )?(Here is|Here's) the revised.*$/gim, '');
+    clean = clean.replace(/^(Okay,? )?(Here is|Here's|Below is)[^:\n]{0,100}:?\s*$/gim, '');
+    clean = clean.replace(/^\s*\([^)]*word limit[^)]*\)\s*$/gim, '');
     clean = clean.replace(/^I believe this revision aligns.*$/gim, '');
     clean = clean.replace(/^Let me know if you('d| would) like any further refinements!*.*$/gim, '');
+    
+    // Strip audit rejection preamble block (including list of intentions)
+    clean = clean.replace(/^(#+\s*)?RESPONSE TO AUDIT REJECTION[\s\S]*?(Here is a rewrite|Here is the rewrite).*?:?\n+/gi, '');
+    
+    // Strip conversational postambles
+    clean = clean.replace(/^Please let me know if this revision addresses.*$/gim, '');
+    clean = clean.replace(/^I('m| am) committed to improving my writing.*$/gim, '');
+
+    // Strip hallucinated placeholder tags like <AWAITING PROSE>
+    clean = clean.replace(/<AWAITING PROSE>/gim, '');
 
     // If the LLM still outputs revision notes (usually at the end), strip them and everything after
-    const revNotesMatch = clean.match(/^(?:#+\s*)?Revision Notes/im);
+    const revNotesMatch = clean.match(/^(?:#+\s*)?(?:Revision Notes|Possible Edits)/im);
     if (revNotesMatch && revNotesMatch.index !== undefined) {
       clean = clean.substring(0, revNotesMatch.index);
     }
+
+    // Strip non-English characters (CJK, Cyrillic, Arabic, etc.)
+    // Preserves: ASCII, Latin Extended (accents é, ñ, etc.), common punctuation, em-dashes, curly quotes
+    clean = clean.replace(/[\u3000-\u9FFF\uF900-\uFAFF\u2E80-\u2FFF\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/g, '');
+
+    // Clean up any double-spaces or orphaned punctuation left after stripping
+    clean = clean.replace(/  +/g, ' ');
 
     // Collapse excessive blank lines (more than 2) into exactly 2
     clean = clean.replace(/\n{4,}/g, '\n\n\n');

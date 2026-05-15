@@ -109,7 +109,7 @@ export class AIRouter {
 
     // ── Ollama (FREE - Local) ──
     const ollamaEndpoint = this.config.get<string>('ai.ollama.endpoint', 'http://localhost:11434');
-    const ollamaModel = this.config.get<string>('ai.ollama.model', 'gemma3:27b');
+    const ollamaModel = this.config.get<string>('ai.ollama.model', 'qwen3.6:27b');
     const ollamaContextWindow = this.config.get<number>('ai.ollama.contextWindow', 65536);
     const ollamaTemperature   = this.config.get<number>('ai.ollama.temperature', 0.85);
     const ollamaTopP          = this.config.get<number>('ai.ollama.topP', 0.9);

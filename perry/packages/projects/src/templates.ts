@@ -935,7 +935,7 @@ export function generateCalibrationPassSteps(
     `## 3. Plot Thread Tracking\n` +
     `- Which plot threads from the Chapter Outline were advanced in this chapter?\n` +
     `- Which B-story or C-story threads were woven in?\n` +
-    `- Were any threads that SHOULD have been addressed (per the outline) completely ignored?\n\n` +
+    `- Were any threads that SHOULD have been addressed (in this chapter) completely ignored?\n\n` +
     `## 4. Chapter Hook\n` +
     `- Does the chapter end on a genuine cliffhanger, revelation, or tension point?\n` +
     `- Would a reader feel compelled to turn the page, or does it fizzle?\n\n` +
@@ -953,7 +953,8 @@ export function generateCalibrationPassSteps(
     `- Identify cliché similes ("heart hammering like a trapped bird").\n` +
     `- Identify Nominalization (excessive use of -tion, -ment, -ness words instead of active verbs).\n` +
     `- Identify Present Participle overuse (starting multiple sentences with -ing clauses).\n` +
-    `- Identify Adjective Stacking (e.g., "the dark, oppressive, shimmering room").\n\n` +
+    `- Identify Adjective Stacking (e.g., "the dark, oppressive, shimmering room").\n` +
+    `- Identify Structural AI-Isms like numbered lists, bullet points, <AWAITING PROSE> tags, or meta-commentary in the prose (These MUST trigger a REWRITE).\n\n` +
     `OUTPUT FORMAT (you MUST follow this exactly):\n` +
     `- **POV Character**: [name]\n` +
     `- **Outline Match**: YES/NO\n` +

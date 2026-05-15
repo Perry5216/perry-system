@@ -1,3 +1,5 @@
+name: perry-system
+
 services:
   ollama:
     image: ollama/ollama:latest
@@ -18,14 +20,12 @@ services:
     runtime: nvidia
     restart: unless-stopped
     volumes:
-      - ollama_data:/root/.ollama
+      - ./data/ollama:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 3
-    networks:
-      - n8n-net
 
   ollama-embeddings:
     image: ollama/ollama:latest
@@ -47,14 +47,12 @@ services:
     runtime: nvidia
     restart: unless-stopped
     volumes:
-      - ollama_embeddings_data:/root/.ollama
+      - ./data/ollama-embeddings:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 3
-    networks:
-      - n8n-net
 
   comfyui:
     image: yanwk/comfyui-boot:cu128-slim
@@ -63,9 +61,9 @@ services:
     ports:
       - "8188:8188"
     volumes:
-      - comfyui_models:/root/ComfyUI/models
-      - comfyui_output:/root/ComfyUI/output
-      - comfyui_custom_nodes:/root/ComfyUI/custom_nodes
+      - ./data/comfyui/models:/root/ComfyUI/models
+      - ./perry/workspace/comfyui-output:/root/ComfyUI/output
+      - ./data/comfyui/custom_nodes:/root/ComfyUI/custom_nodes
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CLI_ARGS=--listen 0.0.0.0 --port 8188 --highvram
@@ -83,8 +81,6 @@ services:
       timeout: 15s
       retries: 5
       start_period: 120s
-    networks:
-      - n8n-net
 
   perry:
     build:
@@ -97,7 +93,6 @@ services:
     volumes:
       - ./perry/workspace:/app/workspace
       - ./perry/config:/app/config
-      - comfyui_output:/app/workspace/comfyui-output:ro
     environment:
       - NODE_ENV=production
       - OLLAMA_BASE_URL=http://ollama:11434
@@ -112,23 +107,26 @@ services:
         condition: service_healthy
       comfyui:
         condition: service_healthy
-    networks:
-      - n8n-net
 
-volumes:
-  ollama_data:
-    driver: local
-  ollama_embeddings_data:
-    driver: local
-  perry_vault:
-    driver: local
-  comfyui_models:
-    driver: local
-  comfyui_output:
-    driver: local
-  comfyui_custom_nodes:
-    driver: local
-
-networks:
-  n8n-net:
-    driver: bridge
+  perry-trainer:
+    build:
+      context: ./perry/trainer
+      dockerfile: Dockerfile
+    container_name: perry-trainer
+    restart: unless-stopped
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_HOME=/trainer/hf_cache
+      - OLLAMA_ENDPOINT=http://ollama:11434
+    volumes:
+      - ./perry/workspace:/workspace
+      - ./data/trainer_cache:/trainer/hf_cache
+      - ./data/ollama:/ollama_storage
+      - ./perry/config:/config
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
