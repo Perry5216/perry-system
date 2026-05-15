@@ -10,6 +10,19 @@ n8nac-config.json
 qdrant_storage/
 postgres_data/
 
+# Docker bind-mount volumes (ollama, comfyui, trainer hf cache)
+data/
+
+# Claude Code harness metadata
+.claude/
+
+# Runtime dumps and ad-hoc prompt files
+projects.json
+project-*-data.json
+step*-prompt.txt
+perry/tmp_logs.txt
+perry/config/user.json.bak-*
+
 # Local logs and temporary files
 perry_logs.txt
 telemetry.txt
