@@ -396,99 +396,6 @@ export class StyleDnaService {
   // ── Query API ──────────────────────────────────────────
 
   /**
-   * @deprecated Use `compileSeed()` instead. This method generates ~4,000 tokens
-   * which overflows the Writer's context budget. Retained for potential dashboard/API use.
-   *
-   * Get the effective Style DNA for a specific chapter and POV character.
-   * Returns a formatted string ready for prompt injection.
-   */
-  getForChapter(projectId: string, chapterNum: number, povCharacter?: string): string {
-    const sections: string[] = [];
-    const global = this.dna.globalRules;
-    const project = this.dna.projectOverrides[projectId];
-
-    // 1. Filter words — merge global + project-specific, subtract exceptions
-    const banned = new Set(global.bannedFilterWords);
-    if (project?.additionalBans) {
-      for (const w of project.additionalBans) banned.add(w);
-    }
-    if (project?.allowedExceptions) {
-      for (const w of project.allowedExceptions) banned.delete(w);
-    }
-
-    if (banned.size > 0) {
-      sections.push(
-        `## BANNED FILTER WORDS (CRITICAL)\nNEVER use these words in narrative prose. Show the sensation or thought directly instead.\n` +
-        `Banned: ${[...banned].map(w => `"${w}"`).join(', ')}`
-      );
-    }
-
-    // 2. Show-vs-tell examples (most recent 10)
-    const examples = global.showVsTellExamples.slice(-10);
-    if (examples.length > 0) {
-      const formatted = examples.map(e =>
-        e.good ? `- ❌ "${e.bad}" → ✅ "${e.good}"` : `- ❌ Avoid: "${e.bad}"`
-      ).join('\n');
-      sections.push(`## SHOW VS TELL\nConvert telling to showing. Known violations:\n${formatted}`);
-    }
-
-    // 3. Forbidden names
-    const names = global.forbiddenNames || [];
-    if (names.length > 0) {
-      sections.push(
-        `## FORBIDDEN CHARACTER NAMES (CRITICAL)\nThese names are overused by AI and will immediately flag the text as machine-generated. NEVER use any of these names for any character, alias, or reference:\n` +
-        `Forbidden: ${names.map(n => `"${n}"`).join(', ')}`
-      );
-    }
-
-    // 4. Trope warnings
-    const tropeWarnings = global.tropeWarnings;
-    if (tropeWarnings.length > 0) {
-      sections.push(
-        `## TROPE WARNINGS\nSubvert or add a fresh twist instead of executing literally:\n` +
-        tropeWarnings.map(t => `- ${t}`).join('\n')
-      );
-    }
-
-    // 4. Project style profile
-    if (project?.styleProfile) {
-      const sp = project.styleProfile;
-      const traits: string[] = [];
-      if (sp.sentenceLength) traits.push(`Sentence length: ${sp.sentenceLength}`);
-      if (sp.dialogueRatio) traits.push(`Dialogue ratio: ${sp.dialogueRatio}`);
-      if (sp.vocabulary) traits.push(`Vocabulary level: ${sp.vocabulary}`);
-      if (sp.learnedPatterns.length > 0) {
-        traits.push('Learned style patterns:');
-        for (const p of sp.learnedPatterns) traits.push(`  - ${p}`);
-      }
-      if (traits.length > 0) {
-        sections.push(`## PROJECT STYLE PROFILE\n${traits.join('\n')}`);
-      }
-    }
-
-    // 5. Character voice DNA (only for the current POV character)
-    if (povCharacter) {
-      const voices = this.dna.characterVoices[projectId];
-      const voice = voices?.[povCharacter];
-      if (voice) {
-        const traits: string[] = [`## CHARACTER VOICE: ${povCharacter.toUpperCase()}`];
-        if (voice.speechPattern) traits.push(`Speech: ${voice.speechPattern}`);
-        if (voice.internalVoice) traits.push(`Internal monologue: ${voice.internalVoice}`);
-        if (voice.bannedInPOV.length > 0) {
-          traits.push(`BANNED in this character's POV: ${voice.bannedInPOV.map(w => `"${w}"`).join(', ')}`);
-        }
-        if (voice.signature.length > 0) {
-          traits.push(`Signature patterns:\n${voice.signature.map(s => `  - ${s}`).join('\n')}`);
-        }
-        sections.push(traits.join('\n'));
-      }
-    }
-
-    if (sections.length === 0) return '';
-    return sections.join('\n\n---\n\n');
-  }
-
-  /**
    * Compile a compact "seed" version of the DNA for system prompt injection.
    * Instead of dumping the full ~4,000 token DNA into the user message,
    * this produces ~300 tokens for the system prompt.
@@ -895,6 +802,69 @@ export class StyleDnaService {
   }
 
   /**
+   * Post-write lint: scan prose for violations of the global DNA ban lists
+   * and return a structured list of matches. Used by step-runner after a
+   * writer-routed step completes so the async-quality-audit worker can flag
+   * stylistic concerns WITHOUT us having to inject the ban lists into the
+   * writer's prompt (the LoRA already encodes them).
+   *
+   * Returns matches grouped by category. Filter words are matched as whole
+   * words (word boundary); phrases are substring (case-insensitive). Each
+   * match carries the offending text + a small surrounding snippet so the
+   * dashboard / worker can show context. Capped at 50 matches per category
+   * to keep audit payloads bounded.
+   */
+  public lintProse(text: string, opts: { maxMatchesPerCategory?: number } = {}): {
+    filterWords: Array<{ word: string; count: number; snippet: string }>;
+    phrases: Array<{ phrase: string; count: number; snippet: string }>;
+    totalMatches: number;
+  } {
+    const max = opts.maxMatchesPerCategory ?? 50;
+    const rules = this.dna.globalRules;
+    const filterWords: Array<{ word: string; count: number; snippet: string }> = [];
+    const phrases: Array<{ phrase: string; count: number; snippet: string }> = [];
+
+    const snippetAround = (idx: number, len: number): string => {
+      const start = Math.max(0, idx - 40);
+      const end = Math.min(text.length, idx + len + 40);
+      return (start > 0 ? '…' : '') + text.slice(start, end).replace(/\s+/g, ' ').trim() + (end < text.length ? '…' : '');
+    };
+
+    for (const word of rules.bannedFilterWords || []) {
+      if (!word) continue;
+      const re = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+      const matches = [...text.matchAll(re)];
+      if (matches.length > 0 && filterWords.length < max) {
+        filterWords.push({ word, count: matches.length, snippet: snippetAround(matches[0].index ?? 0, word.length) });
+      }
+    }
+    for (const phrase of rules.bannedPhrases || []) {
+      if (!phrase) continue;
+      const lower = text.toLowerCase();
+      const target = phrase.toLowerCase();
+      let count = 0;
+      let firstIdx = -1;
+      let from = 0;
+      while (true) {
+        const idx = lower.indexOf(target, from);
+        if (idx === -1) break;
+        if (count === 0) firstIdx = idx;
+        count++;
+        from = idx + target.length;
+      }
+      if (count > 0 && phrases.length < max) {
+        phrases.push({ phrase, count, snippet: snippetAround(firstIdx, phrase.length) });
+      }
+    }
+
+    return {
+      filterWords,
+      phrases,
+      totalMatches: filterWords.reduce((s, m) => s + m.count, 0) + phrases.reduce((s, m) => s + m.count, 0),
+    };
+  }
+
+  /**
    * Apply a raw list of DO/AVOID improvement directives to the global DNA.
    * This is used by the Style Calibration pipeline to automatically upgrade
    * the global rules at the end of a run.
@@ -969,93 +939,6 @@ export class StyleDnaService {
       this.save();
       this.log.info('Auto-banned repeated AI-ism phrases', { count: added, total: this.dna.globalRules.bannedPhrases.length });
     }
-  }
-
-  /**
-   * Learn from a successful chapter (score >= 8 on all gates).
-   * Extracts positive style patterns and character voice data.
-   *
-   * @param analysisText — The Librarian's style analysis of the chapter
-   */
-  learnFromSuccess(
-    projectId: string,
-    povCharacter: string,
-    analysisText: string,
-  ): void {
-    if (!analysisText || analysisText.length < 50) return;
-
-    // Ensure project override exists
-    if (!this.dna.projectOverrides[projectId]) {
-      this.dna.projectOverrides[projectId] = {
-        allowedExceptions: [],
-        additionalBans: [],
-        styleProfile: { learnedPatterns: [] },
-        proseMetricsTrends: [],
-      };
-    }
-
-    // Extract patterns from analysis
-    const patterns = analysisText.split('\n')
-      .map(l => l.replace(/^[-*]\s*/, '').trim())
-      .filter(l => l.length > 15 && l.length < 200);
-
-    const profile = this.dna.projectOverrides[projectId].styleProfile;
-
-    // Extract sentence length
-    const sentenceMatch = analysisText.match(/sentence\s+length[:\s]*(short|medium|long|varied)/i);
-    if (sentenceMatch) profile.sentenceLength = sentenceMatch[1].toLowerCase() as any;
-
-    // Extract dialogue ratio
-    const dialogueMatch = analysisText.match(/dialogue[:\s-]*(low|medium|high)/i);
-    if (dialogueMatch) profile.dialogueRatio = dialogueMatch[1].toLowerCase() as any;
-
-    // Extract vocabulary
-    const vocabMatch = analysisText.match(/vocabulary[:\s]*(simple|moderate|literary)/i);
-    if (vocabMatch) profile.vocabulary = vocabMatch[1].toLowerCase() as any;
-
-    // Add unique patterns
-    for (const p of patterns) {
-      if (!profile.learnedPatterns.includes(p)) {
-        profile.learnedPatterns.push(p);
-      }
-    }
-    // Cap growth
-    if (profile.learnedPatterns.length > MAX_PATTERNS_PER_CHARACTER) {
-      profile.learnedPatterns = profile.learnedPatterns.slice(-MAX_PATTERNS_PER_CHARACTER);
-    }
-
-    // Character voice extraction
-    this.ensureCharacterVoice(projectId, povCharacter);
-    const voice = this.dna.characterVoices[projectId][povCharacter];
-
-    const speechMatch = analysisText.match(/speech\s+pattern[:\s]*([^\n]+)/i);
-    if (speechMatch) voice.speechPattern = speechMatch[1].trim();
-
-    const internalMatch = analysisText.match(/internal\s+(?:monologue|voice)[:\s]*([^\n]+)/i);
-    if (internalMatch) voice.internalVoice = internalMatch[1].trim();
-
-    // Extract signature patterns
-    const sigMatches = analysisText.matchAll(/(?:signature|distinctive|characteristic)[:\s]*([^\n]+)/gi);
-    for (const m of sigMatches) {
-      const sig = m[1].trim();
-      if (sig.length > 10 && !voice.signature.includes(sig)) {
-        voice.signature.push(sig);
-      }
-    }
-    if (voice.signature.length > 10) {
-      voice.signature = voice.signature.slice(-10);
-    }
-
-    voice.learnedAt = new Date().toISOString();
-    this.dirty = true;
-    this.save();
-
-    this.log.info('Style DNA learned from success', {
-      projectId,
-      povCharacter,
-      patternsLearned: patterns.length,
-      hasSpeechPattern: !!voice.speechPattern,
-    });
   }
 
   // ── Maintenance ────────────────────────────────────────

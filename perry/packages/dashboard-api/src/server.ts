@@ -5,15 +5,26 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import { ProjectEngine } from '@perry/projects';
+import { ProjectEngine, StateStore, AuditService, PenProfileService } from '@perry/projects';
 import { AIRouter } from '@perry/ai';
-import { EventBus, Logger } from '@perry/core';
+import { EventBus, Logger, SecretsService } from '@perry/core';
+import type { RagService, MemoryStore } from '@perry/rag';
 import { setupProjectRoutes } from './routes/projects.js';
 import { setupSystemRoutes } from './routes/system.js';
 import { setupExportRoutes } from './routes/export.js';
 import { setupCoverRoutes } from './routes/cover.js';
 import { setupIntegrationRoutes } from './routes/integration.js';
+import { setupPensRoutes } from './routes/pens.js';
+import { setupAgentRoutes } from './routes/agents.js';
+import { setupSecretsRoutes } from './routes/secrets.js';
+import { setupModelsRoutes } from './routes/models.js';
+import { setupSessionsRoutes } from './routes/sessions.js';
+import { setupSkillsRoutes } from './routes/skills.js';
+import { setupAnalyticsRoutes } from './routes/analytics.js';
+import { setupLearningRoutes } from './routes/learning.js';
 import { createAuthMiddleware } from './middleware/auth.js';
+import type { GarbageCollector } from './services/garbage-collector.js';
+import type { GatewayManager } from './services/gateway-manager.js';
 
 export function createServer(
   projectEngine: ProjectEngine,
@@ -21,6 +32,14 @@ export function createServer(
   eventBus: EventBus,
   log: Logger,
   workspaceDir: string,
+  stateStore: StateStore,
+  gc: GarbageCollector,
+  secrets: SecretsService,
+  gateways: GatewayManager,
+  ragService?: RagService,
+  memoryStore?: MemoryStore,
+  chatMemory?: import('./services/chat-memory-service.js').ChatMemoryService,
+  learningCore?: import('./services/learning-core.js').LearningCore,
 ) {
   const app = express();
 
@@ -33,7 +52,7 @@ export function createServer(
   app.use(express.json({ limit: '50mb' }));
 
   // Auth middleware — runs before all API routes
-  app.use('/api', createAuthMiddleware(log.child('auth')));
+  app.use('/api', createAuthMiddleware(log.child('auth'), secrets));
 
   // SSE endpoint for realtime events
   app.get('/api/events', (req, res) => {
@@ -50,7 +69,11 @@ export function createServer(
 
     // Wire up events — store references for cleanup
     const listeners: Array<{ event: string; handler: (...args: any[]) => void }> = [];
-    const events: Array<keyof import('@perry/core').EventMap> = ['step:started', 'step:progress', 'step:completed', 'step:failed', 'project:paused'];
+    const events: Array<keyof import('@perry/core').EventMap> = [
+      'step:started', 'step:progress', 'step:completed', 'step:failed', 'project:paused',
+      // Agent system events drive Fleet v2 activity trails + bottom feed.
+      'agent:invocation:started', 'agent:invocation:completed', 'agent:invocation:failed',
+    ];
     for (const evt of events) {
       const handler = (p: any) => onEvent(evt, p);
       eventBus.on(evt, handler);
@@ -81,10 +104,60 @@ export function createServer(
   });
 
   app.use('/api/projects', setupProjectRoutes(projectEngine, log));
-  app.use('/api/system', setupSystemRoutes(aiRouter, projectEngine, log));
+  app.use('/api/system', setupSystemRoutes(aiRouter, projectEngine, log, gc, secrets, ragService));
   app.use('/api/export', setupExportRoutes(log));
-  app.use('/api/cover', setupCoverRoutes(workspaceDir, log.child('cover')));
+  app.use('/api/cover', setupCoverRoutes(workspaceDir, log.child('cover'), ragService));
   app.use('/api/integration', setupIntegrationRoutes(projectEngine, log.child('integration')));
+  // PenProfileService writes per-pen SOUL.md + LESSONS.md after audits and
+  // on GC sweeps. PromptBuilder reads those files via late-binding so it can
+  // skip re-rendering pen anti-patterns from raw data on every chapter call.
+  const penProfileService = new PenProfileService(stateStore, workspaceDir, log.child('pen-profile'));
+  try { projectEngine.getPromptBuilder().setPenProfileService(penProfileService); }
+  catch (e: any) { log.warn('failed to inject PenProfileService into PromptBuilder', { error: e.message }); }
+  const auditService = new AuditService(stateStore, workspaceDir, log.child('audit'), ragService, penProfileService, eventBus);
+  app.use('/api/pens', setupPensRoutes(stateStore, log.child('pens'), workspaceDir, projectEngine.getAutoLearning(), auditService, penProfileService));
+  // Sessions browser — FTS5 keyword search over completed step outputs.
+  app.use('/api/sessions', setupSessionsRoutes(stateStore, log.child('sessions')));
+  // Skills curator — list installed + pending, promote, reject.
+  app.use('/api/skills', setupSkillsRoutes(log.child('skills'), workspaceDir));
+  // Analytics — step volume, success rate, prompt sizes, audit health,
+  // and learning-corpus snapshot (chunk counts by kind).
+  app.use('/api/analytics', setupAnalyticsRoutes(stateStore, log.child('analytics'), memoryStore));
+  // Surface per-producer learning telemetry counters so the dashboard can
+  // show "the system is actually observing" before the first skill fires.
+  app.use('/api/learning', setupLearningRoutes(stateStore, workspaceDir, log.child('learning'), learningCore));
+
+  // Agent system routes — registry, sessions, invocations. Mounted at /api
+  // so internal paths /agents/*, /sessions/*, /invocations/*, /domains coexist
+  // cleanly under one router.
+  app.use('/api', setupAgentRoutes({
+    aiRouter,
+    projectEngine,
+    mcpClient: projectEngine.getMcpClient(),
+    eventBus,
+    log: log.child('agents'),
+    chatMemory,
+  }));
+
+  // Secrets vault management — /api/secrets, /api/secrets-audit.
+  app.use('/api', setupSecretsRoutes(secrets, log.child('secrets')));
+
+  // Model management — /api/models, /api/models/pull, /api/models/show,
+  // /api/models/suggestions. Wraps Ollama HTTP API directly.
+  app.use('/api', setupModelsRoutes(aiRouter, log.child('models')));
+
+  // Messaging-gateway status + admin (restart on credential change).
+  app.get('/api/gateways', (_req, res) => {
+    res.json({ gateways: gateways.statuses() });
+  });
+  app.post('/api/gateways/:platform/restart', async (req, res) => {
+    try {
+      await gateways.restart(req.params.platform);
+      res.json({ ok: true, platform: req.params.platform });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
 
   // Serve Dashboard UI in production
   if (process.env.NODE_ENV === 'production') {

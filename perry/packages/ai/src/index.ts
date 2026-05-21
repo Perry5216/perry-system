@@ -2,7 +2,10 @@
  * @perry/ai — Public API
  */
 
-export { AIRouter } from './router.js';
+export { AIRouter, STEP_ROUTING_DEFAULTS } from './router.js';
+export type { RoutingTarget } from './router.js';
+export { EmbeddingService } from './embedding-service.js';
+export type { EmbeddingConfig, EmbeddingResult } from './embedding-service.js';
 export { ContextCompressor } from './context-compressor.js';
 export type { CompressionRequest, CompressionResult, CompressionMode } from './context-compressor.js';
 export { ContextWatcher } from './context-watcher.js';

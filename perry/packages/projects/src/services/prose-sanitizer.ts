@@ -24,6 +24,14 @@ export class ProseSanitizer {
     // Strip <pre_flight>...</pre_flight> Chain of Thought blocks used to enforce negative constraints.
     clean = clean.replace(/<pre_flight>[\s\S]*?<\/pre_flight>/gi, '');
 
+    // Strip GitHub/Obsidian-flavored blockquote callouts the model leaks from RLHF/coaching corpora.
+    // Patterns like `> [!WARNING]`, `> [!PROSE WARNING]`, `> [!DIALOGUE HINT]` — these are not in
+    // our prompts; the model hallucinates them when it sees "your output will be graded" framing.
+    // Strip the callout AND any blockquote continuation lines that follow it.
+    clean = clean.replace(/^>\s*\[![^\]\n]+\][\s\S]*?(?=\n[^>\s]|\n\s*\n|$)/gim, '');
+    // Strip any remaining standalone blockquote lines — manuscript prose has no place for them.
+    clean = clean.replace(/^>\s+.*$/gm, '');
+
     // Strip Markdown code blocks (```...```) - manuscript prose should never have code blocks.
     // This catches fake [WARNING: PROSE STYLE CONTRACT VIOLATION DETECTED] linter blocks.
     clean = clean.replace(/```[\s\S]*?```/gi, '');

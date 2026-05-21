@@ -6,7 +6,7 @@
  */
 
 import {
-  Project, ProjectType, ProjectContext, EventBus, Logger, McpClientService
+  Project, ProjectType, ProjectContext, EventBus, Logger, McpClientService, projectTypeDomain
 } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
 import type { ContextEngine } from '@perry/rag';
@@ -14,6 +14,7 @@ import { StateStore } from './state-store.js';
 import { StepRunner } from './step-runner.js';
 import { PromptBuilder } from './prompt-builder.js';
 import { TemplateRegistry } from './templates.js';
+import { resolveCalibrationAntiPatterns } from './data/calibration-anti-patterns.js';
 import { PromptTemplateService } from './services/prompt-template-service.js';
 import { CustomPipelineService } from './services/custom-pipeline-service.js';
 import { DirectorAgent } from './director-agent.js';
@@ -38,6 +39,17 @@ export class ProjectEngine {
   private log: Logger;
   private workspaceDir: string;
   private contextEngine: ContextEngine;
+  private mcpClient: McpClientService;
+  private promptBuilder!: PromptBuilder;
+
+  /** Expose AutoLearningService for MCP-facing routes (pair injection, manual export). */
+  public getAutoLearning() { return this.stepRunner.getAutoLearning(); }
+  /** Expose the shared event bus (agent routes use it for invocation events). */
+  public getEventBus(): EventBus { return this.eventBus; }
+  /** Expose the shared MCP client (agent routes use it to feed AgentRunner). */
+  public getMcpClient(): McpClientService { return this.mcpClient; }
+  /** Expose the prompt builder so the host can inject late-bound services (RagService). */
+  public getPromptBuilder(): PromptBuilder { return this.promptBuilder; }
   private director: DirectorAgent;
 
   // Per-project execution lock: tracks which projects have an active loop
@@ -77,8 +89,10 @@ export class ProjectEngine {
       config.config,
       log.child('prompt'),
     );
+    this.promptBuilder = promptBuilder;
 
     const mcpClient = new McpClientService(config.config, log.child('mcp'));
+    this.mcpClient = mcpClient;
     // We don't await initialize() here because constructors cannot be async.
     // It connects asynchronously in the background.
     mcpClient.initialize().catch(err => log.error('Failed to initialize MCP Client', { error: err.message }));
@@ -102,7 +116,8 @@ export class ProjectEngine {
       stateStore,
       mcpClient,
       contextEngine,
-      log.child('director')
+      log.child('director'),
+      eventBus,
     );
 
     // Recover orphaned "active" steps left behind by a container restart
@@ -114,6 +129,47 @@ export class ProjectEngine {
         this.log.error('Garbage Collector failed on boot', { error: err.message });
       });
     }, 5000); // Give the system 5 seconds to settle before sweeping
+
+    // ── Project Auto-Chain ──────────────────────────────────────────────
+    // When a parent project completes, automatically start any child project
+    // whose type makes it a natural downstream step. Today: book-planning
+    // completion auto-starts its style-calibration child. Lets users press
+    // "play" on the planning project once and walk away while the training
+    // data pipeline fills out.
+    this.eventBus.on('project:completed', async (payload: any) => {
+      try {
+        const parentId = payload?.projectId;
+        if (!parentId) return;
+        const parent = this.stateStore.get(parentId);
+        if (!parent || parent.type !== 'book-planning') return;
+
+        const children = this.stateStore.list().filter(
+          p => p.parentId === parentId &&
+               p.type === 'style-calibration' &&
+               p.status !== 'completed' &&
+               p.status !== 'active',
+        );
+        if (children.length === 0) return;
+
+        for (const child of children) {
+          this.log.info('Auto-chain: starting downstream calibration project', {
+            parent: parent.title,
+            child: child.title,
+            childId: child.id,
+          });
+          // Fire-and-forget — don't block the event emission. Errors are logged
+          // by executeProject's own catch path.
+          this.executeAll(child.id).catch(err => {
+            this.log.warn('Auto-chain: downstream project failed to start', {
+              child: child.title,
+              error: err.message,
+            });
+          });
+        }
+      } catch (err: any) {
+        this.log.warn('Auto-chain handler threw', { error: err.message });
+      }
+    });
   }
 
   async chatWithDirector(projectId: string, message: string): Promise<string> {
@@ -272,13 +328,31 @@ export class ProjectEngine {
       }
     }
 
+    // Read scene-by-scene default from meta so the toggle in the dashboard
+    // affects newly-created projects without requiring a project-form field.
+    const sceneByScene = (() => {
+      try {
+        const raw = this.stateStore.getMeta('pipeline.sceneByScene.enabled');
+        return raw === 'true';
+      } catch { return false; }
+    })();
+
     const context: ProjectContext = {
       targetChapters: 25,
       targetWordsPerChapter: 3000,
       hasParent: !!input.parentId,
+      sceneByScene,
       ...input.context,      // explicit user values (often defaults from UI)
       ...inheritedContext,   // parent values MUST override defaults + UI defaults
-    };
+    } as any;
+
+    // Resolve calibration anti-patterns (universal + pen-specific) once, here,
+    // so styleCalibration's buildSteps sees a pre-merged list rather than
+    // hardcoding a Digital-Drift-flavoured one for every pen.
+    if (input.type === 'style-calibration') {
+      const merged = resolveCalibrationAntiPatterns(this.stateStore, context.penNameSlug);
+      context.config = { ...(context.config || {}), calibrationAntiPatterns: merged };
+    }
 
     let steps = template.buildSteps(context, input.title, input.description);
     
@@ -309,6 +383,107 @@ export class ProjectEngine {
 
   getProject(id: string): Project | undefined {
     return this.stateStore.get(id);
+  }
+
+  /**
+   * Re-resolve prompts for `pending` steps from the current template registry.
+   * Mutates in-memory only; does NOT persist (the next save() will, but only
+   * the new step.prompt — `prompt_override` is left untouched). Skips steps
+   * with a non-empty `promptOverride` so POV-gate retry context survives.
+   *
+   * Without this, a project created when templates.ts had bug X stays
+   * permanently broken after we fix bug X. Called at the top of every
+   * execution path so template fixes propagate to existing projects.
+   */
+  private refreshPendingPrompts(project: Project): void {
+    const template = this.templates.get(project.type);
+    if (!template) return;
+    try {
+      const fresh = template.buildSteps(project.context, project.title, project.description);
+      this.promptTemplates.applyOverrides(project.type, fresh);
+
+      // Match prompts by identity tuple (taskType + label + chapterNumber +
+      // segmentIndex), NOT by step.id. The id is just an auto-incrementing
+      // index — when a template adds/removes/merges steps between versions,
+      // ids shift but task identities don't. Matching by id after a template
+      // change would assign the wrong prompt (e.g. a chapter-write step
+      // getting the chapter-review prompt because indices renumbered after
+      // a step merge). When the identity tuple can't find a match we leave
+      // the existing prompt alone — better stale prose than wrong prose.
+      const keyFor = (s: any) =>
+        `${s.taskType}|${s.label}|${s.chapterNumber ?? ''}|${s.segmentIndex ?? ''}`;
+      const freshByKey = new Map(fresh.map(s => [keyFor(s), s.prompt]));
+
+      let updated = 0;
+      let unmatched = 0;
+      for (const step of project.steps) {
+        if (step.status !== 'pending') continue;
+        if (step.promptOverride) {
+          // Override wins; ensure the active `prompt` field reflects it.
+          if (step.prompt !== step.promptOverride) step.prompt = step.promptOverride;
+          continue;
+        }
+        const newer = freshByKey.get(keyFor(step));
+        if (newer === undefined) {
+          // No identity match in the current template. Leave existing prompt.
+          unmatched++;
+          continue;
+        }
+        if (newer !== step.prompt) {
+          step.prompt = newer;
+          updated++;
+        }
+      }
+      if (updated > 0 || unmatched > 0) {
+        this.log.info('Refreshed pending step prompts from current template', {
+          projectId: project.id, type: project.type, updated, unmatched,
+        });
+      }
+    } catch (e: any) {
+      this.log.warn('Failed to refresh pending prompts', { projectId: project.id, error: e.message });
+    }
+  }
+
+  /**
+   * Dry-run sibling of refreshPendingPrompts: counts pending steps whose
+   * stored prompt diverges from the current template, across all projects.
+   * Returns per-project counts so the GC stage / dashboard can surface
+   * how many projects need a refresh. Skips active/completed/failed steps
+   * and skips steps with a promptOverride (those win over the template).
+   */
+  countStalePendingPrompts(): { totalProjects: number; staleProjects: number; staleSteps: number; perProject: Array<{ projectId: string; type: string; stale: number }> } {
+    const all = this.stateStore.list();
+    const perProject: Array<{ projectId: string; type: string; stale: number }> = [];
+    let staleSteps = 0;
+    let staleProjects = 0;
+    for (const project of all) {
+      const template = this.templates.get(project.type);
+      if (!template) continue;
+      try {
+        const fresh = template.buildSteps(project.context, project.title, project.description);
+        this.promptTemplates.applyOverrides(project.type, fresh);
+        // Match by identity tuple (same rule as refreshPendingPrompts).
+        const keyFor = (s: any) =>
+          `${s.taskType}|${s.label}|${s.chapterNumber ?? ''}|${s.segmentIndex ?? ''}`;
+        const freshByKey = new Map(fresh.map(s => [keyFor(s), s.prompt]));
+        let stale = 0;
+        for (const step of project.steps) {
+          if (step.status !== 'pending') continue;
+          if (step.promptOverride) continue;
+          const newer = freshByKey.get(keyFor(step));
+          if (newer && newer !== step.prompt) stale++;
+        }
+        if (stale > 0) {
+          perProject.push({ projectId: project.id, type: project.type, stale });
+          staleSteps += stale;
+          staleProjects++;
+        }
+      } catch {
+        // Bad template build (e.g. missing context field) — skip silently;
+        // refreshPendingPrompts logs the same failure with details if reached.
+      }
+    }
+    return { totalProjects: all.length, staleProjects, staleSteps, perProject };
   }
 
   updateStepResult(projectId: string, stepId: string, result: string): boolean {
@@ -348,16 +523,20 @@ export class ProjectEngine {
 
   listProjects(status?: string): Project[] {
     const all = this.stateStore.list(status);
-    
-    // Feature 7: Payload Compression
-    // Strip heavy text fields for the list view to prevent network/memory hangs
-    // especially for large 100k+ word manuscripts. The UI only needs metadata.
-    // The actual text is now safely mirrored to the workspace filesystem.
+
+    // Strip heavy text fields for the list view to prevent network/memory
+    // hangs on 100k+ word manuscripts. The UI only needs metadata; full
+    // prompt/result are fetched via /projects/:id when a project is opened.
+    // The result placeholder is intentionally a marker string — the IO
+    // inspector at dashboard/App.tsx detects it to fetch from disk.
+    // Also stamp the project's domain so the dashboard can filter by it
+    // (Fleet view groups projects under their domain station).
     return all.map(p => {
-      const lightweight = { ...p };
+      const lightweight = { ...p } as any;
+      lightweight.domain = projectTypeDomain(p.type);
       lightweight.steps = p.steps.map(s => ({
         ...s,
-        prompt: '[Prompt hidden for performance]',
+        prompt: '',
         result: s.result ? '[Content written to disk. Check workspace/projects/ directory]' : undefined,
       }));
       return lightweight;
@@ -583,7 +762,7 @@ export class ProjectEngine {
     ];
     for (const f of legacyFiles) {
       if (fs.existsSync(f)) {
-        fs.rmSync(f, { force: true });
+        fs.rmSync(f, { force: true, recursive: true });
         purgedLegacyFiles++;
         this.log.info('Deleted legacy file', { path: f });
       }
@@ -678,33 +857,55 @@ export class ProjectEngine {
   /**
    * Execute the next pending step in a project.
    */
+  /**
+   * Atomically acquire the per-project execution lock. Loops until the slot is
+   * free, then claims it in the same JS tick (no await between `get` and `set`
+   * — Node's single-threaded run-to-completion guarantees atomicity within a
+   * tick). Returns a release function callers must invoke in `finally`.
+   *
+   * Fixes the TOCTOU race in the old check-then-set pattern where two
+   * concurrent callers could both see `existingLock === undefined`, both
+   * `set` their own lock, and the first's `finally { delete }` would erase
+   * the second's lock entry — leaving the second running without protection.
+   */
+  private async acquireExecutionLock(projectId: string, waitLog: string): Promise<() => void> {
+    let warned = false;
+    while (true) {
+      const existing = this.executingProjects.get(projectId);
+      if (!existing) {
+        let resolver!: () => void;
+        const promise = new Promise<void>(r => { resolver = r; });
+        // get + set in the same tick — no await between them. Safe.
+        this.executingProjects.set(projectId, { resolve: resolver, promise });
+        return () => {
+          this.executingProjects.delete(projectId);
+          resolver();
+        };
+      }
+      if (!warned) { this.log.info(waitLog, { projectId }); warned = true; }
+      await existing.promise;
+      // Loop back: another caller might have grabbed it before us.
+    }
+  }
+
   async executeNextStep(projectId: string): Promise<string | null> {
-    // 🔒 Per-project lock: wait for any in-flight execution to fully drain 🔒
-    const existingLock = this.executingProjects.get(projectId);
-    if (existingLock) {
-      this.log.info('Waiting for previous execution loop to drain before single step', { projectId });
-      await existingLock.promise;
-    }
-
-    const project = this.stateStore.get(projectId);
-    if (!project) throw new Error(`Project not found: ${projectId}`);
-
-    const step = this.stateStore.getNextPendingStep(projectId);
-    if (!step) {
-      this.log.info('No pending steps', { projectId });
-      return null;
-    }
-
-    // Create a new lock for this execution
-    let lockResolve!: () => void;
-    const lockPromise = new Promise<void>(r => { lockResolve = r; });
-    this.executingProjects.set(projectId, { resolve: lockResolve, promise: lockPromise });
+    const release = await this.acquireExecutionLock(projectId, 'Waiting for previous execution loop to drain before single step');
 
     try {
+      const project = this.stateStore.get(projectId);
+      if (!project) throw new Error(`Project not found: ${projectId}`);
+      this.refreshPendingPrompts(project);
+      this.stateStore.save(project);
+
+      const step = this.stateStore.getNextPendingStep(projectId);
+      if (!step) {
+        this.log.info('No pending steps', { projectId });
+        return null;
+      }
+
       return await this.stepRunner.execute(project, step);
     } finally {
-      this.executingProjects.delete(projectId);
-      lockResolve();
+      release();
     }
   }
 
@@ -712,30 +913,21 @@ export class ProjectEngine {
    * Execute all remaining steps in a project sequentially.
    */
   async executeAll(projectId: string): Promise<void> {
-    const project = this.stateStore.get(projectId);
-    if (!project) throw new Error(`Project not found: ${projectId}`);
+    // Pre-check (avoids racing into the lock for a non-existent project)
+    if (!this.stateStore.get(projectId)) throw new Error(`Project not found: ${projectId}`);
 
-    // ── Per-project lock: wait for any in-flight execution to fully drain ──
-    const existingLock = this.executingProjects.get(projectId);
-    if (existingLock) {
-      this.log.info('Waiting for previous execution loop to drain', { projectId });
-      await existingLock.promise;
-    }
-
-    // Re-check project state after drain — it may have completed or errored
-    const latest = this.stateStore.get(projectId);
-    if (!latest) throw new Error(`Project not found after drain: ${projectId}`);
-
-    // Create a new lock for this execution
-    let lockResolve!: () => void;
-    const lockPromise = new Promise<void>(r => { lockResolve = r; });
-    this.executingProjects.set(projectId, { resolve: lockResolve, promise: lockPromise });
-
-    // Transition project to active
-    latest.status = 'active';
-    this.stateStore.save(latest);
+    const release = await this.acquireExecutionLock(projectId, 'Waiting for previous execution loop to drain');
 
     try {
+      // Re-fetch after acquiring — state may have changed while we waited
+      const latest = this.stateStore.get(projectId);
+      if (!latest) throw new Error(`Project not found after drain: ${projectId}`);
+      this.refreshPendingPrompts(latest);
+
+      // Transition project to active
+      latest.status = 'active';
+      this.stateStore.save(latest);
+
       this.eventBus.emit('project:started', { projectId });
       await this.stepRunner.executeAll(latest);
 
@@ -744,9 +936,7 @@ export class ProjectEngine {
         this.eventBus.emit('project:completed', { projectId });
       }
     } finally {
-      // Release the lock so future executions can proceed
-      this.executingProjects.delete(projectId);
-      lockResolve();
+      release();
     }
   }
 

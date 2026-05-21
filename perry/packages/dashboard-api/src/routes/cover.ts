@@ -17,11 +17,12 @@ import { Router } from 'express';
 import { ComfyUIService, QwenTextRenderService } from '@perry/ai';
 import type { ComfyUIBookCoverParams } from '@perry/ai';
 import { Logger } from '@perry/core';
+import type { RagService } from '@perry/rag';
 import { mkdir, writeFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
 
-export function setupCoverRoutes(workspaceDir: string, log: Logger) {
+export function setupCoverRoutes(workspaceDir: string, log: Logger, rag?: RagService) {
   const router = Router();
   const comfyui = new ComfyUIService();
   const qwen = new QwenTextRenderService();
@@ -106,6 +107,40 @@ export function setupCoverRoutes(workspaceDir: string, log: Logger) {
       await writeFile(outPath, genResult.imageBuffer);
 
       log.info('Cover image saved', { file: outPath });
+
+      // Verified-success learning: a cover that made it through ComfyUI
+      // without erroring AND produced a non-empty image buffer is a
+      // working prompt — index it so the next cover request can pull
+      // nearest-neighbour proven prompts. The verification bar is weak
+      // (success != aesthetically good — user might still reject it),
+      // so future work could upgrade the gate to require a "cover_kept"
+      // signal once the dashboard tracks that. For now, "generation
+      // didn't error" is the floor — at minimum it filters out broken
+      // prompts that failed schema/workflow validation.
+      if (rag && params.positive_prompt) {
+        try {
+          await rag.indexIfVerified({
+            projectId: 'cover-gen',
+            sourceRef: `cover-prompt-${genResult.promptId ?? Date.now()}`,
+            kind: 'cover_prompt',
+            text: params.positive_prompt,
+            replace: false,
+            metadata: {
+              filename: outFilename,
+              width: params.width ?? 832,
+              height: params.height ?? 1216,
+              negative_prompt: params.negative_prompt ?? null,
+              checkpoint: (params as any).checkpoint ?? null,
+            },
+            gate: () => ({
+              verified: !!genResult.imageBuffer && genResult.imageBuffer.length > 0,
+              reason: `comfyui produced ${genResult.imageBuffer?.length ?? 0}-byte image`,
+            }),
+          });
+        } catch (err: any) {
+          log.warn('learning_cover_prompt index failed (non-fatal)', { error: err.message });
+        }
+      }
 
       return res.json({
         success: true,

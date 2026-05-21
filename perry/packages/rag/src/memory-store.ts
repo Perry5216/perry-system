@@ -108,6 +108,36 @@ export class MemoryStore {
       CREATE INDEX IF NOT EXISTS idx_entries_timestamp ON entries(timestamp);
     `);
 
+    // ── Vector chunks ─────────────────────────────────────────────────
+    // Embedding-indexed slices of larger texts. We store the raw vector
+    // as a BLOB (Float32Array buffer) — SQLite doesn't have a native
+    // vector type and a linear scan over a few thousand 768-dim vectors
+    // takes ~10ms which is fast enough for Perry's scale.
+    //
+    // Indexed by (project_id, kind) so we can filter cheaply BEFORE the
+    // cosine pass. `kind` is the logical category (bible, outline,
+    // chapter, voice_anchor, review, etc.) — query layer can scope to
+    // one kind at a time, or all.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS chunks (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id   TEXT NOT NULL,
+        source_ref   TEXT NOT NULL,
+        kind         TEXT NOT NULL,
+        chunk_index  INTEGER NOT NULL,
+        text         TEXT NOT NULL,
+        token_count  INTEGER NOT NULL,
+        embedding    BLOB NOT NULL,
+        embed_model  TEXT NOT NULL,
+        embed_dim    INTEGER NOT NULL,
+        metadata     TEXT,
+        indexed_at   TEXT NOT NULL,
+        UNIQUE(project_id, source_ref, chunk_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_chunks_project_kind ON chunks(project_id, kind);
+      CREATE INDEX IF NOT EXISTS idx_chunks_source_ref ON chunks(source_ref);
+    `);
+
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
         title, body,
@@ -200,8 +230,357 @@ export class MemoryStore {
     if (!this.db) return 0;
     const result = this.db.prepare('DELETE FROM entries WHERE project_id = @projectId')
       .run({ projectId });
-    this.log.info('Project entries deleted', { projectId, count: result.changes });
+    const chunkResult = this.db.prepare('DELETE FROM chunks WHERE project_id = @projectId')
+      .run({ projectId });
+    this.log.info('Project entries + chunks deleted', { projectId, entries: result.changes, chunks: chunkResult.changes });
     return result.changes;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Vector chunks API
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** Encode a number[] embedding to a Float32 BLOB for storage. */
+  static encodeEmbedding(vec: number[]): Buffer {
+    const f32 = new Float32Array(vec);
+    return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+  }
+
+  /** Decode a stored BLOB back into a number[] for cosine math. */
+  static decodeEmbedding(blob: Buffer): number[] {
+    const f32 = new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
+    return Array.from(f32);
+  }
+
+  /** Insert or replace a single chunk. */
+  upsertChunk(chunk: {
+    projectId: string;
+    sourceRef: string;
+    kind: string;
+    chunkIndex: number;
+    text: string;
+    tokenCount: number;
+    embedding: number[];
+    embedModel: string;
+    embedDim: number;
+    metadata?: Record<string, any>;
+  }): number | null {
+    if (!this.db) return null;
+    try {
+      const result = this.db.prepare(`
+        INSERT INTO chunks (project_id, source_ref, kind, chunk_index, text, token_count, embedding, embed_model, embed_dim, metadata, indexed_at)
+        VALUES (@projectId, @sourceRef, @kind, @chunkIndex, @text, @tokenCount, @embedding, @embedModel, @embedDim, @metadata, @indexedAt)
+        ON CONFLICT(project_id, source_ref, chunk_index) DO UPDATE SET
+          kind        = excluded.kind,
+          text        = excluded.text,
+          token_count = excluded.token_count,
+          embedding   = excluded.embedding,
+          embed_model = excluded.embed_model,
+          embed_dim   = excluded.embed_dim,
+          metadata    = excluded.metadata,
+          indexed_at  = excluded.indexed_at
+      `).run({
+        projectId: chunk.projectId,
+        sourceRef: chunk.sourceRef,
+        kind: chunk.kind,
+        chunkIndex: chunk.chunkIndex,
+        text: chunk.text,
+        tokenCount: chunk.tokenCount,
+        embedding: MemoryStore.encodeEmbedding(chunk.embedding),
+        embedModel: chunk.embedModel,
+        embedDim: chunk.embedDim,
+        metadata: chunk.metadata ? JSON.stringify(chunk.metadata) : null,
+        indexedAt: new Date().toISOString(),
+      });
+      return result.lastInsertRowid ? Number(result.lastInsertRowid) : null;
+    } catch (err: any) {
+      this.log.error('upsertChunk failed', { error: err.message, sourceRef: chunk.sourceRef });
+      return null;
+    }
+  }
+
+  /** Delete all chunks for a sourceRef (e.g., re-indexing a step's output). */
+  deleteChunksBySource(projectId: string, sourceRef: string): number {
+    if (!this.db) return 0;
+    const result = this.db.prepare(
+      'DELETE FROM chunks WHERE project_id = @projectId AND source_ref = @sourceRef'
+    ).run({ projectId, sourceRef });
+    return result.changes;
+  }
+
+  /** Count chunks for a project, optionally scoped to a kind. */
+  countChunks(projectId: string, kind?: string): number {
+    if (!this.db) return 0;
+    if (kind) {
+      const row = this.db.prepare(
+        'SELECT COUNT(*) AS n FROM chunks WHERE project_id = @projectId AND kind = @kind'
+      ).get({ projectId, kind });
+      return row?.n || 0;
+    }
+    const row = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM chunks WHERE project_id = @projectId'
+    ).get({ projectId });
+    return row?.n || 0;
+  }
+
+  /** Linear cosine scan. Returns top-K hits. */
+  searchChunks(opts: {
+    projectId: string;
+    queryEmbedding: number[];
+    kinds?: string[];      // restrict to these kinds; empty/undefined = all
+    topK?: number;
+    minScore?: number;     // drop hits below this cosine
+  }): Array<{
+    id: number;
+    sourceRef: string;
+    kind: string;
+    chunkIndex: number;
+    text: string;
+    tokenCount: number;
+    score: number;
+    metadata: any | null;
+  }> {
+    if (!this.db) return [];
+    const topK = Math.max(1, Math.min(opts.topK ?? 8, 50));
+    const minScore = opts.minScore ?? 0;
+    const kindFilter = opts.kinds && opts.kinds.length > 0
+      ? `AND kind IN (${opts.kinds.map(() => '?').join(',')})`
+      : '';
+    const sql = `
+      SELECT id, source_ref, kind, chunk_index, text, token_count, embedding, metadata
+      FROM chunks
+      WHERE project_id = ? ${kindFilter}
+    `;
+    const params = [opts.projectId, ...(opts.kinds || [])];
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    if (rows.length === 0) return [];
+    // Inline cosine
+    const q = opts.queryEmbedding;
+    let qMag = 0;
+    for (let i = 0; i < q.length; i++) qMag += q[i] * q[i];
+    qMag = Math.sqrt(qMag);
+    if (qMag === 0) return [];
+
+    const scored: Array<any> = [];
+    for (const r of rows) {
+      const v = MemoryStore.decodeEmbedding(r.embedding);
+      if (v.length !== q.length) continue;
+      let dot = 0, vMag = 0;
+      for (let i = 0; i < v.length; i++) {
+        dot += q[i] * v[i];
+        vMag += v[i] * v[i];
+      }
+      vMag = Math.sqrt(vMag);
+      if (vMag === 0) continue;
+      const score = dot / (qMag * vMag);
+      if (score < minScore) continue;
+      scored.push({
+        id: r.id,
+        sourceRef: r.source_ref,
+        kind: r.kind,
+        chunkIndex: r.chunk_index,
+        text: r.text,
+        tokenCount: r.token_count,
+        score,
+        metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
+      });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, topK);
+  }
+
+  /**
+   * GC: age out chunks indexed before `olderThanDays`. Optional `kinds`
+   * filter scopes the sweep (e.g. only prune `learning_*`). Returns count
+   * deleted per kind so the GC summary can report the breakdown.
+   */
+  pruneOldChunks(opts: { olderThanDays: number; kinds?: string[] }): { deleted: number; byKind: Record<string, number> } {
+    if (!this.db) return { deleted: 0, byKind: {} };
+    const cutoff = new Date(Date.now() - opts.olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    const byKind: Record<string, number> = {};
+    let total = 0;
+    try {
+      const kindFilter = (opts.kinds && opts.kinds.length > 0)
+        ? `AND kind IN (${opts.kinds.map(() => '?').join(',')})`
+        : '';
+      const params: any[] = [cutoff, ...(opts.kinds || [])];
+      // Pre-count so the GC summary can show per-kind detail.
+      const rows = this.db.prepare(
+        `SELECT kind, COUNT(*) AS n FROM chunks WHERE indexed_at < ? ${kindFilter} GROUP BY kind`
+      ).all(...params) as any[];
+      for (const r of rows) { byKind[r.kind] = r.n; total += r.n; }
+      if (total > 0) {
+        this.db.prepare(
+          `DELETE FROM chunks WHERE indexed_at < ? ${kindFilter}`
+        ).run(...params);
+      }
+    } catch { /* swallow — return whatever we got */ }
+    return { deleted: total, byKind };
+  }
+
+  /**
+   * GC: trim each kind down to the most-recent `maxPerKind` chunks.
+   * Useful when age-out alone leaves too much (e.g. a runaway worker
+   * filling `learning_worker_task` faster than 6h retention can clear).
+   */
+  enforceMaxPerKind(opts: { maxPerKind: number; kinds?: string[] }): { deleted: number; byKind: Record<string, number> } {
+    if (!this.db || opts.maxPerKind < 1) return { deleted: 0, byKind: {} };
+    const byKind: Record<string, number> = {};
+    let total = 0;
+    try {
+      const allKinds = opts.kinds && opts.kinds.length > 0
+        ? opts.kinds
+        : (this.db.prepare('SELECT DISTINCT kind FROM chunks').all() as any[]).map(r => r.kind);
+      for (const kind of allKinds) {
+        const excess = this.db.prepare(
+          `SELECT COUNT(*) AS n FROM chunks WHERE kind = ?`
+        ).get(kind) as any;
+        if (!excess || excess.n <= opts.maxPerKind) continue;
+        const toDelete = excess.n - opts.maxPerKind;
+        const res = this.db.prepare(`
+          DELETE FROM chunks WHERE id IN (
+            SELECT id FROM chunks WHERE kind = ?
+            ORDER BY indexed_at ASC LIMIT ?
+          )
+        `).run(kind, toDelete);
+        byKind[kind] = res.changes;
+        total += res.changes;
+      }
+    } catch { /* swallow */ }
+    return { deleted: total, byKind };
+  }
+
+  /**
+   * Compute total bytes in the chunks table (best-effort via SUM of text
+   * length + embedding blob size). For the dashboard's Storage view.
+   */
+  approximateCorpusBytes(): { chunks: number; bytes: number } {
+    if (!this.db) return { chunks: 0, bytes: 0 };
+    try {
+      const row = this.db.prepare(
+        `SELECT COUNT(*) AS n, SUM(LENGTH(text) + LENGTH(embedding)) AS bytes FROM chunks`
+      ).get() as any;
+      return { chunks: row?.n || 0, bytes: row?.bytes || 0 };
+    } catch { return { chunks: 0, bytes: 0 }; }
+  }
+
+  /**
+   * Count indexed chunks grouped by `kind`. Used by the Analytics dashboard
+   * to surface "the self-learning corpus has N verified chapters" etc.
+   * Optional prefix filter — pass 'learning_' to count only the verified-
+   * success corpus.
+   */
+  countChunksByKind(opts: { prefix?: string } = {}): Array<{ kind: string; count: number }> {
+    if (!this.db) return [];
+    const where = opts.prefix ? "WHERE kind LIKE ?" : '';
+    const sql = `SELECT kind, COUNT(*) AS count FROM chunks ${where} GROUP BY kind ORDER BY count DESC`;
+    try {
+      const rows = opts.prefix
+        ? (this.db.prepare(sql).all(`${opts.prefix}%`) as any[])
+        : (this.db.prepare(sql).all() as any[]);
+      return rows.map(r => ({ kind: r.kind, count: r.count }));
+    } catch { return []; }
+  }
+
+  /**
+   * Count chunks of a given kind (or kind prefix) whose metadata fields all
+   * match the supplied filters. Used by self-learning consumers — e.g. scout's
+   * coverage check: "how many verified_scout_finding chunks do we already have
+   * for {subgenre:'cyberpunk', source:'reddit'}?".
+   *
+   * `filters` is matched via SQLite json_extract; string values match exactly,
+   * numeric values match numerically. Empty filters returns the kind count.
+   */
+  countChunksWithMetadata(opts: {
+    kind?: string;
+    kindPrefix?: string;
+    filters?: Record<string, string | number>;
+  }): number {
+    if (!this.db) return 0;
+    const where: string[] = [];
+    const params: any[] = [];
+    if (opts.kind) { where.push('kind = ?'); params.push(opts.kind); }
+    if (opts.kindPrefix) { where.push('kind LIKE ?'); params.push(opts.kindPrefix + '%'); }
+    if (opts.filters) {
+      for (const [k, v] of Object.entries(opts.filters)) {
+        where.push(`json_extract(metadata, '$.${k}') = ?`);
+        params.push(v);
+      }
+    }
+    const sql = `SELECT COUNT(*) AS n FROM chunks${where.length ? ' WHERE ' + where.join(' AND ') : ''}`;
+    try {
+      const row = this.db.prepare(sql).get(...params) as any;
+      return row?.n ?? 0;
+    } catch { return 0; }
+  }
+
+  /** Cross-project chunk search (e.g., "where have I written about X across all books"). */
+  searchChunksGlobal(opts: {
+    queryEmbedding: number[];
+    kinds?: string[];
+    topK?: number;
+    minScore?: number;
+  }): Array<any> {
+    if (!this.db) return [];
+    const topK = Math.max(1, Math.min(opts.topK ?? 8, 50));
+    const minScore = opts.minScore ?? 0;
+    const kindFilter = opts.kinds && opts.kinds.length > 0
+      ? `WHERE kind IN (${opts.kinds.map(() => '?').join(',')})`
+      : '';
+    const rows = this.db.prepare(`
+      SELECT id, project_id, source_ref, kind, chunk_index, text, token_count, embedding, metadata
+      FROM chunks ${kindFilter}
+    `).all(...(opts.kinds || [])) as any[];
+    const q = opts.queryEmbedding;
+    let qMag = 0;
+    for (let i = 0; i < q.length; i++) qMag += q[i] * q[i];
+    qMag = Math.sqrt(qMag);
+    if (qMag === 0) return [];
+
+    const scored: any[] = [];
+    for (const r of rows) {
+      const v = MemoryStore.decodeEmbedding(r.embedding);
+      if (v.length !== q.length) continue;
+      let dot = 0, vMag = 0;
+      for (let i = 0; i < v.length; i++) { dot += q[i] * v[i]; vMag += v[i] * v[i]; }
+      vMag = Math.sqrt(vMag);
+      if (vMag === 0) continue;
+      const score = dot / (qMag * vMag);
+      if (score < minScore) continue;
+      scored.push({
+        id: r.id, projectId: r.project_id, sourceRef: r.source_ref,
+        kind: r.kind, chunkIndex: r.chunk_index, text: r.text,
+        tokenCount: r.token_count, score,
+        metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
+      });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, topK);
+  }
+
+  /** Compute the centroid (averaged unit vector) of all chunks for a given kind in a project. */
+  computeCentroid(projectId: string, kind: string): number[] | null {
+    if (!this.db) return null;
+    const rows = this.db.prepare(
+      'SELECT embedding FROM chunks WHERE project_id = @projectId AND kind = @kind'
+    ).all({ projectId, kind }) as any[];
+    if (rows.length === 0) return null;
+    let dim = 0;
+    let sum: Float64Array | null = null;
+    for (const r of rows) {
+      const v = MemoryStore.decodeEmbedding(r.embedding);
+      if (!sum) { dim = v.length; sum = new Float64Array(dim); }
+      if (v.length !== dim) continue;
+      for (let i = 0; i < dim; i++) sum[i] += v[i];
+    }
+    if (!sum) return null;
+    const n = rows.length;
+    const centroid = new Array(dim);
+    let mag = 0;
+    for (let i = 0; i < dim; i++) { centroid[i] = sum[i] / n; mag += centroid[i] * centroid[i]; }
+    mag = Math.sqrt(mag);
+    if (mag > 0) for (let i = 0; i < dim; i++) centroid[i] /= mag;
+    return centroid;
   }
 
   /**

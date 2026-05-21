@@ -13,10 +13,6 @@
  * The final output is a single merged PNG: artwork + title + author name.
  */
 
-// @ts-ignore
-import { createCanvas, loadImage, registerFont } from 'canvas';
-// @ts-ignore
-import type { CanvasRenderingContext2D } from 'canvas';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
@@ -206,9 +202,10 @@ export class QwenTextRenderService {
    * Applies a gradient overlay behind text when needed for readability.
    */
   private async compositeText(params: TextRenderParams, spec: PlacementSpec): Promise<Buffer> {
+    const { createCanvas, loadImage } = require('canvas');
     const img = await loadImage(params.imageBuffer);
     const canvas = createCanvas(img.width, img.height);
-    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+    const ctx = canvas.getContext('2d') as any;
 
     // Draw base artwork
     ctx.drawImage(img, 0, 0);
@@ -353,7 +350,7 @@ export class QwenTextRenderService {
   }
 
   /** Simple word-wrap: returns array of lines that fit within maxWidth. */
-  private wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  private wrapText(ctx: any, text: string, maxWidth: number): string[] {
     const words = text.split(' ');
     const lines: string[] = [];
     let current = '';

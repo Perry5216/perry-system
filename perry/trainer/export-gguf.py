@@ -14,7 +14,6 @@ Usage:
 import argparse
 import subprocess
 import sys
-import os
 from pathlib import Path
 
 
@@ -39,23 +38,11 @@ def main():
     print(f" Quantization: {args.quant}")
     print(f"{'='*60}\n")
     
-    # Step 1: Install/check llama.cpp
-    llama_cpp_dir = Path("/root/.unsloth/llama.cpp")
+    # Step 1: Locate llama.cpp (pre-built by the trainer Dockerfile at /opt/llama.cpp)
+    llama_cpp_dir = Path("/opt/llama.cpp")
     if not llama_cpp_dir.exists():
-        print("Installing llama.cpp from source...")
-        llama_cpp_dir.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([
-            "git", "clone", "--depth=1",
-            "https://github.com/ggml-org/llama.cpp.git",
-            str(llama_cpp_dir)
-        ], check=True)
-        
-        # Build llama.cpp (CPU only — GGUF export doesn't need GPU)
-        build_dir = llama_cpp_dir / "build"
-        build_dir.mkdir(exist_ok=True)
-        subprocess.run(["cmake", "..", "-DCMAKE_BUILD_TYPE=Release"], cwd=str(build_dir), check=True)
-        subprocess.run(["cmake", "--build", ".", "--config", "Release", "-j", str(os.cpu_count())], cwd=str(build_dir), check=True)
-        print("llama.cpp installed successfully!")
+        print(f"ERROR: llama.cpp not found at {llama_cpp_dir} — the trainer image should pre-build it.")
+        sys.exit(1)
     
     # Step 2: Find the converter and quantizer
     converter = None

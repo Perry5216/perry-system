@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "perry": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "perry",
+        "node",
+        "/app/packages/mcp-server/dist/index.js"
+      ]
+    }
+  }
+}

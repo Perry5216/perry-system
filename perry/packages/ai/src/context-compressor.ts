@@ -107,7 +107,8 @@ Instructions:
 - **Bold** key names, locations, and important concepts so the writer model can scan them easily.
 - Preserve exact terminology and world rules without alteration.
 - Note any critical emotional states, relationships, or immediate timeline positions if relevant to the task.
-- If the raw context contains contradictory information, flag it explicitly in a '> [!WARNING]' block.
+- If the raw context contains contradictory information, flag it inline with a bold prefix like "**CONTRADICTION:**". Do NOT use markdown blockquote callouts (no "> [!WARNING]", no "> [!NOTE]") — those leak into the writer's output as visible formatting.
+- Output prose facts only — no markdown blockquotes ('>'), no fenced code blocks, no XML-style tags, no "Here is..." preamble, no "Let me know if you need anything else" postamble. The writer model will echo whatever shape you emit; keep the shape clean.
 - MAXIMIZE DENSITY: Use a telegraphic writing style. Eliminate conversational filler, articles (a, an, the), and helper verbs where meaning remains clear. Use shorthand/symbols (e.g., 'Character A goes to Location B' -> 'A -> Loc B'). Use key-value pairs for stats/attributes.
 
 Your output is injected directly into the writer's limited context window. Make every single token count.`,
@@ -212,6 +213,31 @@ export class ContextCompressor {
       };
     }
 
+    // ── Skip compression when the input already fits the budget ──
+    // Calling the librarian on a 28-token slot to "fit in 1024 tokens" is
+    // a wasted LLM round-trip — it adds 1-2s of latency PLUS often expands
+    // the output because the system prompt creates floor cost. Skip entirely
+    // when input is already at or under the target, OR when the input is
+    // below an absolute minimum (200 tokens) where compression can't yield
+    // useful savings versus its round-trip cost.
+    {
+      const originalTokens = Math.ceil(request.rawContext.length / 3.5);
+      const MIN_COMPRESS_TOKENS = 200;
+      if (originalTokens <= request.targetTokens || originalTokens < MIN_COMPRESS_TOKENS) {
+        this.log.debug('Skipping compression — input already within budget', {
+          mode: request.mode, originalTokens, targetTokens: request.targetTokens,
+        });
+        return {
+          compressed: request.rawContext,
+          originalTokens,
+          compressedTokens: originalTokens,
+          compressionRatio: 1,
+          mode: request.mode,
+          provider: 'passthrough',
+        };
+      }
+    }
+
     // ── Cache check ──
     const cacheKey = this.buildCacheKey(request);
     const cached = this.cache.get(cacheKey);
@@ -253,9 +279,18 @@ export class ContextCompressor {
       });
 
       const elapsed = Date.now() - startTime;
-      const compressedTokens = Math.ceil(response.text.length / 3.5);
+      // Defensive strip: even with the prompt explicitly forbidding GFM callouts,
+      // gemma3:12b sometimes still emits "> [!WARNING]" blocks. The writer model
+      // (Magnum 32B) is finetuned to echo whatever scaffolding appears in its
+      // context, so a single callout in the briefing becomes a callout in the
+      // generated scene. Belt-and-braces: strip them here before the briefing
+      // is cached or injected.
+      const cleanText = response.text
+        .replace(/^>\s*\[![^\]\n]+\][\s\S]*?(?=\n[^>\s]|\n\s*\n|$)/gim, '')
+        .replace(/^>\s+.*$/gm, '');
+      const compressedTokens = Math.ceil(cleanText.length / 3.5);
       const result: CompressionResult = {
-        compressed: response.text,
+        compressed: cleanText,
         originalTokens,
         compressedTokens,
         compressionRatio: originalTokens > 0 ? compressedTokens / originalTokens : 1,

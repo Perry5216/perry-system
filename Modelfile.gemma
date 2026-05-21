@@ -1,2 +1,0 @@
-FROM gemma4:26b-a4b-it-q4_K_M
-PARAMETER num_ctx 131072

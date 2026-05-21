@@ -5,6 +5,17 @@ secrets/
 my-n8n-config.yml
 n8nac-config.json
 
+# Worker config files (may contain auth tokens / OAuth state)
+perry/worker/.mcp.json
+perry/worker/gemini-settings.json
+
+# VPN config files (contain WireGuard / OpenVPN credentials)
+perry/config/openvpn/
+
+# Belt-and-braces for sensitive config dirs
+perry/config/.vault/
+perry/config/user.json
+
 # Large model files and local DBs
 .ollama-models/
 qdrant_storage/

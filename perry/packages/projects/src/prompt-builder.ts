@@ -13,7 +13,8 @@ import type {
   Project, ProjectStep, ContextBudget, ContextSlot, SlotPriority,
   BudgetReport, AIProvider, Logger,
 } from '@perry/core';
-import { ContextBudgetManager, ConfigService } from '@perry/core';
+import { ContextBudgetManager, ConfigService, loadInstalledSkills } from '@perry/core';
+import type { EventBus, LoadedSkill } from '@perry/core';
 import type { ContextCompressor } from '@perry/ai';
 import type { ContextEngine } from '@perry/rag';
 import { readFileSync, existsSync } from 'fs';
@@ -35,6 +36,16 @@ export class PromptBuilder {
   private heuristics: HeuristicsService;
   private config: ConfigService;
   private librarianAgent: LibrarianAgent | null = null;
+  /** Optional RAG service for bible-aware retrieval. Injected post-construction
+   *  (avoid circular deps via the @perry/rag package). When set, the chapter-
+   *  write path pulls only the most relevant bible chunks instead of injecting
+   *  the entire bible blob. */
+  private ragService: any | null = null;
+  /** Optional pen-profile reader. When set + the pen has SOUL.md/LESSONS.md
+   *  files written by AuditService, addPenContextSlots prefers those static
+   *  files to re-rendering pen anti-patterns from raw data on every call.
+   *  Late-bound for the same reason as ragService — avoids circular wiring. */
+  private penProfileService: any | null = null;
 
   /**
    * Budget carry-forward: when a chapter uses less context than allocated,
@@ -43,6 +54,11 @@ export class PromptBuilder {
    * chapters to include more context from earlier in the story.
    */
   private carryForward = new Map<string, number>();
+
+  private eventBus: EventBus | null = null;
+
+  /** Late-binding event bus injection so prompt-builder can emit learning:* events. */
+  setEventBus(bus: EventBus): void { this.eventBus = bus; }
 
   constructor(
     workspaceDir: string,
@@ -65,6 +81,132 @@ export class PromptBuilder {
     if (this.compressor) {
       this.librarianAgent = new LibrarianAgent(this.compressor, this.contextEngine, this.log);
     }
+    this.refreshSkipSkills();   // initial load — populates from any previously-promoted skills
+  }
+
+  /**
+   * Skip-rules loaded from `workspace/skills-installed/prompt-builder/` —
+   * promoted skills with `applies_when: { query_kind, topic_fingerprint, action: 'skip' }`
+   * tell us to short-circuit specific RAG queries that have proven useless.
+   * Reloaded periodically (cheap fs read of a small dir) so newly-promoted
+   * skills become active without a restart.
+   */
+  private skipRules: Array<{ queryKind: string; topicFingerprint: string }> = [];
+  private skipRulesLoadedAt = 0;
+  private readonly SKIP_RULES_TTL_MS = 60_000;
+
+  private refreshSkipSkills(): void {
+    try {
+      const skills: LoadedSkill[] = loadInstalledSkills(this.workspaceDir, 'prompt-builder');
+      this.skipRules = skills
+        .filter(s => s.appliesWhen?.action === 'skip')
+        .map(s => ({
+          queryKind: String(s.appliesWhen.query_kind || ''),
+          topicFingerprint: String(s.appliesWhen.topic_fingerprint || ''),
+        }))
+        .filter(r => r.queryKind && r.topicFingerprint);
+      this.skipRulesLoadedAt = Date.now();
+      if (this.skipRules.length > 0) {
+        this.log.info('prompt-builder skip skills loaded', { count: this.skipRules.length });
+      }
+    } catch (err: any) {
+      this.log.warn('prompt-builder skill load failed (non-fatal)', { error: err.message });
+    }
+  }
+
+  /**
+   * Public gate: returns true if a promoted skill says we should skip this
+   * RAG query entirely (saves the embedding call + DB roundtrip). Called by
+   * the retrieval sites before they fire.
+   */
+  protected shouldSkipRagQuery(queryKind: string, queryTopic: string): boolean {
+    if (Date.now() - this.skipRulesLoadedAt > this.SKIP_RULES_TTL_MS) {
+      this.refreshSkipSkills();
+    }
+    if (this.skipRules.length === 0) return false;
+    const topicKey = require('crypto').createHash('sha1')
+      .update(queryTopic.toLowerCase().slice(0, 200)).digest('hex').slice(0, 8);
+    return this.skipRules.some(r => r.queryKind === queryKind && r.topicFingerprint === topicKey);
+  }
+
+  /**
+   * Emit a RAG query outcome event. LearningCore aggregates across many
+   * prompt builds and proposes a "skip this query" skill once the
+   * (queryKind, topic) pair has missed enough times. Hit vs miss is
+   * encoded as success vs observation so LearningCore can read both.
+   */
+  protected recordRagOutcome(queryKind: string, queryTopic: string, hitCount: number): void {
+    if (!this.eventBus) return;
+    try {
+      const topicKey = require('crypto').createHash('sha1')
+        .update(queryTopic.toLowerCase().slice(0, 200)).digest('hex').slice(0, 8);
+      const fingerprint = `${queryKind}::${topicKey}`;
+      if (hitCount > 0) {
+        this.eventBus.emit('learning:success', {
+          source: 'prompt-builder',
+          kind: 'rag-hit',
+          fingerprint,
+          metadata: { query_kind: queryKind, topic_fingerprint: topicKey, hit_count: hitCount },
+        });
+      } else {
+        this.eventBus.emit('learning:observation', {
+          source: 'prompt-builder',
+          kind: 'rag-miss',
+          fingerprint,
+          metadata: { query_kind: queryKind, topic_fingerprint: topicKey, sample: queryTopic.slice(0, 120) },
+        });
+      }
+    } catch (err: any) {
+      this.log.warn('promptbuilder learning-emit threw (non-fatal)', { queryKind, error: err.message });
+    }
+  }
+
+  /** Late-binding injection — call once after construction. */
+  setRagService(rag: any): void {
+    this.ragService = rag;
+  }
+
+  /** Late-binding injection for the pen-profile reader. */
+  setPenProfileService(svc: any): void {
+    this.penProfileService = svc;
+  }
+
+  /**
+   * Build-result cache. Keyed by hash(systemPrompt + step.prompt + step.id +
+   * provider.contextWindow + compressionMultiplier + completed-step ids).
+   * 60s TTL with 200-entry cap. Skips compression-heavy rebuilds when:
+   *   - Same step retried after a transient failure
+   *   - Same step inspected for budget report
+   *   - Continuation rebuilds where the base prompt hasn't changed
+   *
+   * Invalidates automatically when any prior step's status flips (new
+   * completedSteps list → different hash).
+   */
+  private buildCache = new Map<string, { result: { message: string; budgetReport: BudgetReport }; storedAt: number }>();
+  private readonly BUILD_CACHE_TTL_MS = 60_000;
+  private readonly BUILD_CACHE_MAX = 200;
+
+  private buildCacheKey(project: Project, step: ProjectStep, provider: AIProvider, systemPrompt: string, compressionMultiplier: number): string {
+    const completedIds = project.steps
+      .filter(s => s.status === 'completed')
+      .map(s => s.id)
+      .join(',');
+    const blob = [
+      step.id,
+      step.prompt?.length || 0,
+      systemPrompt.length,
+      (provider as any).contextWindow || 0,
+      compressionMultiplier.toFixed(2),
+      completedIds,
+      this.skipCompressionFlag ? 'sk' : 'cmp',
+    ].join('|');
+    // DJB2 hash — cheap, stable, collision-resistant enough for an in-memory
+    // 200-entry cache. Not crypto. If `step.prompt` is huge, we hash its
+    // length not content; combined with completedIds + skipCompressionFlag
+    // this gives the right invalidation behavior for our flows.
+    let h = 5381;
+    for (let i = 0; i < blob.length; i++) h = ((h << 5) + h) ^ blob.charCodeAt(i);
+    return `${(h >>> 0).toString(36)}:${blob.length}`;
   }
 
   /**
@@ -79,13 +221,32 @@ export class PromptBuilder {
    * 4. Feed everything into the BudgetManager for priority-based fitting
    * 5. Return the assembled message that fits within the provider's limits
    */
+  /** When true, all per-slot librarian compression is skipped for this build.
+   *  Set by step-runner for worker-routed steps (Claude/Gemini have huge
+   *  native context windows; pre-compressing wastes librarian time without
+   *  benefit). Implemented as a builder-instance toggle so the existing
+   *  tryCompress / per-slot call sites don't need plumbing through every
+   *  helper signature. */
+  private skipCompressionFlag = false;
+
   async build(
     project: Project,
     step: ProjectStep,
     provider: AIProvider,
     systemPrompt: string,
     compressionMultiplier: number = 1.0,
+    options: { skipCompression?: boolean } = {},
   ): Promise<{ message: string; budgetReport: BudgetReport }> {
+    this.skipCompressionFlag = !!options.skipCompression;
+
+    // Cache check — same step + same context + same flags = same prompt.
+    // Saves 20-40s of librarian compression on retries / mid-step inspections.
+    const cacheKey = this.buildCacheKey(project, step, provider, systemPrompt, compressionMultiplier);
+    const cached = this.buildCache.get(cacheKey);
+    if (cached && Date.now() - cached.storedAt < this.BUILD_CACHE_TTL_MS) {
+      this.log.debug('Prompt build cache hit', { step: step.label, key: cacheKey });
+      return cached.result;
+    }
     // Calculate available budget
     const outputBudget = step.wordCountTarget
       ? Math.ceil(step.wordCountTarget * 1.3) // ~1.3 tokens per word
@@ -151,11 +312,16 @@ export class PromptBuilder {
     //   - voice_profile: needs structured targets + sample passages; Anti-Laziness causes prose rambling
     const isAnalyticalStep = ['pov_check', 'stat_update', 'continuity_check', 'revision_audit', 'analysis', 'book_bible', 'outline', 'voice_profile'].includes(step.taskType);
     const canSegment = ['creative_writing', 'revision_execution'].includes(step.taskType);
+    // Token-tighter rewrite of the same constraints — ~60% shorter than
+    // the prior multi-sentence form. Same semantic content (no placeholders,
+    // no summaries, finish what's asked) and matched output quality in
+    // spot-checks against the verbose version. Saves ~40 tokens per step
+    // where injected.
     if (!isAnalyticalStep) {
       slots.push({
         label: 'Anti-Laziness Protocol',
-        content: `[ANTI-LAZINESS PROTOCOL: You must output FULL, exhaustive detail. NEVER use placeholders (e.g. "profiles will be similarly detailed"). NEVER summarize. Complete the ENTIRE requested structure no matter how long it takes.` +
-          (canSegment ? ` If you are running out of memory, stop cleanly when you reach the limit.` : '') + `]`,
+        content: `[ANTI-LAZINESS: Output full detail. No placeholders. No summaries. Finish the requested structure completely.` +
+          (canSegment ? ` Stop cleanly if you hit the memory limit.` : '') + `]`,
         priority: 1,
         tokenCount: 0,
         compressible: false,
@@ -164,15 +330,16 @@ export class PromptBuilder {
     }
 
     // ── Global Anti-Patterns ──
-    // BUG FIX: Do not inject forbidden names/cliches into planning steps. 
+    // BUG FIX: Do not inject forbidden names/cliches into planning steps.
     // It causes infinite reasoning loops if the model accidentally generates a banned word.
+    // Tightened wording — same banned list, shorter framing.
     if (!isAnalyticalStep) {
       slots.push({
         label: 'Global Anti-Patterns',
-        content: `[ANTI-PATTERNS (FORBIDDEN NAMES & PHRASES): The following are overused AI defaults and are strictly banned. Do NOT use them:
-  - Names: Chen, Sarah Chen, Elara, Lyra, Jasper, Lena, Zara, Zane, Niko, Lila, Mira, Leo.
-  - AI-isms/Clichés: "a testament to", "tapestry", "symphony", "palpable", "delve", "echoed", "cacophony", "labyrinth", "dance of blades".
-  - Melodrama: "a shiver ran down his spine", "his blood ran cold", "heart hammered in his chest", "let out a breath he didn't know he was holding".]`,
+        content: `[BANNED (overused AI defaults — do not use):
+  Names: Chen, Sarah Chen, Elara, Lyra, Jasper, Lena, Zara, Zane, Niko, Lila, Mira, Leo.
+  Clichés: "a testament to", "tapestry", "symphony", "palpable", "delve", "echoed", "cacophony", "labyrinth", "dance of blades".
+  Melodrama: "a shiver ran down his spine", "blood ran cold", "heart hammered in his chest", "let out a breath he didn't know he was holding".]`,
         priority: 1,
         tokenCount: 0,
         compressible: false,
@@ -181,10 +348,18 @@ export class PromptBuilder {
     }
 
     // ── Prose Style Controls (apply to all writing steps) ──
+    // Part 1 gets the full rule list. Part 2+ gets a compressed reminder
+    // because the writer has Part 1's prose in context as a stylistic
+    // exemplar — the verbose rules are redundant by then. Saves ~200
+    // tokens per continuation segment without changing the constraint.
     if (canSegment) {
-      slots.push({
-        label: 'Prose Style Controls',
-        content: `[PROSE STYLE CONTROLS — ALL RULES ARE HARD CONSTRAINTS, NOT SUGGESTIONS]\n` +
+      const isContinuation = typeof step.segmentIndex === 'number' && step.segmentIndex > 0;
+      const content = isContinuation
+        ? `[PROSE STYLE — same rules as Part 1: ≤1 em-dash per 500 words, ` +
+          `no common noun/verb/adjective >4× per 500 words, no phrase repetition ` +
+          `within segment, ≥1 line of direct speech or italic internal voice, ` +
+          `vary sentence starts.]`
+        : `[PROSE STYLE CONTROLS — ALL RULES ARE HARD CONSTRAINTS, NOT SUGGESTIONS]\n` +
           `1. EM DASH DISCIPLINE: You are PROHIBITED from using more than 1 em dash (—) per 500 words. ` +
           `Em dashes are reserved for sharp interruptions only. In all other cases, use commas, semicolons, colons, periods, or parentheses. ` +
           `NEVER place two em-dash clauses in the same sentence.\n` +
@@ -194,7 +369,10 @@ export class PromptBuilder {
           `3. PHRASE REPETITION BAN: Do NOT repeat the same phrase, metaphor, or motif more than ONCE per segment. ` +
           `If you have used a phrase (e.g., "the lattice shuddered"), it is now retired for this segment.\n` +
           `4. DIALOGUE REQUIREMENT: Every segment MUST contain at least one exchange of direct speech or italicised internal voice. Pure narration with no voice is FORBIDDEN.\n` +
-          `5. SENTENCE VARIETY: Vary sentence length and structure. Do NOT start 3 consecutive sentences with the same word or pattern.`,
+          `5. SENTENCE VARIETY: Vary sentence length and structure. Do NOT start 3 consecutive sentences with the same word or pattern.`;
+      slots.push({
+        label: 'Prose Style Controls',
+        content,
         priority: 1,
         tokenCount: 0,
         compressible: false,
@@ -202,9 +380,22 @@ export class PromptBuilder {
       });
     }
 
+    // When the child project's own description is empty (e.g. a KDP launch
+    // linked to an existing book), fall back to the parent's title + desc
+    // so the meta-routing steps still have something to anchor on. This is
+    // especially important since we carve those steps out from bible
+    // inheritance above — the description IS their entire input.
+    let descContent = project.description?.trim() || '';
+    if (!descContent && project.parentId) {
+      const parent = this.stateStore.get(project.parentId);
+      if (parent?.description?.trim()) {
+        descContent = `(inherited from parent project "${parent.title}")\n\n${parent.description}`;
+      }
+    }
+
     slots.push({
       label: 'Project Description',
-      content: `## Project: ${project.title}\n\n${project.description}`,
+      content: `## Project: ${project.title}\n\n${descContent || '(no description provided)'}`,
       priority: 1,
       tokenCount: 0,
       compressible: false,
@@ -229,24 +420,89 @@ export class PromptBuilder {
     }
 
     // ── Feature 3: Series Bible Auto-Inheritance ──
-    // Style-calibration projects MUST NOT inherit parent planning context.
-    // The Book Bible and outline are irrelevant to prose calibration — when injected,
-    // they dominate the prompt (10 slots, ~56k tokens) and cause the model to analyse
-    // the novel structure instead of grading/synthesising from the POV check reports.
-    if (project.parentId && project.type !== 'style-calibration') {
+    // Style-calibration originally skipped ALL parent context because the per-
+    // chapter outline / scene breakdown / tension blueprint slots referenced
+    // chapter numbers (101, 102, 201…) that don't exist in the real novel
+    // outline, producing "Chapter 101: [not found]" garbage. We now allow the
+    // BIBLE-level slots (Character Bible, Faction Bible, World Building, Voice
+    // Profile, Influence Map, Dialogue Fingerprint, etc.) which are book-wide
+    // and don't suffer the chapter-number mismatch. Continues to skip the
+    // 'outline' phase for calibration so chapter-specific blueprints stay out.
+    // Concept Keywords / KDP Concept Keywords are pure metadata-routing
+    // steps: they read the project description and emit a tiny JSON object
+    // (subjectSlug, redditSubs, primaryQuery, …). Inheriting the parent's
+    // Faction/Character/World Bible swamps them with prose and they drift
+    // into regenerating bible content instead of emitting JSON. We carve
+    // them out from parent inheritance and let the description (own or
+    // parent-fallback) be the sole anchor.
+    const isMetaRoutingStep = (step.label === 'Concept Keywords' || step.label === 'KDP Concept Keywords') &&
+      (project.type === 'book-planning' || project.type === 'amazon-kdp-launch');
+
+    if (project.parentId && !isMetaRoutingStep) {
       const parent = this.stateStore.get(project.parentId);
       if (parent) {
-        let planningPhases = ['bible', 'outline', 'premise'];
-        if (step.taskType === 'continuity_check') {
+        let planningPhases: string[] = ['bible', 'outline', 'premise'];
+        if (project.type === 'style-calibration') {
+          // Pull voice / character / world / faction bibles + premise +
+          // research. Research includes Market & Genre Analysis (target
+          // audience, comp titles, reader-praise themes, anti-patterns,
+          // voice/diction targets) and the underlying live-data scouts
+          // (Reddit comments, Amazon Product Deep Dive blurb keywords,
+          // Cover Trends Scout palette cues). Calibration scenes that
+          // train the writer LoRA should mirror these reader-validated
+          // signals — not the writer's training-data priors. Skip
+          // 'outline' — its chapter-specific slots break on calibration
+          // chapter numbers like 101/201.
+          planningPhases = ['bible', 'premise', 'research'];
+        } else if (step.taskType === 'continuity_check') {
           planningPhases = ['bible', 'premise']; // Exclude outline to prevent spoilers
         } else if (step.phase === 'writing') {
           planningPhases = []; // Handled specifically by getWritingContextSlots
+        } else if (project.type === 'amazon-kdp-launch') {
+          // KDP Launch consumes the planning project's MARKET RESEARCH (comp
+          // titles, blurb hook patterns, BSR ladder, cover trends, working
+          // keyword set) as its primary input. Without `research` phase
+          // inheritance, the launch synthesis steps would re-derive
+          // everything from scratch — wasting fetches and producing
+          // inconsistent data drift between planning and launch. We add
+          // `research` so the planning's Live Comp Title Scout, Amazon
+          // Product Deep Dive, Cover Trends Scout, and Market & Genre
+          // Analysis all flow into the launch's metadata + AMS work.
+          planningPhases = ['bible', 'outline', 'premise', 'research'];
         }
-        
+
+        // Cast Extraction is a one-shot step where the model must read the
+        // Character Bible verbatim — specifically its TIER 1 / TIER 2 / TIER 3
+        // section headers — to produce a correctly-tiered roster. Compressing
+        // the bible to ~1024 tokens flattens the tier structure into a digest of
+        // names, after which the model invariably re-ranks characters wrong
+        // (e.g. demoting 6 of 7 Tier 1 POVs into Tier 2/3). For this one step
+        // we inject the parent's Character Bible UNCOMPRESSED with high priority.
+        const isCastExtraction = step.label === 'Cast Extraction' && project.type === 'style-calibration';
+
         const parentPlanningSteps = parent.steps.filter(
           s => s.status === 'completed' && s.result && planningPhases.includes(s.phase),
         );
         for (const ps of parentPlanningSteps) {
+          const isCharacterBibleForCastExtraction = isCastExtraction &&
+            (ps.label === 'Character Bible' || ps.label?.toLowerCase().includes('character bible'));
+
+          if (isCharacterBibleForCastExtraction) {
+            slots.push({
+              label: `[Inherited] ${ps.label} (verbatim — tier headers preserved)`,
+              content: ps.result!,
+              priority: 1, // Critical for tier-correct extraction
+              tokenCount: 0,
+              compressible: false,
+              compressedVersion: undefined,
+              included: false,
+            });
+            this.log.info('Cast Extraction: injecting Character Bible UNCOMPRESSED', {
+              chars: ps.result!.length,
+            });
+            continue;
+          }
+
           const compressed = await this.tryCompress(
             ps.result!,
             `Inherited from parent project "${parent.title}" for continuity. ${step.label}`,
@@ -265,6 +521,7 @@ export class PromptBuilder {
         this.log.info('Inherited parent planning context', {
           parent: parent.title,
           stepsInherited: parentPlanningSteps.length,
+          castExtractionMode: isCastExtraction,
         });
       }
     }
@@ -282,8 +539,21 @@ export class PromptBuilder {
     const isCalibrationAnalysis = project.type === 'style-calibration' &&
       (step.taskType === 'pov_check' || step.taskType === 'analysis');
 
+    // ── BUG FIX #3: Skip RAG for network_research + Concept Keywords ──
+    // These steps treat live fetched web pages as their ONLY ground truth. The
+    // semantic context engine indexes every prior project's prose by content,
+    // so a cyberpunk-themed query in project-B pulls in chunks from a similar
+    // project-A that's already been planned — and the librarian dutifully
+    // cites those as if they were in the fetched sources. Result: "The Last
+    // Synapse novel" (from a sibling book-planning project) bleeding into an
+    // unrelated military-fiction project's keyword scout.
+    const isNetworkResearch = step.taskType === 'network_research';
+    const isConceptKeywords = (step.label === 'Concept Keywords' || step.label === 'KDP Concept Keywords') &&
+      (project.type === 'book-planning' || project.type === 'amazon-kdp-launch');
+    const skipContextEngine = isCalibrationAnalysis || isNetworkResearch || isConceptKeywords;
+
     // ── P2-P4: Context from ContextEngine ──
-    if (!isCalibrationAnalysis) {
+    if (!skipContextEngine) {
       const contextSlots = await this.contextEngine.getContextSlots(
         project.id,
         step.id,
@@ -326,6 +596,33 @@ export class PromptBuilder {
       // report (the immediately preceding step). Now it gets all 3 with P1 priority.
       const calSlots = await this.getCalibrationSummarySlots(project, step);
       slots.push(...calSlots);
+    } else if (project.type === 'revision-execution' && step.label === 'Revision Action Plan') {
+      // ── BUG FIX (templates audit): Revision Action Plan ──
+      // Step 1 of Revision Execution synthesises Deep Revision findings, but as
+      // an `analysis` task it fell through to the default else-branch and only
+      // saw the immediately preceding step (which was the project description).
+      // Pull all Pass H Revision Briefs and the Full Revision Summary from the
+      // parent Deep Revision project so the synthesis has its source material.
+      const planSlots = await this.getRevisionPlanSlots(project, step);
+      slots.push(...planSlots);
+    } else if (project.type === 'deep-revision' && step.taskType === 'analysis' &&
+               (step.label === 'Structural Arc Audit' || step.label === 'Character Arc Tracker' ||
+                step.label === 'Thematic Cohesion Report' || step.label === 'Full Revision Summary Report')) {
+      // ── BUG FIX (templates audit): Manuscript-level Deep Revision audits ──
+      // These three audits ("Structural Arc Audit", "Character Arc Tracker",
+      // "Thematic Cohesion Report") and the final "Full Revision Summary Report"
+      // each claim to read the whole manuscript, but parent inheritance only
+      // pulls planning phases. Pull all chapter texts from the parent project.
+      const manuscriptSlots = await this.getManuscriptAuditSlots(project, step);
+      slots.push(...manuscriptSlots);
+    } else if (project.type === 'book-production' && step.taskType === 'final_edit') {
+      // ── BUG FIX: Book Production's Final Prose Polish needs the manuscript ──
+      // The Final Prose Polish step previously had no parent-chapter inheritance —
+      // it would receive a "polish the manuscript" instruction with no manuscript
+      // in context. Use the same slot builder as Deep Revision's audits so the
+      // polish step actually sees the chapter texts it's supposed to polish.
+      const manuscriptSlots = await this.getManuscriptAuditSlots(project, step);
+      slots.push(...manuscriptSlots);
     } else if (step.phase === 'writing' || step.taskType === 'pov_check' || step.taskType === 'stat_update' || (step.taskType === 'book_bible' && step.label.includes('Stat'))) {
       
       const librarianProvider = this.compressor?.getProvider();
@@ -403,6 +700,7 @@ export class PromptBuilder {
     // V2: Re-compress any slots that were slightly too large
     if (report.slotsNeedingRecompress.length > 0 && this.compressor) {
       for (const recomp of report.slotsNeedingRecompress) {
+        if (this.skipCompressionFlag) break;  // worker-routed: never re-compress
         const slot = report.slots.find(s => s.label === recomp.label);
         if (slot) {
           try {
@@ -508,7 +806,14 @@ export class PromptBuilder {
       }
     }
 
-    return { message, budgetReport: report };
+    const finalResult = { message, budgetReport: report };
+    // Stash in cache. Cap size by dropping the oldest 30 entries when over.
+    this.buildCache.set(cacheKey, { result: finalResult, storedAt: Date.now() });
+    if (this.buildCache.size > this.BUILD_CACHE_MAX) {
+      const ordered = [...this.buildCache.entries()].sort((a, b) => a[1].storedAt - b[1].storedAt);
+      for (let i = 0; i < 30; i++) this.buildCache.delete(ordered[i][0]);
+    }
+    return finalResult;
   }
 
   /**
@@ -531,6 +836,125 @@ export class PromptBuilder {
    * individually scoped, priority-ranked slots that the BudgetManager can
    * handle intelligently.
    */
+  /**
+   * Push pen-name "muscle memory" context slots — voice anchors + curated
+   * anti-pattern list — into the slot array. Used by BOTH calibration and
+   * novel-pipeline writing paths so chapters get the same pen voice as
+   * calibration scenes. Resolves the slug from the project's penNameSlug or
+   * (for child projects) the parent's penNameSlug, defaulting to 'default'.
+   */
+  private async addPenContextSlots(slots: ContextSlot[], project: Project, currentStep: ProjectStep): Promise<void> {
+    const penSlug = (project.context.penNameSlug
+      || (project.parentId ? this.stateStore.get(project.parentId)?.context?.penNameSlug : undefined)
+      || 'default') as string;
+
+    // 1. Voice anchors — gold-tier curated prose samples in meta['voice_anchors_{slug}'].
+    try {
+      const raw = this.stateStore.getMeta(`voice_anchors_${penSlug}`);
+      if (raw) {
+        const anchors = JSON.parse(raw) as Array<{
+          id?: string;
+          tier?: string;
+          source?: string;
+          scene_type?: string;
+          tags?: string[];
+          weight?: number;
+          active?: boolean;
+          prose?: string;
+        }>;
+        const active = anchors.filter(a => a.active !== false && a.prose);
+        if (active.length > 0) {
+          const sceneMatch = active.filter(a => {
+            if (!a.scene_type) return false;
+            const label = currentStep.label.toLowerCase();
+            return label.includes(a.scene_type.toLowerCase());
+          });
+          const chosen = sceneMatch.length > 0 ? sceneMatch : active.slice(0, 3);
+          const text = chosen.map((a, i) =>
+            `### Anchor ${i + 1}${a.source ? ` — ${a.source}` : ''}${a.scene_type ? ` (${a.scene_type})` : ''}\n${a.prose}`,
+          ).join('\n\n');
+          slots.push({
+            label: `Voice Anchors (${penSlug})`,
+            content:
+              `## VOICE ANCHORS (target prose for this pen)\n` +
+              `Match the rhythm, density, and physicality. Do not copy phrasing.\n\n` +
+              text,
+            priority: 1,
+            tokenCount: 0,
+            compressible: false,
+            included: false,
+          });
+        }
+      }
+    } catch (err: any) {
+      this.log.warn('Failed to load voice anchors', { penSlug, error: err.message });
+    }
+
+    // 2. Pen identity — SOUL.md + LESSONS.md if the pen profile has been
+    //    generated; otherwise fall back to rendering anti-patterns inline.
+    //    The profile files are written by PenProfileService after audits and
+    //    on a 6h GC sweep; they consolidate identity + audit lessons into
+    //    stable text that's the same across every prompt. Reading two small
+    //    files beats re-rendering the verbose anti-pattern block each call.
+    let pen: any = null;
+    try {
+      pen = this.stateStore.getPenName(penSlug);
+    } catch (err: any) {
+      this.log.warn('Failed to load pen row', { penSlug, error: err.message });
+    }
+
+    let usedProfileFiles = false;
+    if (this.penProfileService) {
+      try {
+        const profile = await this.penProfileService.load(penSlug);
+        if (profile?.soul) {
+          slots.push({
+            label: `Pen Identity (${penSlug})`,
+            content: profile.soul,
+            priority: 1,
+            tokenCount: 0,
+            compressible: false,
+            included: false,
+          });
+          usedProfileFiles = true;
+        }
+        if (profile?.lessons) {
+          slots.push({
+            label: `Pen Lessons (${penSlug})`,
+            content: profile.lessons,
+            priority: 1,
+            tokenCount: 0,
+            compressible: false,
+            included: false,
+          });
+          usedProfileFiles = true;
+        }
+      } catch (err: any) {
+        this.log.warn('Failed to load pen profile files', { penSlug, error: err.message });
+      }
+    }
+
+    // Fallback: inline anti-patterns rendering when no profile file is on
+    // disk (new pen, never audited, or PenProfileService not wired in).
+    if (!usedProfileFiles) {
+      const ap = pen?.raw?.antiPatterns as string[] | undefined;
+      if (Array.isArray(ap) && ap.length > 0) {
+        const numbered = ap.map((p, i) => `${i + 1}. ${p}`).join('\n');
+        slots.push({
+          label: `Pen Anti-Patterns (${penSlug})`,
+          content:
+            `## PEN ANTI-PATTERNS (${ap.length} hard prohibitions for this pen)\n` +
+            `If you catch yourself reaching for one, pivot to a varied physical verb or somatic marker.\n\n` +
+            numbered,
+          priority: 1,
+          tokenCount: 0,
+          compressible: false,
+          included: false,
+        });
+      }
+    }
+  }
+
   private getChapterTextToAnalyze(project: Project, currentStep: ProjectStep): string | null {
     if (currentStep.chapterNumber === undefined) return null;
     
@@ -653,6 +1077,33 @@ export class PromptBuilder {
       }
     }
 
+    // For bible / outline steps, include ALL prior bible+outline siblings.
+    // Templates like bookPlanning have prompts of the form "Based on the
+    // Character Bible, Voice Profile, and Faction Bible…" — without this, the
+    // LLM only sees the immediate previous step and silently lacks the rest.
+    // Budget manager will drop/compress low-priority entries on long chains.
+    if (currentStep.phase === 'bible' || currentStep.phase === 'outline') {
+      const planningPriors = completedSteps.filter(
+        s => s.phase === 'bible' || s.phase === 'outline',
+      );
+      if (planningPriors.length > 0) {
+        return planningPriors.map(s => `### ${s.label}\n${s.result}`).join('\n\n---\n\n');
+      }
+    }
+
+    // For research-phase synthesis steps (e.g. Market & Genre Analysis at the
+    // tail of the book-planning research arc), include ALL prior research
+    // siblings. Without this, the synthesis step only sees the immediately
+    // previous step's result (per the fallback below) and the model — having
+    // no Comp Scout / Trend Pulse / Keyword Check / Deep Dive in context —
+    // either refuses to synthesise or hallucinates the missing data.
+    if (currentStep.phase === 'research') {
+      const researchPriors = completedSteps.filter(s => s.phase === 'research');
+      if (researchPriors.length > 0) {
+        return researchPriors.map(s => `### ${s.label}\n${s.result}`).join('\n\n---\n\n');
+      }
+    }
+
     // For other steps, include the immediately previous step
     const idx = project.steps.indexOf(currentStep);
     if (idx > 0) {
@@ -700,8 +1151,9 @@ export class PromptBuilder {
     }
 
     // Librarian fallback: if regex extraction failed and the Librarian is available,
-    // ask it to extract the chapter section from the full outline
-    if (this.compressor && this.compressor.isAvailable()) {
+    // ask it to extract the chapter section from the full outline.
+    // Skipped for worker-routed steps — workers can swallow the whole outline.
+    if (!this.skipCompressionFlag && this.compressor && this.compressor.isAvailable()) {
       try {
         this.log.info('Outline regex extraction failed — falling back to Librarian', { chapterNumber });
         const result = await this.compressor.buildBriefing(
@@ -820,6 +1272,130 @@ export class PromptBuilder {
     const chapterNum = currentStep.chapterNumber || 0;
     const isWriting = currentStep.phase === 'writing';
 
+    // ── Bible-aware RAG retrieval ─────────────────────────────────────
+    // For chapter-write steps, if the RAG service has any indexed bible
+    // chunks, retrieve only the slices semantically relevant to THIS
+    // chapter's outline. Replaces the whole-bible context dump for budget
+    // pressure — when both the whole-bible slot and the targeted-chunks
+    // slot are present, the budget manager keeps the higher-priority one
+    // (targeted chunks at P2, whole-bible inheritance at P3).
+    if (isWriting && this.ragService) {
+      try {
+        // Build a query from the chapter's outline section (Section C of
+        // Story Architecture) + the chapter label. The outline IS the
+        // most precise "what this chapter is about" signal — much better
+        // than the step prompt which is mostly boilerplate.
+        let outlineForChapter: string | null = null;
+        if (chapterNum > 0) {
+          const outlineStep = completedSteps.find(s => s.label === 'Chapter Outline' && s.result)
+            ?? completedSteps.find(s => s.label === 'Scene-Level Breakdown' && s.result)
+            ?? completedSteps.find(s => s.label === 'Story Architecture' && s.result);
+          if (outlineStep?.result) {
+            outlineForChapter = await this.extractChapterOutline(outlineStep.result, chapterNum).catch(() => null);
+          }
+        }
+        const queryParts: string[] = [];
+        if (currentStep.label) queryParts.push(currentStep.label);
+        if (outlineForChapter) queryParts.push(outlineForChapter.slice(0, 2000));
+        const query = queryParts.join('\n\n').trim();
+        if (query.length > 40) {
+          if (this.shouldSkipRagQuery('bible_rag', query)) {
+            this.log.info('bible_rag retrieval SKIPPED by promoted skill', { chapter: chapterNum });
+            // Don't recordRagOutcome — the skill is already telling us not to bother.
+          } else {
+          const hits = await this.ragService.retrieve({
+            projectId: project.id,
+            query,
+            kinds: ['bible_character', 'bible_setting', 'bible_architecture', 'bible_stats', 'bible_world', 'bible_premise'],
+            topK: 8,
+            minScore: 0.35,   // drop noise; characters/settings unrelated to this chapter
+          });
+          this.recordRagOutcome('bible_rag', query, Array.isArray(hits) ? hits.length : 0);
+          if (Array.isArray(hits) && hits.length > 0) {
+            const blocks = hits.map((h: any) => {
+              const heading = `[${h.kind} · score ${h.score.toFixed(2)}]`;
+              return `### ${heading}\n${h.text}`;
+            }).join('\n\n');
+            slots.push({
+              label: `Bible RAG (${hits.length} relevant chunks)`,
+              content:
+                `## RELEVANT BIBLE EXCERPTS (RAG-retrieved for this chapter)\n` +
+                `[Higher-priority slices for this scene. Full bibles also in context below.]\n\n` +
+                blocks,
+              priority: 2,
+              tokenCount: 0,
+              compressible: false,
+              included: false,
+            });
+            this.log.info('Bible RAG retrieval succeeded', {
+              chapter: chapterNum, hits: hits.length, query: query.slice(0, 80),
+            });
+          }
+          } // close else
+        }
+      } catch (err: any) {
+        this.log.warn('Bible RAG retrieval failed (using fallback whole-bible)', { error: err.message });
+      }
+
+      // ── Verified-success EXEMPLAR retrieval (`learning_chapter`) ──────
+      // Pull the closest-matching past chapters that PASSED the scanLeaks
+      // verification gate. Injects up to 3 exemplars at P2 as "imitate this
+      // voice" rather than the abstract anti-pattern lists. Closes the
+      // self-learning loop — without this slot, the verified corpus grows
+      // but never influences new writes. Same query as the bible RAG
+      // retrieval above (chapter outline + label), but kind-filtered.
+      try {
+        let outlineForChapter: string | null = null;
+        if (chapterNum > 0) {
+          const outlineStep = completedSteps.find(s => s.label === 'Chapter Outline' && s.result)
+            ?? completedSteps.find(s => s.label === 'Scene-Level Breakdown' && s.result)
+            ?? completedSteps.find(s => s.label === 'Story Architecture' && s.result);
+          if (outlineStep?.result) {
+            outlineForChapter = await this.extractChapterOutline(outlineStep.result, chapterNum).catch(() => null);
+          }
+        }
+        const exemplarQuery = [
+          currentStep.label || '',
+          outlineForChapter ? outlineForChapter.slice(0, 1200) : '',
+        ].filter(Boolean).join('\n\n').trim();
+        if (exemplarQuery.length > 40 && !this.shouldSkipRagQuery('learning_chapter_exemplar', exemplarQuery)) {
+          // Cross-project search first — verified prose from ANY project
+          // of this pen is fair game. Per-pen scoping happens implicitly
+          // because each pen has its own projects and the embedding will
+          // match same-voice prose more strongly.
+          const hits = await this.ragService.retrieveGlobal({
+            query: exemplarQuery,
+            kinds: ['learning_chapter'],
+            topK: 3,
+            minScore: 0.40,
+          }).catch(() => []);
+          this.recordRagOutcome('learning_chapter_exemplar', exemplarQuery, Array.isArray(hits) ? hits.length : 0);
+          if (Array.isArray(hits) && hits.length > 0) {
+            const blocks = hits.map((h: any, i: number) =>
+              `### Exemplar ${i + 1} (verified · rank ${Math.abs(h.score).toFixed(2)})\n${h.text}`
+            ).join('\n\n');
+            slots.push({
+              label: `Verified Exemplars (${hits.length} chapters)`,
+              content:
+                `## VERIFIED EXEMPLARS — prose that passed audit\n` +
+                `These are chapters by this pen that passed scanLeaks with zero hits. ` +
+                `Match the rhythm, density, and physicality. Do not copy phrasing.\n\n` +
+                blocks,
+              priority: 2,
+              tokenCount: 0,
+              compressible: false,
+              included: false,
+            });
+            this.log.info('learning_chapter exemplar retrieval succeeded', {
+              chapter: chapterNum, hits: hits.length,
+            });
+          }
+        }
+      } catch (err: any) {
+        this.log.warn('learning_chapter retrieval failed (non-fatal)', { error: err.message });
+      }
+    }
+
     // ── BUG FIX #3: Style Calibration scenes must NOT receive novel-pipeline slots ──
     // Calibration chapters are numbered 101, 102, 103 (pass 1), 201, 202, 203 (pass 2), etc.
     // These chapter numbers don't exist in the parent novel outline, scene breakdown,
@@ -851,6 +1427,82 @@ export class PromptBuilder {
           });
         }
       }
+      // ── Cast Extraction: inject the POV-character roster so the model can
+      //    obey the per-pass POV lock. Cast Extraction is the first analysis
+      //    step of the calibration project — its result is JSON listing the
+      //    Tier 1 POV characters from the parent's Character Bible.
+      const castStep = completedSteps.find(
+        s => s.taskType === 'analysis' && s.label === 'Cast Extraction',
+      );
+      if (castStep?.result) {
+        // Models routinely ignore "output ONLY JSON" and add preamble + markdown fences.
+        // Strip everything except the JSON payload so downstream prompts don't carry the chaff.
+        let castJson = castStep.result.trim();
+        const fence = castJson.match(/```json\s*([\s\S]*?)```/i);
+        if (fence) {
+          castJson = fence[1].trim();
+        } else {
+          const start = castJson.indexOf('{');
+          const end = castJson.lastIndexOf('}');
+          if (start >= 0 && end > start) castJson = castJson.slice(start, end + 1);
+        }
+
+        // Pretty-print the three tiers so the writer model sees a clearly labelled
+        // hierarchy instead of a wall of JSON. Falls back to raw JSON if parse fails
+        // or the result is in the older flat-array schema.
+        let rosterBody = castJson;
+        try {
+          const parsed = JSON.parse(castJson) as {
+            povCharacters?: Array<{ name: string; faction?: string; voice?: string; role?: string }>;
+            supportingCast?: Array<{ name: string; faction?: string; role?: string; relationships?: string }>;
+            minorCast?: Array<{ name: string; faction?: string; role?: string }>;
+          };
+          const sections: string[] = [];
+          if (parsed.povCharacters?.length) {
+            const lines = parsed.povCharacters.map((c, i) =>
+              `${i + 1}. **${c.name}** — ${c.faction || '?'} — voice: ${c.voice || '?'}${c.role ? ` — ${c.role}` : ''}`,
+            );
+            sections.push(`### TIER 1 — POV NARRATORS (each pass locks to one of these by position)\n${lines.join('\n')}`);
+          }
+          if (parsed.supportingCast?.length) {
+            const lines = parsed.supportingCast.map(c =>
+              `- **${c.name}** — ${c.faction || '?'}${c.role ? ` — ${c.role}` : ''}${c.relationships ? ` — relationships: ${c.relationships}` : ''}`,
+            );
+            sections.push(`### TIER 2 — SUPPORTING CAST (use these for dialogue partners, antagonists, and group scenes)\n${lines.join('\n')}`);
+          }
+          if (parsed.minorCast?.length) {
+            const lines = parsed.minorCast.map(c =>
+              `- **${c.name}** — ${c.faction || '?'}${c.role ? ` — ${c.role}` : ''}`,
+            );
+            sections.push(`### TIER 3 — MINOR / BACKGROUND (use for atmosphere, faction agents, walk-on references)\n${lines.join('\n')}`);
+          }
+          if (sections.length) rosterBody = sections.join('\n\n');
+        } catch {
+          // Keep rosterBody = castJson — model will still read the raw JSON.
+        }
+
+        slots.push({
+          label: 'Cast Roster (POV Character Lock)',
+          content:
+            `## CAST ROSTER\n` +
+            `Three tiers extracted from the Character Bible. Each calibration pass is LOCKED to one Tier 1 POV by position — never substitute. ` +
+            `Pull dialogue partners, antagonists, and ensemble members from Tier 2. Reference Tier 3 for atmosphere or faction-agent flavour. ` +
+            `Do NOT invent new characters — every named figure must come from this roster.\n\n` +
+            rosterBody,
+          priority: 1,
+          tokenCount: 0,
+          compressible: false,
+          included: false,
+        });
+      }
+
+      // ── Pen-name muscle-memory context (voice anchors + anti-patterns)
+      // Extracted to a helper so both calibration AND novel-pipeline writing
+      // steps share the same pen context. Previously only calibration got it,
+      // so books written via novel-pipeline never saw the pen's curated voice
+      // anchors or anti-pattern list.
+      await this.addPenContextSlots(slots, project, currentStep);
+
       // P1 (calibration): Inject scene-state-locked continuation for Part 2
       const segmentIndex = currentStep.segmentIndex;
       if (isWriting && segmentIndex && segmentIndex > 1) {
@@ -903,8 +1555,158 @@ export class PromptBuilder {
       return slots;
     }
 
-    // P1 (novel pipeline): Inject scene-state-locked continuation for Part 2
+    // Pen-name context — voice anchors + anti-patterns — for every step
+    // type that produces or revises prose. Mirrors the calibration path so
+    // novel-pipeline chapters, Revision Execution patches, Book Production's
+    // Final Prose Polish, and Deep Revision's Pass E (Prose Rhythm & Voice)
+    // all see the pen's curated voice. Other analysis passes deliberately
+    // skip this to save token budget.
+    const PEN_AWARE_PROSE_TASKS = new Set([
+      'creative_writing',     // novel-pipeline chapter writes
+      'revision_execution',   // Revision Execution segment rewrites
+      'final_edit',           // Book Production polish
+      'manuscript_cleanup',   // Revision Execution global polish
+    ]);
+    const isPassEVoiceAudit = currentStep.taskType === 'revision_check'
+      && currentStep.label.includes('Prose Rhythm & Voice');
+    if (this.stateStore && (
+      PEN_AWARE_PROSE_TASKS.has(currentStep.taskType) || isPassEVoiceAudit
+    )) {
+      await this.addPenContextSlots(slots, project, currentStep);
+    }
+
+    // ── Living bible diffs (accumulated stat/review updates) ──
+    // Each completed stat_update / chapter-review step appends to
+    // meta['living_diffs_{projectId}']. We inject the most recent N entries
+    // so the writer sees the EVOLVING bible (post-Ch3 character growth,
+    // post-Ch7 faction shifts, etc.) without re-loading every chapter's
+    // worth of review prose. Caps total tokens by trimming each diff.
+    if (isWriting && chapterNum && chapterNum > 1) {
+      try {
+        const raw = this.stateStore.getMeta(`living_diffs_${project.id}`);
+        if (raw) {
+          const diffs = JSON.parse(raw) as Array<{ chapter?: number; label?: string; content?: string }>;
+          // Take the last 3 diffs PRIOR to this chapter (don't include the
+          // current chapter's own review, which hasn't happened yet).
+          const priorDiffs = (diffs || []).filter(d => (d.chapter ?? 0) < chapterNum).slice(-3);
+          if (priorDiffs.length > 0) {
+            const blocks = priorDiffs.map(d => {
+              // Trim each diff to ~600 words to keep the slot bounded.
+              const words = (d.content || '').split(/\s+/);
+              const trimmed = words.length > 600 ? words.slice(0, 600).join(' ') + ' …' : (d.content || '');
+              return `### After ${d.label || `Chapter ${d.chapter}`}\n${trimmed}`;
+            }).join('\n\n');
+            slots.push({
+              label: 'Living Bible Diffs (recent updates)',
+              content:
+                `## 📚 LIVING BIBLE — Recent updates from prior chapters\n` +
+                `[Read these to see how characters, factions, and the world have EVOLVED. ` +
+                `These supplement (not replace) the static bibles. Honor the latest state.]\n\n` +
+                blocks,
+              priority: 2,
+              tokenCount: 0,
+              compressible: true,
+              included: false,
+            });
+          }
+        }
+      } catch { /* missing or unparseable meta — skip silently */ }
+    }
+
+    // ── P1: Previous chapter tail (verbatim prose for voice continuity) ──
+    //
+    // Each chapter is otherwise generated cold against the static bibles +
+    // a SUMMARISED stat-update from the prior chapter. The writer never sees
+    // the actual flowing prose of the chapter before it, so cadence,
+    // sentence rhythm, micro-callbacks, and emotional handoff all reset.
+    // Injecting the last ~1000 words verbatim gives the writer a live voice
+    // anchor without blowing the token budget. Skipped for Part 2+ of split
+    // chapters (the Scene State Lock below already handles intra-chapter
+    // continuity). For prologues / chapter 1 there is no predecessor in this
+    // book — we fall back to CURATED voice anchors (meta['voice_anchors_{slug}'])
+    // so v7 still gets a voice-grounding sample on the very first scene.
     const segmentIndex = currentStep.segmentIndex;
+    if (isWriting && (!segmentIndex || segmentIndex === 1)) {
+      let injected = false;
+      if (chapterNum && chapterNum > 1) {
+        const prevChapterStep =
+          completedSteps.find(
+            s => s.taskType === 'draft_compile' && s.chapterNumber === chapterNum - 1 && s.result
+          ) ||
+          completedSteps.find(
+            s => s.taskType === 'creative_writing' && s.chapterNumber === chapterNum - 1 && s.result
+          );
+        if (prevChapterStep?.result) {
+          // Take the final ~1000 words (or all if shorter). Word-based cap is
+          // cheap to compute and lines up well with Magnum's ~32k context.
+          const allWords = prevChapterStep.result.split(/\s+/);
+          const TAIL_WORDS = 1000;
+          const tail = allWords.slice(-TAIL_WORDS).join(' ');
+          const truncated = allWords.length > TAIL_WORDS;
+          slots.push({
+            label: `Prior Chapter ${chapterNum - 1} — Closing Prose`,
+            content:
+              `## 🎙️ VOICE ANCHOR — Final ${truncated ? `~${TAIL_WORDS} words` : 'passage'} of Chapter ${chapterNum - 1}\n` +
+              `[Read this to feel the prose rhythm, sentence cadence, and emotional handoff. ` +
+              `Continue the same voice — do NOT summarise, repeat, or re-introduce events from it.]\n` +
+              `${'━'.repeat(60)}\n${truncated ? '…' : ''}${tail}\n${'━'.repeat(60)}\n`,
+            priority: 1,
+            tokenCount: 0,
+            // Compressible: under heavy budget pressure the librarian can
+            // shrink this, though it's better preserved if room allows.
+            compressible: true,
+            included: false,
+          });
+          injected = true;
+        }
+      }
+
+      // Fallback for prologue / chapter 1: curated voice anchors. Pulls the
+      // top 1-2 anchors from meta['voice_anchors_{slug}'] so v7's very first
+      // scene of a book still opens against a known-good voice sample.
+      // Without this the first scene is the most voice-drifty in the whole
+      // book — the writer has nothing prose-shaped to anchor against.
+      if (!injected) {
+        try {
+          const penSlug = (project.context?.penNameSlug
+            || (project.parentId ? this.stateStore.get(project.parentId)?.context?.penNameSlug : undefined)
+            || 'default') as string;
+          const raw = this.stateStore.getMeta(`voice_anchors_${penSlug}`);
+          if (raw) {
+            const anchors = JSON.parse(raw) as Array<{ id?: string; tier?: string; prose?: string; text?: string; sourceAttribution?: string; sourceType?: string; active?: boolean }>;
+            // Accept either `prose` (curated/user-submitted format) or `text`
+            // (legacy/scored format). Filter by active flag and minimum length.
+            const pickable = (anchors || [])
+              .filter(a => a && a.active !== false)
+              .map(a => ({ ...a, _body: a.prose || a.text || '' }))
+              .filter(a => a._body.length > 200)
+              .slice(0, 2);
+            if (pickable.length > 0) {
+              const blocks = pickable.map((a, i) => {
+                const label = a.tier ? `${a.tier} anchor` : `anchor ${i + 1}`;
+                const src = a.sourceAttribution || a.sourceType;
+                return `### ${label}${src ? ` (${src})` : ''}\n${'━'.repeat(60)}\n${a._body}\n${'━'.repeat(60)}`;
+              }).join('\n\n');
+              slots.push({
+                label: `Voice Anchor — First Scene (no predecessor in this book)`,
+                content:
+                  `## 🎙️ VOICE ANCHOR — Curated prose sample(s) for opening scene\n` +
+                  `[This is the start of the book; there's no prior chapter to draw cadence from. ` +
+                  `Read these curated A.Perry-voice samples to ground your rhythm, sentence length, ` +
+                  `and sensory register. Do NOT copy phrases or reuse imagery — match the FEEL only.]\n\n` +
+                  `${blocks}\n`,
+                priority: 1,
+                tokenCount: 0,
+                compressible: true,
+                included: false,
+              });
+            }
+          }
+        } catch { /* if meta is missing or unparseable, skip silently */ }
+      }
+    }
+
+    // P1 (novel pipeline): Inject scene-state-locked continuation for Part 2
     if (isWriting && segmentIndex && segmentIndex > 1) {
       const prevStep = completedSteps.find(
         s => s.taskType === 'creative_writing' && s.chapterNumber === chapterNum && s.segmentIndex === segmentIndex - 1
@@ -1550,6 +2352,171 @@ export class PromptBuilder {
   }
 
   /**
+   * Build slots for the Revision Action Plan (Step 1 of revision-execution).
+   *
+   * Pulls from the parent Deep Revision project:
+   *   P1 — Every chapter's Pass H "Revision Brief" (verdicts + line rewrites)
+   *   P1 — Full Revision Summary Report (manuscript health, crutch words, tier list)
+   *   P2 — Manuscript-level audits (Structural Arc, Character Arc, Thematic Cohesion)
+   */
+  private async getRevisionPlanSlots(
+    project: Project,
+    _currentStep: ProjectStep,
+  ): Promise<ContextSlot[]> {
+    const slots: ContextSlot[] = [];
+    const familyCompleted = this.getFamilyCompletedSteps(project.id);
+
+    // Pass H Revision Briefs — one per chapter, the heart of the action plan
+    const briefs = familyCompleted.filter(
+      s => s.taskType === 'revision_check' && s.label.includes('Revision Brief'),
+    );
+    for (const brief of briefs) {
+      const compressed = await this.tryCompress(
+        brief.result!,
+        `${brief.label} — preserve verdict, top issues, line rewrites`,
+        512,
+      );
+      slots.push({
+        label: `[Brief] ${brief.label}`,
+        content: `## ${brief.label}\n\n${brief.result}`,
+        priority: 1,
+        tokenCount: 0,
+        compressible: !!compressed,
+        compressedVersion: compressed,
+        included: false,
+      });
+    }
+
+    // Full Revision Summary Report — the manuscript-wide synthesis
+    const summary = familyCompleted.find(
+      s => s.taskType === 'analysis' && s.label === 'Full Revision Summary Report',
+    );
+    if (summary?.result) {
+      slots.push({
+        label: 'Full Revision Summary Report',
+        content: `## Full Revision Summary Report\n\n${summary.result}`,
+        priority: 1,
+        tokenCount: 0,
+        compressible: false,
+        included: false,
+      });
+    }
+
+    // Manuscript-level audits as supporting context
+    const audits = familyCompleted.filter(
+      s => s.taskType === 'analysis' &&
+        (s.label === 'Structural Arc Audit' ||
+         s.label === 'Character Arc Tracker' ||
+         s.label === 'Thematic Cohesion Report'),
+    );
+    for (const audit of audits) {
+      const compressed = await this.tryCompress(
+        audit.result!,
+        `${audit.label} — key findings for planning manuscript-wide revision`,
+        512,
+      );
+      slots.push({
+        label: `[Manuscript] ${audit.label}`,
+        content: `## ${audit.label}\n\n${audit.result}`,
+        priority: 2,
+        tokenCount: 0,
+        compressible: !!compressed,
+        compressedVersion: compressed,
+        included: false,
+      });
+    }
+
+    this.log.info('Revision plan slots built', {
+      briefs: briefs.length,
+      hasSummary: !!summary,
+      audits: audits.length,
+    });
+
+    return slots;
+  }
+
+  /**
+   * Build slots for Deep Revision's manuscript-level audits.
+   *
+   * The three audits (Structural Arc, Character Arc, Thematic Cohesion) and the
+   * Full Revision Summary Report each claim to read the whole manuscript. Pull
+   * every completed chapter draft from the family (typically the parent
+   * novel-pipeline). Each chapter goes in as its own slot at priority 2 so the
+   * budget manager drops or compresses cleanly when long manuscripts overflow.
+   */
+  private async getManuscriptAuditSlots(
+    project: Project,
+    currentStep: ProjectStep,
+  ): Promise<ContextSlot[]> {
+    const slots: ContextSlot[] = [];
+    const familyCompleted = this.getFamilyCompletedSteps(project.id);
+
+    // Prefer draft_compile (post-segment merge) and fall back to single creative_writing.
+    const compiled = familyCompleted.filter(s => s.taskType === 'draft_compile' && s.result);
+    const compiledChapters = new Set(compiled.map(s => s.chapterNumber));
+    const standalone = familyCompleted.filter(
+      s => s.taskType === 'creative_writing' && s.result &&
+           !compiledChapters.has(s.chapterNumber) &&
+           // Skip Part-N segments when a compile exists for that chapter
+           (s.totalSegments === undefined || s.totalSegments <= 1),
+    );
+
+    const chapters = [...compiled, ...standalone].sort(
+      (a, b) => (a.chapterNumber ?? 0) - (b.chapterNumber ?? 0),
+    );
+
+    for (const ch of chapters) {
+      const chapterNum = ch.chapterNumber ?? 0;
+      const chName = chapterNum === 0 ? 'Prologue'
+        : (project.context.targetChapters !== undefined && chapterNum > project.context.targetChapters)
+          ? 'Epilogue'
+          : `Chapter ${chapterNum}`;
+      const compressed = await this.tryCompress(
+        ch.result!,
+        `${chName} for ${currentStep.label} — preserve POV, beat structure, tension, key dialogue`,
+        768,
+      );
+      slots.push({
+        label: `[Manuscript] ${chName}`,
+        content: `## ${chName}\n\n${ch.result}`,
+        priority: 2,
+        tokenCount: 0,
+        compressible: !!compressed,
+        compressedVersion: compressed,
+        included: false,
+      });
+    }
+
+    // Cross-audit findings: when running Full Revision Summary, also surface
+    // the upstream audits so it can synthesize across them.
+    if (currentStep.label === 'Full Revision Summary Report') {
+      const priorAudits = familyCompleted.filter(
+        s => s.taskType === 'analysis' &&
+          (s.label === 'Structural Arc Audit' ||
+           s.label === 'Character Arc Tracker' ||
+           s.label === 'Thematic Cohesion Report'),
+      );
+      for (const audit of priorAudits) {
+        slots.push({
+          label: `[Prior Audit] ${audit.label}`,
+          content: `## ${audit.label}\n\n${audit.result}`,
+          priority: 1,
+          tokenCount: 0,
+          compressible: false,
+          included: false,
+        });
+      }
+    }
+
+    this.log.info('Manuscript audit slots built', {
+      label: currentStep.label,
+      chapters: chapters.length,
+    });
+
+    return slots;
+  }
+
+  /**
    * Attempt to compress content using the Librarian.
    * Returns null if compression fails (the system continues without it).
    */
@@ -1558,6 +2525,7 @@ export class PromptBuilder {
     taskDescription: string,
     targetTokens?: number,
   ): Promise<string | undefined> {
+    if (this.skipCompressionFlag) return undefined;
     if (!this.compressor || !this.compressor.isAvailable()) return undefined;
     const limit = targetTokens ?? this.config.get<number>('ai.compression.briefingTarget', 512);
     try {

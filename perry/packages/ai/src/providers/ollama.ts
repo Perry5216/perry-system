@@ -73,6 +73,11 @@ export class OllamaProvider extends BaseProvider {
         messages,
         stream: true,
         think: enableThinking,
+        // keep_alive: extend the model's idle timeout to 15 min so successive
+        // chapter writes don't pay a 30s cold-load penalty each time. Default
+        // is 5 min; we bump it because a chapter generates in 1-3 min and the
+        // pipeline often pauses 5-10 min between steps for compression/audit.
+        keep_alive: (this.config as any).keepAlive ?? '15m',
         options: {
           temperature:    request.temperature   ?? (this.config as any).temperature   ?? 1.0,
           top_p:          request.topP          ?? (this.config as any).topP          ?? 0.95,
@@ -88,24 +93,69 @@ export class OllamaProvider extends BaseProvider {
         requestBody.tools = request.tools;
       }
 
-      response = await fetch(`${this.config.endpoint}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(600000), // 10 min hard timeout
-        body: JSON.stringify(requestBody),
-      });
+      // Ollama structured outputs. `format: 'json'` enforces JSON validity
+      // only; passing a JSON schema object enforces full shape (Ollama 0.5+).
+      // We pass either through verbatim — the Ollama server validates the
+      // emitted tokens against the schema and only completes when the
+      // structure is satisfied. This is the reliable way to get gemma3:12b
+      // to emit all required fields in metadata-routing steps.
+      if (request.format) {
+        requestBody.format = request.format;
+        console.log('[Ollama] format passed:', JSON.stringify({
+          model: requestBody.model,
+          formatType: typeof request.format,
+          required: typeof request.format === 'object' ? (request.format as any).required : undefined,
+        }));
+      }
+
+      // Connection-level retry with backoff. Ollama's model hot-swap (writer ↔
+      // researcher on shared 5090 endpoint) can briefly drop in-flight TCP
+      // connections — undici reports those as "fetch failed". A short retry
+      // recovers the call instead of falling all the way back to the librarian
+      // (which is conservative and won't cross-reference Goodreads ratings).
+      // We only retry network errors and 503/504 — 4xx errors are surfaced
+      // immediately because they won't get better on retry.
+      const RETRY_DELAYS_MS = [2_000, 5_000]; // 3 attempts total
+      let lastErr: any = null;
+      for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          response = await fetch(`${this.config.endpoint}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(600000), // 10 min hard timeout
+            body: JSON.stringify(requestBody),
+          });
+          if (response.status === 503 || response.status === 504) {
+            lastErr = new Error(`Ollama transient ${response.status}`);
+            // fall through to retry below
+          } else {
+            lastErr = null;
+            break;
+          }
+        } catch (err: any) {
+          lastErr = err;
+        }
+        if (attempt < RETRY_DELAYS_MS.length) {
+          const delay = RETRY_DELAYS_MS[attempt];
+          console.warn(`[OllamaProvider] connection attempt ${attempt + 1} failed (${lastErr?.message || lastErr}); retrying in ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      if (lastErr) {
+        throw lastErr;
+      }
     } catch (err: any) {
       throw new Error(
         `Ollama unreachable at ${this.config.endpoint}: ${err?.message || err}. Is "ollama serve" running?`
       );
     }
 
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      if (response.status === 404 || body.toLowerCase().includes('not found')) {
+    if (!response!.ok) {
+      const body = await response!.text().catch(() => '');
+      if (response!.status === 404 || body.toLowerCase().includes('not found')) {
         throw new Error(`Ollama model "${this.config.model}" not installed. Run: ollama pull ${this.config.model}`);
       }
-      throw new Error(`Ollama error ${response.status}: ${body.substring(0, 300)}`);
+      throw new Error(`Ollama error ${response!.status}: ${body.substring(0, 300)}`);
     }
 
     // ── Stream response ──
@@ -117,10 +167,10 @@ export class OllamaProvider extends BaseProvider {
     let toolCalls: any[] | undefined = undefined;
     const decoder = new TextDecoder('utf-8');
 
-    if (!response.body) throw new Error('Empty response body from Ollama');
+    if (!response!.body) throw new Error('Empty response body from Ollama');
 
     // @ts-ignore - ReadableStream is async iterable in Node 22+
-    for await (const chunk of response.body) {
+    for await (const chunk of response!.body) {
       buffer += decoder.decode(chunk, { stream: true });
       let newlineIndex: number;
       let isDone = false;

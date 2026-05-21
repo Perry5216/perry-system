@@ -21,14 +21,19 @@ import { promisify } from 'util';
 import type { Logger } from '@perry/core';
 import type { StyleDnaService } from './style-dna-service.js';
 import type { StateStore } from '../state-store.js';
+import { WebhookEmitter } from './webhook-emitter.js';
+import { UNIVERSAL_AI_ISM_PAIRS } from '../data/universal-ai-ism-pairs.js';
+import { PEN_A_PERRY_PAIRS, PEN_A_PERRY_ANCHORS } from '../data/pen-a-perry-pairs.js';
+import { scanLeaks, firstFailure } from '../voice-screens.js';
 
 const execAsync = promisify(exec);
 
 // Rebuild the Modelfile every N passes
 const MODELFILE_REBUILD_INTERVAL = 5;
 
-// Minimum training pairs before emitting a fine-tune-ready flag
-const FINETUNE_THRESHOLD = 1000;
+// Default minimum training pairs before emitting a fine-tune-ready flag.
+// Overridable per-project via `project.context.minTrainingPairs`.
+const FINETUNE_THRESHOLD_DEFAULT = 1000;
 
 // Ollama container name (matches docker-compose)
 const OLLAMA_CONTAINER = 'ollama';
@@ -151,13 +156,413 @@ export class AutoLearningService {
     return this.readPenNameRecords().find(pn => pn?.slug === slug) || null;
   }
 
+  // ─── Universal AI-ism baseline ───────────────────────────────────────────
+  //
+  // Every pen-name's training_data.jsonl is prepended with a curated set of
+  // ~40 AI-ism → concrete-fix pairs (see data/universal-ai-ism-pairs.ts).
+  // This ensures every fine-tuned LoRA learns to avoid the universally bad
+  // LLM tells (chill down spine, tapestry of, in the blink of an eye, etc.)
+  // regardless of genre.
+  //
+  // Per-pen opt-out: set meta['pen_config'][slug].disable_ai_ism_baseline=true
+  // for genres that need to use these phrases deliberately.
+  private isAiIsmBaselineDisabled(slug: string): boolean {
+    if (!this.stateStore) return false;
+    const raw = this.stateStore.getMeta('pen_config');
+    if (!raw) return false;
+    try {
+      const cfg = JSON.parse(raw);
+      return cfg?.[slug]?.disable_ai_ism_baseline === true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ─── Vocab-Diversity Gate ───────────────────────────────────────────────
+  //
+  // Tracks physical-action phrase frequency across accepted GOOD pairs. If a
+  // new pair's GOOD reuses a phrase that already appears in >=5% of the pool,
+  // reject — otherwise the model learns to use the same handful of physical
+  // gestures (fists clenched, skin prickled, jaw tight) for every emotion.
+  // Cold-start safe: skip when pool has fewer than 20 records.
+  // Universal baseline pairs are NOT counted (they're the gold standard).
+  private async checkVocabDiversity(goodText: string, projectId?: string): Promise<string | null> {
+    const trainingPath = join(this.trainingPoolDir(projectId), 'training_data.jsonl');
+    if (!existsSync(trainingPath)) return null;
+    let pool: string[];
+    try {
+      pool = readFileSync(trainingPath, 'utf-8').split('\n').filter(l => l.trim());
+    } catch { return null; }
+
+    const PHRASE_RE = /\b(?:[A-Z][a-z]+'s\s+|[Hh]er\s+|[Hh]is\s+|[Tt]heir\s+|[Tt]he\s+)?(fists?|hands?|jaw|stomach|skin|chest|throat|eyes|fingers?|knuckles|shoulders|spine|nails|gaze|grip|breath|teeth|knees|lips|brow|temple|forehead|neck|gut)\s+(clenched|trembled|trembling|prickled|dropped|tightened|raced|caught|shook|shaking|stiffened|tensed|sagged|coiled|twitched|curled|hardened|softened|dug|digging|drummed|narrowed|widened|lifted|locked|set|hammered|pounded|throbbed|pulsed|fluttered)\b/gi;
+
+    const freq = new Map<string, number>();
+    let countedRecords = 0;
+    for (const line of pool) {
+      try {
+        const rec = JSON.parse(line);
+        if (rec?.metadata?.source === 'perry_baseline_universal') continue;
+        const good = rec?.conversations?.find?.((c: any) => c.role === 'assistant')?.content || '';
+        countedRecords++;
+        const seen = new Set<string>();
+        for (const m of good.matchAll(PHRASE_RE)) {
+          const norm = `${m[1].toLowerCase()} ${m[2].toLowerCase()}`;
+          if (!seen.has(norm)) {
+            seen.add(norm);
+            freq.set(norm, (freq.get(norm) || 0) + 1);
+          }
+        }
+      } catch { /* skip malformed */ }
+    }
+    if (countedRecords < 20) return null;
+
+    const seen = new Set<string>();
+    for (const m of goodText.matchAll(PHRASE_RE)) {
+      const norm = `${m[1].toLowerCase()} ${m[2].toLowerCase()}`;
+      if (seen.has(norm)) continue;
+      seen.add(norm);
+      const count = freq.get(norm) || 0;
+      const ratio = count / countedRecords;
+      if (ratio >= 0.05) {
+        return `vocab_overuse:"${norm}":${count}/${countedRecords}(${(ratio * 100).toFixed(0)}%)`;
+      }
+    }
+    return null;
+  }
+
+  // ─── Paragraph-Level Auto-Promotion to Voice Anchors ────────────────────
+  //
+  // When a draft_compile step completes, split the scene into paragraphs and
+  // score each on v2-harvest voice-strength criteria. Score-7+ paragraphs
+  // get auto-added to the pen-name's voice_anchors meta as positive training
+  // anchors. Runs regardless of overall POV check verdict — a REWRITE scene
+  // can still contain voice-strong paragraphs worth keeping.
+  //
+  // Idempotent: skips paragraphs whose prose already exists as an anchor.
+  // Auto-promoted anchors get weight 2.0 (vs user-curated 3.0) so curated
+  // anchors stay influential.
+  async promoteParagraphsToAnchors(projectId: string, compiledText: string): Promise<number> {
+    if (!this.stateStore) return 0;
+    const slug = this.resolvePenSlug(projectId);
+    if (!slug || slug === DEFAULT_PEN_SLUG) return 0;
+
+    const cleaned = compiledText
+      .replace(/<\/?response>/gi, '')
+      .replace(/\[CONTENT WARNING[\s\S]*?\][\s\S]*?(?=\n\n|$)/g, '')
+      .trim();
+    const paras = cleaned.split(/\n\s*\n+/).map(p => p.trim()).filter(p => p.length >= 80);
+    if (paras.length === 0) return 0;
+
+    const existingRaw = this.stateStore.getMeta(`voice_anchors_${slug}`);
+    const existing: any[] = existingRaw ? (() => {
+      try { return JSON.parse(existingRaw); } catch { return []; }
+    })() : [];
+    const existingProse = new Set(existing.map(a => a?.prose).filter(Boolean));
+
+    let added = 0;
+    for (const para of paras) {
+      if (this.fastQualityScan(para)) continue;
+      const quoteChars = (para.match(/"[^"]*"|'[^']*'/g) || []).join('').length;
+      if (quoteChars / para.length > 0.7) continue;
+      if (existingProse.has(para)) continue;
+
+      const score = this.scoreVoiceParagraph(para);
+      if (score < 7) continue;
+
+      const wc = para.split(/\s+/).length;
+      const anchor = {
+        id: 'anchor-auto-' + Math.random().toString(36).slice(2, 10),
+        slug,
+        tier: wc <= 30 ? 'sentence' : wc <= 200 ? 'paragraph' : 'scene_segment',
+        sourceAttribution: `auto-promoted from calibration ${projectId} (score=${score})`,
+        sourceType: 'self_approved',
+        sceneType: null,
+        voiceTags: ['auto_promoted'],
+        prose: para,
+        wordCount: wc,
+        weight: 2.0,
+        createdAt: new Date().toISOString(),
+        active: true,
+      };
+      existing.push(anchor);
+      existingProse.add(para);
+      added++;
+    }
+
+    if (added > 0) {
+      this.stateStore.setMeta(`voice_anchors_${slug}`, JSON.stringify(existing));
+      this.log.info('Paragraph anchors auto-promoted', { slug, added, totalAnchors: existing.length });
+    }
+    return added;
+  }
+
+  // Compact voice-strength score (0-12). Mirrors the v2 harvest scoring in
+  // scripts/harvest-voice-paragraphs-v2.cjs so live promotion uses the same
+  // criteria as offline harvesting.
+  private scoreVoiceParagraph(text: string): number {
+    let score = 0;
+    const sentences = text.split(/[.!?]+\s+/).filter(s => s.trim().length > 3);
+    if (sentences.length >= 3) {
+      const lengths = sentences.map(s => s.split(/\s+/).length);
+      const mean = lengths.reduce((a, b) => a + b, 0) / lengths.length;
+      const variance = lengths.reduce((acc, l) => acc + (l - mean) ** 2, 0) / lengths.length;
+      if (variance > 12) score += 2;
+      else if (variance > 6) score += 1;
+      if (lengths.some(l => l < 5)) score += 1;
+    }
+    const CONCRETE_RE = /\b(?:door|window|wall|floor|chair|table|hand|eye|finger|screen|panel|stylus|console|server|terminal|avatar|street|room|corridor|elevator|monitor|cable|wire|edge|surface|key|button|lock|crack|stain|smear|drop|crumb|grain|thread|shard|chip|spark|hum|click|hiss|crackle|whir|coffee|stale|ozone|metallic|copper|girder|circuit|capacitor|relay|scanner|biometric|holo|implant|jack|substrate|fragment|register|kernel|packet|payload|daemon|signal|bandwidth|firewall|gateway|port|socket|byte|pixel|static|glitch|protocol|breach|node|encrypt|decrypt|drift|sever|constellate|reaper|holographic|datastream)\b/gi;
+    const concreteHits = (text.match(CONCRETE_RE) || []).length;
+    const totalWords = text.split(/\s+/).length;
+    if (totalWords > 0) {
+      const ratio = concreteHits / totalWords;
+      if (ratio > 0.10) score += 3;
+      else if (ratio > 0.06) score += 2;
+      else if (ratio > 0.04) score += 1;
+    }
+    if (/\b(?:smelled\s+of|smelled\s+like|tasted\s+(?:of|like)|air\s+(?:thick|heavy|stale|sterile)|the\s+(?:hum|drone|whine|click|hiss|crackle)\s+of)/i.test(text)) score += 2;
+    if (/\b(?:avatar|substrate|server|circuit|firewall|protocol|breach|node|byte|pixel|static|glitch|terminal|interface|drift|sever|constellate|reaper|holographic|datastream|holo|HUD|exploit|daemon|kernel|payload|implant|prosthetic|cybernetic|render|parse)\b/i.test(text)) score += 1;
+    const RECYCLED_RE = /\b(?:[A-Z][a-z]+'s\s+|her\s+|his\s+|their\s+)?(?:fists?|hands?|jaw|stomach|skin|chest|throat|eyes|fingers?|pulse|breath|knuckles|shoulders|spine|nails)\s+(?:clenched|trembled|trembling|prickled|dropped|tightened|raced|caught|shook|shaking|stiffened|tensed|coiled|twitched|curled|dug|drummed)\b/i;
+    if (!RECYCLED_RE.test(text)) score += 1;
+    const INANIMATE_RE = /\b(?:screen|terminal|console|server|code|data|monitor|cable|circuit|signal|firewall|substrate|avatar|kernel|daemon|stream|render|pixel|polygon|latency)\s+(?:breathed|stuttered|whispered|sighed|hesitated|bled|wept|cried|sang|murmured|coughed|paused|blinked|winked|smiled|grinned|stretched)/i;
+    if (INANIMATE_RE.test(text)) score += 2;
+    if (/—|--/.test(text)) score += 1;
+    return score;
+  }
+
+  private buildUniversalBaselineRecords(projectId?: string): object[] {
+    const slug = projectId ? this.resolvePenSlug(projectId) : DEFAULT_PEN_SLUG;
+    if (this.isAiIsmBaselineDisabled(slug)) {
+      this.log.info('Universal AI-ism baseline disabled for pen', { slug });
+      return [];
+    }
+    const systemPrompt = this.buildSystemPrompt(projectId);
+    return UNIVERSAL_AI_ISM_PAIRS.map(p => ({
+      conversations: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: `Rewrite this sentence to eliminate filter words, cognitive telling, and AI-isms. Output ONLY the corrected version. CRITICAL: Do NOT use repetitive LLM verbs like "bloomed", "shuddered", "slithered", or "resonated". Use sharp, varied physical verbs:\n\n"${p.bad}"`,
+        },
+        { role: 'assistant', content: p.good },
+      ],
+      metadata: {
+        source: 'perry_baseline_universal',
+        category: 'ai_ism_universal',
+        family: p.family,
+        pen: slug,
+      },
+    }));
+  }
+
+  // ─── Pen-specific baseline (a-perry: Digital Drift series) ──────────────
+  //
+  // Same shape as buildUniversalBaselineRecords but loads pairs only when the
+  // calibration project belongs to a pen-name that has a curated baseline
+  // file. Currently only 'a-perry' has one (30 pairs in
+  // data/pen-a-perry-pairs.ts). Adding a new pen-name's baseline is a matter
+  // of creating the data file + extending this switch.
+  private buildPenSpecificBaselineRecords(projectId?: string): object[] {
+    const slug = projectId ? this.resolvePenSlug(projectId) : DEFAULT_PEN_SLUG;
+    if (this.isAiIsmBaselineDisabled(slug)) return [];
+
+    let pairs: ReadonlyArray<{ bad: string; good: string; category: string }> | null = null;
+    if (slug === 'a-perry') pairs = PEN_A_PERRY_PAIRS;
+    if (!pairs) return [];
+
+    const systemPrompt = this.buildSystemPrompt(projectId);
+    return pairs.map(p => ({
+      conversations: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: `Rewrite this sentence to eliminate filter words, cognitive telling, and AI-isms. Output ONLY the corrected version. CRITICAL: Do NOT use repetitive LLM verbs like "bloomed", "shuddered", "slithered", or "resonated". Use sharp, varied physical verbs:\n\n"${p.bad}"`,
+        },
+        { role: 'assistant', content: p.good },
+      ],
+      metadata: {
+        source: `perry_baseline_${slug}`,
+        category: p.category,
+        pen: slug,
+      },
+    }));
+  }
+
+  /**
+   * Build training records from claude_injected.jsonl — pairs added by an
+   * external assistant (via MCP) that should be treated as curated baseline
+   * (i.e. bypass the three-gate pipeline). Each line in claude_injected.jsonl
+   * is `{ bad, good, category, injected_at }`.
+   */
+  private async buildClaudeInjectedRecords(projectId?: string, fallbackPenSlug?: string): Promise<object[]> {
+    const dir = this.trainingPoolDir(projectId, fallbackPenSlug);
+    const path = join(dir, 'claude_injected.jsonl');
+    if (!existsSync(path)) return [];
+    const slug = projectId ? this.resolvePenSlug(projectId) : (fallbackPenSlug || DEFAULT_PEN_SLUG);
+    const systemPrompt = this.buildSystemPrompt(projectId);
+    try {
+      const content = await readFile(path, 'utf-8');
+      const lines = content.split('\n').filter(l => l.trim());
+      const records: object[] = [];
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          if (!entry?.bad || !entry?.good) continue;
+          // Long-form task types (long_form_scene, length_following) carry their
+          // user prompt VERBATIM in entry.bad — do not wrap in the rewrite template.
+          // _fill_manifest.py enqueues these; perry-worker.md tells workers to put
+          // the user_prompt_verbatim into the bad field.
+          const isLongform = entry.task_type === 'long_form_scene'
+            || entry.task_type === 'length_following'
+            || entry.task_type === 'long_form_chunk';
+          if (isLongform) {
+            records.push({
+              conversations: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: entry.bad },
+                { role: 'assistant', content: entry.good },
+              ],
+              metadata: {
+                source: `perry_longform_${entry.task_type}_${slug}`,
+                category: entry.category || entry.task_type,
+                pen: slug,
+                injected_at: entry.injected_at || null,
+                target_words: entry.target_words ?? null,
+              },
+            });
+            continue;
+          }
+          records.push({
+            conversations: [
+              { role: 'system', content: systemPrompt },
+              {
+                role: 'user',
+                content: `Rewrite this sentence to eliminate filter words, cognitive telling, and AI-isms. Output ONLY the corrected version. CRITICAL: Do NOT use repetitive LLM verbs like "bloomed", "shuddered", "slithered", or "resonated". Use sharp, varied physical verbs:\n\n"${entry.bad}"`,
+              },
+              { role: 'assistant', content: entry.good },
+            ],
+            metadata: {
+              source: `perry_baseline_claude_assisted_${slug}`,
+              category: entry.category || 'claude_injected',
+              pen: slug,
+              injected_at: entry.injected_at || null,
+            },
+          });
+        } catch { /* skip malformed line */ }
+      }
+      return records;
+    } catch (err) {
+      this.log.warn('Failed to read claude_injected.jsonl', { error: (err as Error).message });
+      return [];
+    }
+  }
+
+  /**
+   * MCP-facing: append a single Claude-curated pair to claude_injected.jsonl
+   * for the given pen. The pair is included in the next export as a trusted
+   * baseline record (no gating). The file path is keyed by pen-slug, matching
+   * how the rest of the training pool is laid out.
+   */
+  public async appendClaudeInjectedPairForPen(
+    slug: string,
+    bad: string,
+    good: string,
+    category: string,
+  ): Promise<{ path: string; totalLines: number }> {
+    const dir = join(this.workspaceDir, 'training', `pen-${slug}`);
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true });
+    const path = join(dir, 'claude_injected.jsonl');
+    const entry = JSON.stringify({ bad, good, category, injected_at: new Date().toISOString() });
+    await appendFile(path, entry + '\n', 'utf-8');
+    let totalLines = 0;
+    try {
+      const content = await readFile(path, 'utf-8');
+      totalLines = content.split('\n').filter(l => l.trim()).length;
+    } catch { /* ignore */ }
+    return { path, totalLines };
+  }
+
+  /**
+   * MCP-facing wrapper around the private exportTrainingData. Looks up the
+   * most-recent style-calibration project for the pen and exports using that
+   * project's pool. If no calibration project exists, exports against the
+   * pen-slug pool directly (`pen-{slug}/...`) so claude_injected.jsonl + the
+   * mined_pairs.jsonl colocated with the pen still flow into training_data.jsonl.
+   * This makes the "hours-not-days" worker-driven flow (no calibration project)
+   * work end-to-end via `/perry-train-now`.
+   */
+  public async exportForPen(slug: string): Promise<number> {
+    let projectId: string | undefined;
+    if (this.stateStore) {
+      const projects = this.stateStore.list().filter(p =>
+        p.type === 'style-calibration' && p.context?.penNameSlug === slug
+      );
+      if (projects.length > 0) {
+        // Most recent first (createdAt fallback to id ordering — calibrations
+        // are short-lived so any of them shares the same pool anyway).
+        projects.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        projectId = projects[0].id;
+      }
+    }
+    return this.exportTrainingData(projectId, slug);
+  }
+
+  // Idempotent merge: copies pen-specific curated anchors into the
+  // voice_anchors_{slug} meta key. Skips any anchor whose prose already
+  // exists in the pool (so it's safe to call repeatedly). Returns the
+  // number of NEW anchors added.
+  private mergePenSpecificAnchors(projectId?: string): number {
+    if (!this.stateStore || !projectId) return 0;
+    const slug = this.resolvePenSlug(projectId);
+    if (slug !== 'a-perry') return 0;
+
+    const existingRaw = this.stateStore.getMeta(`voice_anchors_${slug}`);
+    const existing: any[] = existingRaw ? (() => {
+      try { return JSON.parse(existingRaw); } catch { return []; }
+    })() : [];
+    const existingProse = new Set(existing.map(a => a?.prose).filter(Boolean));
+
+    let added = 0;
+    for (let i = 0; i < PEN_A_PERRY_ANCHORS.length; i++) {
+      const a = PEN_A_PERRY_ANCHORS[i];
+      if (existingProse.has(a.prose)) continue;
+      const wc = a.prose.split(/\s+/).length;
+      existing.push({
+        id: `anchor-${slug}-curated-${String(i).padStart(2, '0')}`,
+        slug,
+        tier: wc <= 30 ? 'sentence' : wc <= 200 ? 'paragraph' : 'scene_segment',
+        sourceAttribution: `perry curated baseline (${slug}) #${i + 1}`,
+        sourceType: 'self_approved',
+        sceneType: a.sceneType,
+        voiceTags: a.voiceTags,
+        prose: a.prose,
+        wordCount: wc,
+        weight: 3.0,
+        createdAt: new Date().toISOString(),
+        active: true,
+      });
+      added++;
+    }
+    if (added > 0) {
+      this.stateStore.setMeta(`voice_anchors_${slug}`, JSON.stringify(existing));
+      this.log.info('Pen-specific curated anchors merged', { slug, added, total: existing.length });
+    }
+    return added;
+  }
+
   // Returns the training pool directory for a given project, keyed by pen slug.
   // Falls back to `<workspace>/training` when no projectId is supplied — matches
   // legacy behavior so summary writes still have a home.
-  private trainingPoolDir(projectId?: string): string {
-    if (!projectId) return join(this.workspaceDir, 'training');
-    const slug = this.resolvePenSlug(projectId);
-    return join(this.workspaceDir, 'training', `pen-${slug}`);
+  private trainingPoolDir(projectId?: string, fallbackSlug?: string): string {
+    if (projectId) {
+      const slug = this.resolvePenSlug(projectId);
+      return join(this.workspaceDir, 'training', `pen-${slug}`);
+    }
+    // exportForPen passes a slug fallback so the worker-driven path lands in
+    // pen-{slug}/ rather than the workspace-level training/ root.
+    if (fallbackSlug) {
+      return join(this.workspaceDir, 'training', `pen-${fallbackSlug}`);
+    }
+    return join(this.workspaceDir, 'training');
   }
 
   // ─── Voice Profile Resolution ─────────────────────────────────────────────
@@ -426,24 +831,42 @@ export class AutoLearningService {
    */
   async onPassComplete(passNumber: number, projectId?: string): Promise<void> {
     try {
-      // 1. Export training JSONL
+      // Per-project threshold override: lets a calibration project specify
+      // ctx.minTrainingPairs to fire fine-tuning earlier (e.g. fresh pen
+      // names training on 200 pairs instead of waiting for 1000).
+      const threshold = this.resolveFinetuneThreshold(projectId);
+
+      // 0. If the project has claudeCollectionEnabled, drain completed
+      // worker tasks from task_pool into claude_injected.jsonl BEFORE export
+      // so parallel-worker contributions are baked into THIS pass's pool.
+      // Hands-off: no separate cron required, drains happen automatically.
+      if (projectId && this.isClaudeCollectionEnabled(projectId)) {
+        await this.drainWorkerResults(projectId);
+      }
+
+      // 1. Ingest negative-pair JSON outputs from the new mining steps
+      // BEFORE exporting, so the new pairs go through dedup + quality gates.
+      if (projectId) await this.ingestNegativePairMining(projectId);
+
+      // 2. Export training JSONL
       const pairCount = await this.exportTrainingData(projectId);
 
       this.log.info('Auto-learning: training data exported', {
         passNumber,
         verifiedPairs: pairCount,
-        finetuneReady: pairCount >= FINETUNE_THRESHOLD,
+        threshold,
+        finetuneReady: pairCount >= threshold,
       });
 
-      // 2. Every N passes — rebuild Modelfile and recreate Ollama model
+      // 3. Every N passes — rebuild Modelfile and recreate Ollama model
       if (passNumber > 0 && passNumber % MODELFILE_REBUILD_INTERVAL === 0) {
         this.log.info('Auto-learning: Modelfile rebuild bypassed (managed by Trainer now)', { passNumber });
         // await this.rebuildModelfile(passNumber);
       }
 
-      // 3. When threshold is hit — write a flag file for the user
-      if (pairCount >= FINETUNE_THRESHOLD) {
-        await this.writeFinetuneFlag(pairCount, projectId);
+      // 4. When threshold is hit — write a flag file for the trainer to pick up
+      if (pairCount >= threshold) {
+        await this.writeFinetuneFlag(pairCount, projectId, threshold);
       }
 
       // 4. Auto-ban AI-isms that repeat across 3+ consecutive passes
@@ -456,10 +879,412 @@ export class AutoLearningService {
         // await this.minePassSummaryDirectives(projectId, passNumber);
       }
 
+      // 6. If the project is set up for Claude-Assisted Pair Collection,
+      // top up the worker task_pool so /perry-worker chats always have
+      // something to do during the NEXT pass. The actual generation
+      // happens in user-spawned worker chats; we just keep the queue full
+      // so the loop is fully hands-off.
+      if (projectId && this.isClaudeCollectionEnabled(projectId)) {
+        await this.topUpWorkerQueue(projectId);
+      }
+
     } catch (err) {
-      // Non-fatal — don’t let learning failure break the calibration run
+      // Non-fatal — don't let learning failure break the calibration run
       this.log.warn('Auto-learning step failed (non-fatal)', { error: (err as Error).message });
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Worker-pool integration (Claude-Assisted Pair Collection)
+  // ───────────────────────────────────────────────────────────────────────
+
+  /** True when the project has the "Claude-Assisted Pair Collection" flag set. */
+  private isClaudeCollectionEnabled(projectId: string): boolean {
+    if (!this.stateStore) return false;
+    const p = this.stateStore.get(projectId);
+    return !!(p?.context as any)?.claudeCollectionEnabled;
+  }
+
+  // ── Voice fingerprint (pen-name muscle-memory guardrail) ─────────────
+  // Computed once per pen-slug from voice_paragraphs_v2.jsonl. Each worker
+  // pair's `good` is scored against this fingerprint at drain time; outliers
+  // are rejected so synthetic Claude-Deep-POV can't drift the pen's voice
+  // away from the curated prose anchors over hundreds of iterations.
+
+  private voiceFingerprintCache = new Map<string, VoiceFingerprint>();
+
+  private getVoiceFingerprint(slug: string): VoiceFingerprint | null {
+    if (this.voiceFingerprintCache.has(slug)) {
+      return this.voiceFingerprintCache.get(slug)!;
+    }
+    const path = join(this.workspaceDir, 'training', `pen-${slug}`, 'voice_paragraphs_v2.jsonl');
+    if (!existsSync(path)) return null;
+    try {
+      const lines = readFileSync(path, 'utf-8').split('\n').filter(l => l.trim());
+      const samples: number[][] = [];
+      for (const line of lines) {
+        try {
+          const d = JSON.parse(line);
+          if ((d.score || 0) < 5) continue; // only mid-to-top tier prose
+          const text = String(d.text || '');
+          if (text.length < 30) continue;
+          const m = textMetrics(text);
+          samples.push([m.meanSentenceLen, m.stdSentenceLen, m.adverbDensity, m.contractionRate]);
+        } catch { /* skip */ }
+      }
+      if (samples.length < 20) {
+        this.log.warn('Voice fingerprint: too few samples', { slug, samples: samples.length });
+        return null;
+      }
+      const fp: VoiceFingerprint = {
+        meanSentenceLenMu:   mean(samples.map(s => s[0])),
+        meanSentenceLenSigma: stddev(samples.map(s => s[0])),
+        stdSentenceLenMu:     mean(samples.map(s => s[1])),
+        stdSentenceLenSigma:  stddev(samples.map(s => s[1])),
+        adverbDensityMu:      mean(samples.map(s => s[2])),
+        adverbDensitySigma:   stddev(samples.map(s => s[2])),
+        contractionRateMu:    mean(samples.map(s => s[3])),
+        contractionRateSigma: stddev(samples.map(s => s[3])),
+        sampleCount: samples.length,
+      };
+      this.voiceFingerprintCache.set(slug, fp);
+      this.log.info('Voice fingerprint computed', { slug, ...fp });
+      return fp;
+    } catch (err) {
+      this.log.warn('Voice fingerprint load failed', { slug, error: (err as Error).message });
+      return null;
+    }
+  }
+
+  /**
+   * Score a candidate good-text against the pen's fingerprint. Returns
+   * { ok, reason, score } where score is the maximum z-distance across all
+   * tracked metrics (lower is better; threshold defaults to 2.5σ).
+   */
+  private voiceMatch(text: string, fp: VoiceFingerprint, threshold: number = 1.5): { ok: boolean; reason?: string; score: number } {
+    const m = textMetrics(text);
+    const zs: Array<[string, number]> = [
+      ['meanSentenceLen', Math.abs(m.meanSentenceLen - fp.meanSentenceLenMu) / Math.max(fp.meanSentenceLenSigma, 1)],
+      ['stdSentenceLen',  Math.abs(m.stdSentenceLen  - fp.stdSentenceLenMu ) / Math.max(fp.stdSentenceLenSigma,  1)],
+      ['adverbDensity',   Math.abs(m.adverbDensity   - fp.adverbDensityMu  ) / Math.max(fp.adverbDensitySigma, 0.005)],
+    ];
+    let worst: [string, number] = ['', 0];
+    for (const z of zs) if (z[1] > worst[1]) worst = z;
+    const ok = worst[1] <= threshold;
+    return {
+      ok,
+      score: worst[1],
+      reason: ok ? undefined : `voice_drift:${worst[0]}_z=${worst[1].toFixed(2)}`,
+    };
+  }
+
+  /**
+   * Drain every `done` task from task_pool whose pen matches this project
+   * and append the worker's bad/good output into claude_injected.jsonl.
+   * Then mark each task `archived` so it isn't re-injected. Runs every
+   * pass when claudeCollectionEnabled is on.
+   *
+   * Mirrors the standalone _collect_worker_results.py script but lives in
+   * the pipeline so calibration is fully hands-off — no separate cron.
+   */
+  private async drainWorkerResults(projectId: string): Promise<number> {
+    if (!this.stateStore) return 0;
+    const slug = this.resolvePenSlug(projectId);
+    const dir = this.trainingPoolDir(projectId);
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true });
+    const path = join(dir, 'claude_injected.jsonl');
+
+    // Build a dedup set from the current file so re-runs are idempotent.
+    const seen = new Set<string>();
+    if (existsSync(path)) {
+      try {
+        const content = await readFile(path, 'utf-8');
+        for (const line of content.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const d = JSON.parse(line);
+            seen.add(`${(d.bad || '').trim()}||${(d.good || '').trim()}`);
+          } catch { /* skip */ }
+        }
+      } catch { /* ignore */ }
+    }
+
+    const tasks = this.stateStore.listTasks({ status: 'done', limit: 500 });
+    let written = 0;
+    let voiceRejected = 0;
+    let leakRejected = 0;
+    const archived: string[] = [];
+    const voiceFailed: string[] = [];
+    const leakFailed: Array<{ id: string; reason: string }> = [];
+    const fingerprint = this.getVoiceFingerprint(slug);
+    const now = new Date().toISOString();
+    for (const t of tasks) {
+      if (t.penSlug && t.penSlug !== slug) continue;
+      const r = (t.result || {}) as any;
+      const bad = (r.bad || '').trim();
+      const good = (r.good || '').trim();
+      if (!bad || !good || bad.split(/\s+/).length < 8 || good.split(/\s+/).length < 8) {
+        archived.push(t.id);
+        continue;
+      }
+      const key = `${bad}||${good}`;
+      if (seen.has(key)) {
+        archived.push(t.id);
+        continue;
+      }
+      // Voice-match + leak guardrails — synth pairs only. degrade_pair good is
+      // verbatim from voice_paragraphs_v2.jsonl so it inherits the pen voice
+      // by source and is the gold corpus the leak screen was calibrated on
+      // (running it against degrade_pair would self-reject the curated anchors).
+      if (t.type !== 'degrade_pair') {
+        if (fingerprint) {
+          const vm = this.voiceMatch(good, fingerprint);
+          if (!vm.ok) {
+            voiceFailed.push(t.id);
+            voiceRejected++;
+            continue;
+          }
+        }
+        // Leak gate: bare filter verbs, named emotions, anti-patterns. Zero-
+        // tolerance — any hit fails the pair so contaminated synth never enters
+        // the training pool. Closes the gap that let v3 ship "thought clearer".
+        const leaks = scanLeaks(good);
+        if (leaks.length > 0) {
+          const reason = leaks
+            .slice(0, 3)
+            .map(l => `${l.tag}:${l.matches[0]}`)
+            .join(',');
+          leakFailed.push({ id: t.id, reason });
+          leakRejected++;
+          continue;
+        }
+      }
+      seen.add(key);
+      const entry = {
+        bad,
+        good,
+        category: r.category || `worker_${t.type}`,
+        injected_at: now,
+        source: r.source || `worker:${t.type}:${t.id}`,
+        task_type: t.type,
+        scene_type: r.scene_type || null,
+        stat_band: r.stat_band || null,
+      };
+      await appendFile(path, JSON.stringify(entry) + '\n', 'utf-8');
+      archived.push(t.id);
+      written++;
+    }
+
+    // Bulk-archive accepted tasks; voice-drift + leak-fail get marked failed
+    // with a specific reason so /api/system/workers triage can show them.
+    if (archived.length > 0) {
+      this.stateStore.archiveDoneTasks(archived);
+    }
+    for (const id of voiceFailed) {
+      this.stateStore.reportTask(id, 'failed', undefined, 'voice_drift');
+    }
+    for (const { id, reason } of leakFailed) {
+      this.stateStore.reportTask(id, 'failed', undefined, `leak:${reason}`);
+    }
+
+    if (written > 0 || voiceRejected > 0 || leakRejected > 0) {
+      this.log.info('Worker results drained into claude_injected.jsonl', {
+        pen: slug,
+        injected: written,
+        archived: archived.length,
+        voiceRejected,
+        leakRejected,
+      });
+    }
+    return written;
+  }
+
+  /**
+   * Push synthesize_pair + targeted_negative tasks for workers to chew on.
+   * Triggered at the END of each calibration pass so the queue is full for
+   * the next pass. Maintains a soft target depth — won't overshoot.
+   */
+  private async topUpWorkerQueue(projectId: string): Promise<void> {
+    if (!this.stateStore) return;
+    const slug = this.resolvePenSlug(projectId);
+    const TARGET_OPEN = 60; // Soft target — workers will drain faster than this
+    const depth = this.stateStore.queueDepth();
+    const open = depth.open || 0;
+    if (open >= TARGET_OPEN) return;
+    const deficit = TARGET_OPEN - open;
+    const nSynth = Math.ceil(deficit * 0.75);
+    const nNegative = deficit - nSynth;
+
+    const synthPayloads = Array.from({ length: nSynth }, () => this.makeSynthPayload());
+    if (synthPayloads.length > 0) {
+      this.stateStore.enqueueTasks('synthesize_pair', synthPayloads, slug);
+    }
+
+    const negPayloads = this.makeTargetedNegativePayloads(projectId, nNegative);
+    if (negPayloads.length > 0) {
+      this.stateStore.enqueueTasks('targeted_negative', negPayloads, slug);
+    }
+
+    this.log.info('Worker queue topped up', {
+      pen: slug,
+      synth_added: synthPayloads.length,
+      negative_added: negPayloads.length,
+      new_open_estimate: open + synthPayloads.length + negPayloads.length,
+    });
+  }
+
+  private makeSynthPayload(): object {
+    const sceneTypes = ['Action', 'Dialogue', 'Introspection', 'Setting', 'Confrontation', 'Discovery', 'Quiet', 'Group Dynamics'];
+    const statBands = ['Peak', 'Stable', 'Stressed', 'Critical'];
+    const antiPatterns = [
+      'filter words + named emotion as noun',
+      'AI clichés (jaw clenched, knuckles whitened, breath hitched)',
+      'repetitive sentence structure',
+      'watered-down passive verbs',
+      'thematic summary at end',
+    ];
+    const scene = sceneTypes[Math.floor(Math.random() * sceneTypes.length)];
+    const band = statBands[Math.floor(Math.random() * statBands.length)];
+    const ap = antiPatterns[Math.floor(Math.random() * antiPatterns.length)];
+    return {
+      instructions: 'Generate ONE Deep POV training pair. Bad = typical LLM anti-patterns. Good = clean rewrite of the same scene. Both 25-55 words.',
+      scene_type: scene,
+      stat_band: band,
+      anti_pattern_focus: ap,
+      pen_voice: 'A.Perry / The Digital Drift — sci-fi techno-noir lyrical. Past tense, close third-person. Substrate / servers / neural links. Short fragments during action; longer flowing in introspection.',
+      rules: [
+        `Bad MUST exhibit ${ap}.`,
+        'Good MUST NOT use filter words, named emotions, first-person, AI clichés, or repetitive structure.',
+        'Third-person past tense ONLY.',
+        'Output JSON only — keys: bad, good, category, scene_type, stat_band.',
+      ],
+    };
+  }
+
+  private makeTargetedNegativePayloads(projectId: string, count: number): object[] {
+    if (count <= 0) return [];
+    const slug = this.resolvePenSlug(projectId);
+    const logPath = join(this.workspaceDir, 'training', `pen-${slug}`, 'rejected_pairs.log');
+    if (!existsSync(logPath)) return [];
+    let raw = '';
+    try { raw = readFileSync(logPath, 'utf-8'); } catch { return []; }
+    const patterns = new Set<string>();
+    for (const line of raw.split('\n')) {
+      const s = line.trim();
+      if (!s || s.startsWith('#') || !s.includes(':')) continue;
+      const head = s.substring(0, s.lastIndexOf(':'));
+      if (head.length >= 5) patterns.add(head);
+      if (patterns.size >= count) break;
+    }
+    const out: object[] = [];
+    for (const p of Array.from(patterns).slice(0, count)) {
+      out.push({
+        instructions: 'A previous worker output was rejected for the pattern below. Write ONE training pair that targets this exact failure: bad = a sentence exhibiting this pattern, good = a clean Deep POV rewrite of the same idea.',
+        rejected_pattern: p,
+        pen_voice: 'A.Perry / The Digital Drift — sci-fi techno-noir lyrical. Past tense, close third-person.',
+        rules: [
+          'Bad must clearly exhibit the rejected pattern.',
+          'Good must be Deep POV: no filter words, no named emotions, no AI clichés.',
+          'Output JSON only — keys: bad, good, category, rejected_pattern.',
+        ],
+      });
+    }
+    return out;
+  }
+
+  // ── Cold-start calibration ────────────────────────────────────────────────
+  //
+  // One-shot bootstrap for a brand-new pen-name: enqueues a balanced batch of
+  // `synthesize_pair` tasks across the full (scene_type × stat_band ×
+  // anti_pattern_focus) cartesian so the swarm can drain it in parallel and
+  // produce a balanced training pool — no skew toward any single combination
+  // (which v4 of a-perry suffered from, ~75% Critical/Introspection).
+  //
+  // Workers are the existing `synthesize_pair` consumers (headless-worker.cjs
+  // or /perry-worker Claude sessions); drainWorkerResults handles routing
+  // results into claude_injected.jsonl, then exportForPen produces the final
+  // training_data.jsonl.
+  public startCalibration(slug: string, targetPairs = 600): {
+    slug: string;
+    enqueued: number;
+    perCell: number;
+    scenes: string[];
+    statBands: string[];
+    antiPatterns: string[];
+    penVoice: string;
+    queueDepthAfter: Record<string, number>;
+  } {
+    if (!this.stateStore) throw new Error('state store unavailable');
+    if (!slug || !slug.trim()) throw new Error('pen slug required');
+    if (!Number.isFinite(targetPairs) || targetPairs < 1) targetPairs = 600;
+
+    const scenes = ['Action', 'Dialogue', 'Introspection', 'Setting', 'Confrontation', 'Discovery', 'Quiet', 'Group Dynamics'];
+    const statBands = ['Peak', 'Stable', 'Stressed', 'Critical'];
+    const antiPatterns = [
+      'filter words + named emotion as noun',
+      'AI clichés (jaw clenched, knuckles whitened, breath hitched)',
+      'repetitive sentence structure',
+      'watered-down passive verbs',
+      'thematic summary at end',
+    ];
+
+    const cells = scenes.length * statBands.length * antiPatterns.length;
+    const perCell = Math.max(1, Math.ceil(targetPairs / cells));
+    const penVoice = this.buildPenVoiceString(slug);
+
+    const payloads: object[] = [];
+    for (const scene of scenes) {
+      for (const band of statBands) {
+        for (const ap of antiPatterns) {
+          for (let i = 0; i < perCell; i++) {
+            payloads.push({
+              instructions: 'Generate ONE Deep POV training pair. Bad = typical LLM anti-patterns. Good = clean rewrite of the same scene. Both 25-55 words.',
+              scene_type: scene,
+              stat_band: band,
+              anti_pattern_focus: ap,
+              pen_voice: penVoice,
+              rules: [
+                `Bad MUST exhibit ${ap}.`,
+                'Good MUST NOT use filter words, named emotions, first-person, AI clichés, or repetitive structure.',
+                'Third-person past tense ONLY.',
+                'Output JSON only — keys: bad, good, category, scene_type, stat_band.',
+              ],
+              calibration_run: true,
+            });
+          }
+        }
+      }
+    }
+
+    this.stateStore.enqueueTasks('synthesize_pair', payloads, slug);
+    this.log.info('Cold-start calibration enqueued', { slug, count: payloads.length, perCell });
+
+    const summary = {
+      slug,
+      enqueued: payloads.length,
+      perCell,
+      scenes,
+      statBands,
+      antiPatterns,
+      penVoice,
+      queueDepthAfter: this.stateStore.queueDepth(),
+    };
+    WebhookEmitter.emit('calibration.started', summary);
+    return summary;
+  }
+
+  // Build the pen_voice string injected into every calibration payload. Reads
+  // the pen record from state (set during pen creation) and falls back to a
+  // slug-only default so a brand-new pen still gets a usable payload.
+  private buildPenVoiceString(slug: string): string {
+    const rec = this.findPenRecord(slug);
+    if (!rec) return `${slug} — generic Deep POV. Past tense, close third-person.`;
+    const parts: string[] = [];
+    if (rec.displayName) parts.push(rec.displayName);
+    if (rec.genreOrSeries) parts.push(rec.genreOrSeries);
+    if (rec.voiceTagline) parts.push(rec.voiceTagline);
+    if (parts.length === 0) return `${slug} — generic Deep POV. Past tense, close third-person.`;
+    return parts.join(' — ');
   }
 
   // ── Feature 1: Score Time-Series Tracking ─────────────────────────────────────────
@@ -579,7 +1404,7 @@ export class AutoLearningService {
     const newPairs: object[] = [];
     const goldenSection = povCheckResult.match(/\*\*Golden Sentences\*\*:[\s\S]*?(?=\*\*[A-Z]|$)/i)?.[0] || '';
     while ((m = phraseRe.exec(goldenSection)) !== null) {
-      newPairs.push(this.buildTrainingRecord('', m[1], 'golden_sentence'));
+      newPairs.push(this.buildTrainingRecord('', m[1], 'golden_sentence', projectId));
       this.log.info('Violation mining: golden sentence extracted', { good: m[1].slice(0, 60) });
     }
 
@@ -623,7 +1448,7 @@ export class AutoLearningService {
         // Skip if ANY first-person pronoun leaked through
         if (/\b(my|I|me|mine|myself)\b/.test(correction)) continue;
 
-        newPairs.push(this.buildTrainingRecord(text, correction, category));
+        newPairs.push(this.buildTrainingRecord(text, correction, category, projectId));
         this.log.info('Violation mining: pair generated', { category, bad: text.slice(0, 60) });
       } catch (err: any) {
         this.log.warn('Librarian connection failed', { phrase: text.slice(0, 30), error: err.message });
@@ -651,15 +1476,33 @@ export class AutoLearningService {
    * and pacing, not just sentence-level mechanics.
    */
   async minePassedScene(projectId: string, sceneType: string, compiledText: string, verdict: string, deepPovScore?: number): Promise<void> {
-    // Accept PASS verdicts, or REVISE verdicts with a high Deep POV score (≥8)
-    if (verdict !== 'PASS' && !(verdict === 'REVISE' && deepPovScore && deepPovScore >= 8)) return;
+    // Only accept PASS verdicts with Deep POV ≥ 9. The old gate (PASS or REVISE+8) was too
+    // permissive — the writer-model POV gate is chatty and rubber-stamps prose containing
+    // textbook filter words ("She thought. She felt."), which then become positive training
+    // examples. Tightening to PASS + 9 narrows the funnel to clean scenes.
+    if (verdict !== 'PASS' || !deepPovScore || deepPovScore < 9) return;
     if (!compiledText || compiledText.length < 200) return;
+
+    // Second line of defense: run the fast quality scan that the export pipeline uses, so
+    // bad prose can't ride a chatty POV check verdict into mined_pairs.jsonl. The scan
+    // catches filter words, named-emotion nouns, bracket annotations, rule regurgitation,
+    // first-person leaks, overused trigrams.
+    const fastReject = this.fastQualityScan(compiledText);
+    if (fastReject) {
+      this.log.warn('Full scene mining rejected by fast scan', { sceneType, reason: fastReject, deepPovScore });
+      return;
+    }
 
     try {
       const sceneInstruction: Record<string, string> = {
         action:       'Write an 800-word Deep POV action scene with visceral, tactile physical grounding and short punchy sentences.',
         dialogue:     'Write an 800-word Deep POV dialogue scene where subtext and character voice carry the tension. No on-the-nose exchanges.',
         introspection:'Write an 800-word Deep POV introspection scene using only physical sensation and somatic markers. Zero thought verbs.',
+        setting:      'Write an 800-word Deep POV scene that introduces a location through the character moving through it. No tour-guide descriptions, no info-dumps.',
+        confrontation:'Write an 800-word Deep POV confrontation scene with two opposing goals, real blocking tactics on both sides, and a power shift before the end.',
+        discovery:    'Write an 800-word Deep POV discovery scene where the character uncovers physical information (object, message, sound), reveals their bias through what they get wrong, and commits to a flawed course of action.',
+        quiet:        'Write an 800-word Deep POV quiet scene with no plot beats — pure character work through tactile small-detail focus, weighted dialogue, and a small physical exchange that carries emotional truth.',
+        group:        'Write an 800-word Deep POV group dynamics scene with three or more characters, each betraying their agenda through dialogue and proxemics. POV character may misread the alliances.',
       };
 
       const instruction = sceneInstruction[sceneType.toLowerCase()] ||
@@ -828,43 +1671,14 @@ export class AutoLearningService {
       return 'meta_contamination';
     }
 
-    // 0b. First-person POV leak — manuscript is third-person Deep POV
-    // Reject ANY first-person pronoun (my, I, me, mine, myself) — the model must learn third-person only
-    if (/\b(my|I|me|mine|myself)\b/.test(text)) {
-      return 'first_person_pov';
-    }
-
-    // 1. Filter words that should never appear in Deep POV prose
-    const FILTER_WORDS = [
-      'he felt', 'she felt', 'they felt',
-      'he noticed', 'she noticed',
-      'he realized', 'she realized',
-      'he thought', 'she thought',
-      'he saw', 'she saw',
-      'he heard', 'she heard',
-      'he looked', 'she looked',
-      'he stared', 'she stared',
-      'he wondered', 'she wondered',
-      'he remembered', 'she remembered',
-      'he imagined', 'she imagined',
-      'he assumed', 'she assumed',
-      'he decided', 'she decided',
-    ];
-
-    for (const fw of FILTER_WORDS) {
-      if (lower.includes(fw)) return `filter_word:${fw}`;
-    }
-
-    // 2. Named emotions as nouns (the model should show, not tell)
-    const EMOTION_NOUNS = [
-      'a wave of', 'a surge of', 'a pang of', 'a rush of', 'a flicker of',
-      'desperation', 'with panic', 'with fear', 'with anger', 'with grief',
-      'with relief', 'with terror', 'with dread',
-    ];
-
-    for (const en of EMOTION_NOUNS) {
-      if (lower.includes(en)) return `emotion_noun:${en}`;
-    }
+    // 1-2 + 7. Voice screens — filter verbs, named emotions, first-person,
+    // anti-patterns. The shared bank in voice-screens.ts uses the BARE-VERB
+    // form so participle-elision leaks ("...moved faster, thought clearer.")
+    // can't sneak past a subject-prefix regex like the loose v3-era version
+    // did. Same screen runs in drainWorkerResults and audit-service so all
+    // three gates share one definition of "leak."
+    const voiceFail = firstFailure(text);
+    if (voiceFail) return voiceFail;
 
     // 3. Bracket annotations — prompt leakage into prose
     if (/\[(?:narrator|technique|pov|word count|scene|note)/i.test(text)) {
@@ -893,6 +1707,142 @@ export class AutoLearningService {
     }
 
     return null;
+  }
+
+  /**
+   * Pair-structure validation — checks the BAD/category/lesson relationship.
+   * Distinct from fastQualityScan (which only checks GOOD prose). Returns a
+   * rejection reason or null. Added after audit pass revealed three classes
+   * of pair the GOOD-only gates couldn't see:
+   *   (a) lesson-equivalence — BAD and GOOD say the same thing, synonym swap
+   *   (b) bad_lacks_filter_word — pair is labeled filter_word but BAD has none
+   *   (c) bad_lacks_told_emotion — pair is labeled told_emotion but BAD has none
+   * Together these caught ~7 of the 12 contaminated pairs in the audit set.
+   */
+  private validatePairStructure(badText: string, goodText: string, category: string): string | null {
+    if (!badText || !goodText) return null;
+    const cat = category.toLowerCase();
+
+    // (a) Lesson-equivalence — Jaccard overlap on meaningful (length ≥ 4)
+    //     words. If GOOD reuses ≥ 60% of BAD's vocabulary the pair is a
+    //     synonym swap and won't teach the model anything new.
+    const STOPWORDS = new Set(['that','this','they','them','their','there','these','those','were','have','been','will','with','from','what','when','where','which','about','then','than','some','such','only','very','just','also','into','onto','more','over','under']);
+    const wordsOf = (s: string) => {
+      const all = (s.toLowerCase().match(/\b[a-z]{4,}\b/g) || []).filter(w => !STOPWORDS.has(w));
+      return new Set(all);
+    };
+    const badWords = wordsOf(badText);
+    const goodWords = wordsOf(goodText);
+    if (badWords.size >= 4 && goodWords.size >= 4) {
+      let overlap = 0;
+      for (const w of badWords) if (goodWords.has(w)) overlap++;
+      const union = badWords.size + goodWords.size - overlap;
+      const jaccard = overlap / union;
+      if (jaccard >= 0.6) return `lesson_equivalence:jaccard_${jaccard.toFixed(2)}`;
+    }
+
+    // (b) Category-violation check on BAD — the BAD text must actually
+    //     contain the violation the category claims. Otherwise the pair
+    //     teaches nothing related to its label.
+    //
+    //     `(?:\w+\s+){0,2}` between subject and verb tolerates intervening
+    //     adverbs/auxiliaries ("He almost didn't recognize", "She slowly
+    //     turned and stared"). `It` is included as a subject because filter
+    //     constructions like "It looked like X was happening" are common.
+    const FILTER_VERBS_RE = /\b(?:[Hh]e|[Ss]he|[Tt]hey|[Ii]t|[A-Z][a-z]{2,}(?:'s|s')?)\s+(?:[\w']+\s+){0,2}(?:felt|noticed|realized|wondered|remembered|saw|heard|looked|stared|imagined|assumed|decided|thought|knew|seemed|watched|observed|witnessed|spotted|scanned|sensed|recognize|recognized|recognised|smelled|smelt|tasted|could\s+(?:see|hear|feel|sense|smell|taste))\b/;
+    const TOLD_EMOTION_RE = /\b(?:felt|was|were|seemed|appeared|grew)\s+(?:a\s+|the\s+|so\s+|very\s+)?(?:overwhelming\s+|sudden\s+|cold\s+|deep\s+|strange\s+|growing\s+)?(?:anger|fear|dread|sadness|sorrow|joy|happiness|relief|frustration|hatred|love|hope|despair|disgust|nervous|anxious|afraid|scared|furious|angry|sad|happy|excited|worried|confused|tense|calm|exhausted|tired|content|jealous|guilty|ashamed|proud|terror|panic|rage|grief|elation|delight|unease|misery|concern|numb|exposed|vulnerable|chill|gloom|melancholy|detachment|envy|awe|shame|guilt|pride|loneliness|emptiness)\b/i;
+    const TOLD_EMOTION_PHRASE_RE = /\b(?:flicker|surge|wave|rush|pang|sense|feeling|crash|jolt|wave)\s+of\s+(?:anger|fear|dread|sadness|joy|happiness|relief|frustration|love|hope|despair|disgust|terror|panic|rage|grief|unease|concern|worry|emotion|emotions?|detachment|calm)/i;
+
+    if (cat.includes('filter')) {
+      if (!FILTER_VERBS_RE.test(badText)) {
+        return `bad_lacks_filter_word:cat="${category}"`;
+      }
+    }
+    if (cat.includes('told') && cat.includes('emotion')) {
+      const hasTold = TOLD_EMOTION_RE.test(badText) || TOLD_EMOTION_PHRASE_RE.test(badText);
+      if (!hasTold) return `bad_lacks_told_emotion:cat="${category}"`;
+    }
+
+    return null;
+  }
+
+  /**
+   * Extract the "bad" prose from a training record's user message. Records
+   * built by `buildTrainingRecord(bad, good, category)` embed the bad text as
+   * the last quoted span in the user prompt. This helper retrieves it for
+   * downstream pair audits.
+   */
+  private extractBadText(record: any): string {
+    const userMsg = (record?.conversations || []).find((c: any) => c.role === 'user')?.content || '';
+    // The "bad" passage is typically the final quoted span in the user message.
+    const quotedMatch = userMsg.match(/"([^"]+)"\s*$/);
+    if (quotedMatch) return quotedMatch[1];
+    // Fall back to the last paragraph of the user message, stripping surrounding quotes.
+    const blocks = userMsg.split(/\n\n+/).filter(Boolean);
+    return (blocks[blocks.length - 1] || '').replace(/^["']|["']$/g, '');
+  }
+
+  /**
+   * Librarian (5070 Ti) PAIR audit — compares the BAD and GOOD text and decides
+   * whether GOOD is a strict improvement that doesn't introduce new violations.
+   * This is more grounded than the old generic prose-audit prompt (which
+   * hallucinated failures on good 32B prose). Asks a concrete factual question
+   * about a specific transformation rather than a vague "is this good?" call.
+   */
+  private async librarianPairAudit(badText: string, goodText: string, category: string): Promise<{ pass: boolean; reason: string }> {
+    const LIBRARIAN_ENDPOINT = process.env.LIBRARIAN_ENDPOINT || 'http://ollama-embeddings:11434';
+    const LIBRARIAN_MODEL = 'gemma3:12b';
+
+    try {
+      const response = await fetch(`${LIBRARIAN_ENDPOINT}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: LIBRARIAN_MODEL,
+          stream: false,
+          options: { temperature: 0.1 },
+          messages: [
+            {
+              role: 'system',
+              content: `You are a strict pair-quality auditor for LoRA training data.
+
+Your job: decide whether the GOOD rewrite is a real improvement over the BAD original WITHOUT introducing new violations.
+
+The pair has a stated category: ${category}. The GOOD rewrite must specifically address that category.
+
+REJECT (output FAIL:reason) if ANY of these are true about the GOOD text:
+1. It still contains the SAME violation the BAD text had (e.g. category is "filter_word" but GOOD still uses "he stared/she felt/he noticed").
+2. It introduces a new anti-pattern: "chill ran/raced/snaked down [X]'s spine", "blood ran cold", "heart hammered/pounded in [X]'s chest", "tendrils of fear/dread/cold", "breath caught in [X]'s throat", "let out a breath [X] didn't know".
+3. It uses purple-prose LLM-isms: "tapestry of", "symphony of", "cacophony of", "labyrinth of", "palpable", "delve", "a testament to", "in the blink of an eye", "the weight of the world".
+4. It contains first-person pronouns (I, my, me, mine, we, our, us) in narration outside dialogue quotes.
+5. It is barely different from BAD (cosmetic word-swap, same structural cliché).
+6. It is shorter than 12 words and adds no concrete sensory detail.
+7. It contradicts the category instead of fixing it (e.g. category "told_emotion" but GOOD still names an emotion as a noun).
+
+ACCEPT (output PASS) if GOOD genuinely fixes the BAD's category violation AND avoids all the new-violation traps above.
+
+Output EXACTLY one line:
+PASS
+FAIL:[short concrete reason naming the specific phrase if applicable]`,
+            },
+            {
+              role: 'user',
+              content: `Category: ${category}\n\nBAD:\n${badText}\n\nGOOD:\n${goodText}\n\nVerdict?`,
+            },
+          ],
+        }),
+      });
+
+      if (!response.ok) return { pass: true, reason: 'librarian_unavailable' };
+      const data = await response.json() as any;
+      const verdict = (data?.message?.content || '').trim();
+
+      if (/^PASS\b/i.test(verdict)) return { pass: true, reason: 'librarian_approved' };
+      if (/^FAIL\b/i.test(verdict)) return { pass: false, reason: verdict.slice(0, 120) };
+      return { pass: true, reason: 'librarian_ambiguous' };
+    } catch {
+      return { pass: true, reason: 'librarian_offline' };
+    }
   }
 
   /**
@@ -1087,8 +2037,9 @@ FAIL:[specific reason] - if any issue found`,
 
   // ─── JSONL Export (with Librarian Quality Gate) ─────────────────────────
 
-  private async exportTrainingData(projectId?: string): Promise<number> {
-    const outputDir = this.trainingPoolDir(projectId);
+  private async exportTrainingData(projectId?: string, fallbackPenSlug?: string): Promise<number> {
+    const outputDir = this.trainingPoolDir(projectId, fallbackPenSlug);
+    const reportThreshold = this.resolveFinetuneThreshold(projectId);
     if (!existsSync(outputDir)) {
       await mkdir(outputDir, { recursive: true });
     }
@@ -1105,12 +2056,13 @@ FAIL:[specific reason] - if any issue found`,
     const learnedPairs = this.styleDna.getGlobalRules().showVsTellExamples || [];
     for (const pair of learnedPairs) {
       if (pair.bad && pair.good) {
-        candidateRecords.push(this.buildTrainingRecord(pair.bad, pair.good, 'learned'));
+        candidateRecords.push(this.buildTrainingRecord(pair.bad, pair.good, 'learned', projectId));
       }
     }
 
     // Add mined pairs from violation mining (primary accumulation source)
     const minedPath = join(outputDir, 'mined_pairs.jsonl');
+    const exportSlug = projectId ? this.resolvePenSlug(projectId) : (fallbackPenSlug || DEFAULT_PEN_SLUG);
     if (existsSync(minedPath)) {
       const minedContent = await readFile(minedPath, 'utf-8');
       const minedLines = minedContent.split('\n').filter(l => l.trim());
@@ -1132,6 +2084,8 @@ FAIL:[specific reason] - if any issue found`,
           }
           if (badText && !seenBad.has(badText)) {
             seenBad.add(badText);
+            const meta = (record.metadata = record.metadata || {});
+            if (!meta.pen) meta.pen = exportSlug;
             candidateRecords.push(record);
           }
         } catch { /* skip malformed lines */ }
@@ -1162,6 +2116,22 @@ FAIL:[specific reason] - if any issue found`,
       const goodText = record?.conversations?.[2]?.content || '';
       const category = record?.metadata?.category || '';
 
+      // Phase 1.5: Pair-structure validation (lesson-equivalence + category-violation)
+      // Runs before fastQualityScan so we reject category-mismatch / synonym-swap
+      // pairs early without scanning GOOD prose.
+      if (category !== 'full_scene_pass') {
+        const badForStructure = this.extractBadText(record);
+        if (badForStructure) {
+          const structureResult = this.validatePairStructure(badForStructure, goodText, category);
+          if (structureResult) {
+            auditStats.fastReject++;
+            this.trackRejection(auditStats.reasons, structureResult);
+            this.log.debug('Quality gate: structure reject', { reason: structureResult, bad: badForStructure.slice(0, 50), good: goodText.slice(0, 50) });
+            continue;
+          }
+        }
+      }
+
       // Phase 2: Fast local scan (no LLM call — instant)
       // Bypass fast scan for full_scene_pass since a single minor filter word shouldn't ruin an entire 800-word scene
       if (category !== 'full_scene_pass') {
@@ -1174,24 +2144,44 @@ FAIL:[specific reason] - if any issue found`,
         }
       }
 
-      // Phase 3: Librarian deep audit (BYPASSED)
-      // The 12B model hallucinated failures on good 32B prose. Relying solely on the 32B Writer Deep Audit.
-      const needsDeepAudit = ['filter_word', 'show_vs_tell', 'ai_ism', 'learned', 'directive_positive', 'directive_negative'].includes(category);
-
-      /* BYPASS LIBRARIAN 12B AUDIT
-      if (needsDeepAudit) {
-        const auditResult = await this.librarianDeepAudit(goodText);
-        if (!auditResult.pass) {
-          auditStats.librarianReject++;
-          this.trackRejection(auditStats.reasons, auditResult.reason);
-          this.log.info('Quality gate: Librarian reject', { reason: auditResult.reason, text: goodText.slice(0, 60) });
+      // Phase 2.5: Vocab-diversity gate
+      // Reject pairs whose GOOD reuses physical-action phrases that already
+      // appear in >=5% of the existing pool. Prevents the model from learning
+      // a monotone substitution pattern (every emotion = fists clenched).
+      // Skip on full_scene_pass and ai_ism_universal categories.
+      if (category !== 'full_scene_pass' && category !== 'ai_ism_universal') {
+        const diversityResult = await this.checkVocabDiversity(goodText, projectId);
+        if (diversityResult) {
+          auditStats.fastReject++;
+          this.trackRejection(auditStats.reasons, diversityResult);
+          this.log.debug('Quality gate: diversity reject', { reason: diversityResult, good: goodText.slice(0, 60) });
           continue;
         }
       }
-      */
 
-      // Phase 4: Writer (5090) deep audit — final quality gate
-      // The 32B model's own standards must be met, not just the 12B's
+      const needsDeepAudit = ['filter_word', 'show_vs_tell', 'ai_ism', 'learned', 'directive_positive', 'directive_negative', 'neg_pair_mining', 'told_emotion', 'told emotion', 'on_the_nose_dialogue', 'dialogue_tag_overuse', 'stat_band_drift', 'pov_slip', 'language_violation'].includes(category);
+
+      // Phase 3: Librarian (5070 Ti, gemma3:12b) pair-audit gate.
+      // RE-ENABLED with a NEW prompt that compares BAD vs GOOD instead of asking
+      // "is this clean prose?". The old generic prose-audit prompt hallucinated
+      // failures on good 32B prose. Comparing the pair is a more grounded,
+      // factual task that the 12B handles reliably at temp 0.1.
+      if (needsDeepAudit) {
+        const badText = this.extractBadText(record);
+        if (badText) {
+          const auditResult = await this.librarianPairAudit(badText, goodText, category);
+          if (!auditResult.pass) {
+            auditStats.librarianReject++;
+            this.trackRejection(auditStats.reasons, `librarian:${auditResult.reason}`);
+            this.log.info('Quality gate: Librarian pair reject', { reason: auditResult.reason, bad: badText.slice(0, 50), good: goodText.slice(0, 50) });
+            continue;
+          }
+        }
+      }
+
+      // Phase 4: Writer (5090) deep audit — final quality gate.
+      // Magnum sees the "good" text and decides if it meets ITS own standards,
+      // not just the 12B's. Pairs must pass BOTH gates.
       if (needsDeepAudit) {
         const writerResult = await this.writerDeepAudit(goodText);
         if (!writerResult.pass) {
@@ -1217,7 +2207,35 @@ FAIL:[specific reason] - if any issue found`,
       passRate: auditStats.total > 0 ? `${Math.round((auditStats.passed / auditStats.total) * 100)}%` : 'N/A',
     });
 
-    const jsonl = verifiedRecords.map(r => JSON.stringify(r)).join('\n');
+    // Prepend universal AI-ism baseline pairs (40 curated examples) unless
+    // this pen has opted out via meta['pen_config'][slug].disable_ai_ism_baseline.
+    // These teach every model to avoid the universal LLM tells (chill-spine,
+    // tapestry-of, blink-of-an-eye, etc.) regardless of genre.
+    const baseline = this.buildUniversalBaselineRecords(projectId);
+    if (baseline.length > 0) {
+      this.log.info('Universal AI-ism baseline included', { count: baseline.length });
+    }
+    // Pen-specific curated baseline (additional, on top of universal).
+    // For a-perry: 30 pairs in the Digital Drift voice.
+    const penBaseline = this.buildPenSpecificBaselineRecords(projectId);
+    if (penBaseline.length > 0) {
+      this.log.info('Pen-specific baseline included', { count: penBaseline.length });
+    }
+    // Pen-specific curated anchors are also merged into the voice_anchors meta
+    // (idempotent — only new prose gets added). At LoRA training time, the
+    // existing merge_anchors_to_training.py pipeline expands these into
+    // additional positive-style training pairs.
+    this.mergePenSpecificAnchors(projectId);
+
+    // Claude-injected (MCP) pairs: trusted curated baseline, no gating.
+    const claudeRecords = await this.buildClaudeInjectedRecords(projectId, fallbackPenSlug);
+    if (claudeRecords.length > 0) {
+      this.log.info('Claude-injected baseline included', { count: claudeRecords.length });
+    }
+
+    const allRecords = [...baseline, ...penBaseline, ...claudeRecords, ...verifiedRecords];
+
+    const jsonl = allRecords.map(r => JSON.stringify(r)).join('\n');
     const outputPath = join(outputDir, 'training_data.jsonl');
     await writeFile(outputPath, jsonl, 'utf-8');
 
@@ -1249,11 +2267,13 @@ FAIL:[specific reason] - if any issue found`,
       `## Data Sources`,
       `  - Learned from calibration (DNA): ${learnedPairs.filter(p => p.bad && p.good).length}`,
       `  - Mined from POV check violations: ${candidateRecords.length - learnedPairs.filter(p => p.bad && p.good).length}`,
+      `  - Universal AI-ism baseline (prepended): ${baseline.length}`,
+      `  - Total records in training_data.jsonl: ${allRecords.length}`,
       ``,
       `## Fine-tune status`,
-      verifiedRecords.length >= FINETUNE_THRESHOLD
-        ? `✅ READY — ${verifiedRecords.length} verified pairs meets the ${FINETUNE_THRESHOLD} minimum threshold for LoRA fine-tuning.`
-        : `⏳ ACCUMULATING — ${verifiedRecords.length}/${FINETUNE_THRESHOLD} verified pairs. Continue running calibration passes.`,
+      verifiedRecords.length >= reportThreshold
+        ? `✅ READY — ${verifiedRecords.length} verified pairs meets the ${reportThreshold} minimum threshold for LoRA fine-tuning.`
+        : `⏳ ACCUMULATING — ${verifiedRecords.length}/${reportThreshold} verified pairs. Continue running calibration passes.`,
       ``,
       `## To run LoRA fine-tuning`,
       `\`\`\`bash`,
@@ -1268,6 +2288,13 @@ FAIL:[specific reason] - if any issue found`,
       .join('\n');
     await writeFile(rejectLogPath, `# Rejected pairs log — ${new Date().toISOString()}\n\n${rejectSummary}\n`, 'utf-8');
 
+    WebhookEmitter.emit('export.complete', {
+      pen: projectId ? this.resolvePenSlug(projectId) : (fallbackPenSlug || DEFAULT_PEN_SLUG),
+      verifiedPairs: verifiedRecords.length,
+      totalRecords: allRecords.length,
+      passRate: auditStats.total > 0 ? Math.round((auditStats.passed / auditStats.total) * 100) : 0,
+      outputPath,
+    });
     return verifiedRecords.length;
   }
 
@@ -1278,6 +2305,7 @@ FAIL:[specific reason] - if any issue found`,
   private buildTrainingRecord(bad: string, good: string, category: string, projectId?: string): object {
     const isGolden = category === 'golden_sentence';
     const systemPrompt = this.buildSystemPrompt(projectId);
+    const slug = projectId ? this.resolvePenSlug(projectId) : DEFAULT_PEN_SLUG;
     return {
       conversations: [
         { role: 'system', content: systemPrompt },
@@ -1289,7 +2317,7 @@ FAIL:[specific reason] - if any issue found`,
         },
         { role: 'assistant', content: good },
       ],
-      metadata: { source: 'perry_calibration', category },
+      metadata: { source: 'perry_calibration', category, pen: slug },
     };
   }
 
@@ -1401,12 +2429,251 @@ FAIL:[specific reason] - if any issue found`,
     }
   }
 
+  // ─── Fine-tune Threshold Resolution ──────────────────────────────────────
+
+  /**
+   * Resolve the per-project fine-tune threshold. Lets a calibration project
+   * specify `context.minTrainingPairs` (e.g. 200 for a fresh pen name that
+   * shouldn't wait for 1000 pairs to accumulate). Falls back to the default.
+   */
+  private resolveFinetuneThreshold(projectId?: string): number {
+    if (!projectId || !this.stateStore) return FINETUNE_THRESHOLD_DEFAULT;
+    try {
+      const project = this.stateStore.get(projectId);
+      const ctx = project?.context as any;
+      const v = ctx?.minTrainingPairs;
+      if (typeof v === 'number' && v >= 50) return Math.floor(v);
+    } catch { /* fall through */ }
+    return FINETUNE_THRESHOLD_DEFAULT;
+  }
+
+  // ─── Negative-Pair Mining Ingestion ──────────────────────────────────────
+
+  /**
+   * Scan all completed `Negative-Pair Mining` steps in the calibration project
+   * and convert their JSON outputs into training records appended to
+   * `mined_pairs.jsonl`. The existing dedup + quality gate pipeline handles
+   * the rest, so these pairs flow into `training_data.jsonl` like any other
+   * mined data. Idempotent via a `.ingested_neg_pair_steps` marker file.
+   */
+  private async ingestNegativePairMining(projectId: string): Promise<void> {
+    if (!this.stateStore) return;
+    const project = this.stateStore.get(projectId);
+    if (!project) return;
+
+    const outputDir = this.trainingPoolDir(projectId);
+    if (!existsSync(outputDir)) await mkdir(outputDir, { recursive: true });
+
+    const markerPath = join(outputDir, '.ingested_neg_pair_steps');
+    let alreadyIngested: Set<string> = new Set();
+    if (existsSync(markerPath)) {
+      try {
+        const raw = await readFile(markerPath, 'utf-8');
+        alreadyIngested = new Set(raw.split('\n').filter(Boolean));
+      } catch { /* ignore */ }
+    }
+
+    const candidates = project.steps.filter(
+      s => s.status === 'completed' &&
+           !!s.result &&
+           s.label.includes('Negative-Pair Mining') &&
+           !alreadyIngested.has(s.id),
+    );
+    if (candidates.length === 0) return;
+
+    const newRecords: object[] = [];
+    const newlyIngested: string[] = [];
+
+    for (const s of candidates) {
+      const raw = (s.result || '').trim();
+      const claimedSkip = raw.startsWith('No negative pairs to mine');
+
+      // Safety check: don't trust the mining model's claim of "no pairs" — cross-reference
+      // with the actual POV check verdict from the upstream step (same chapterNumber).
+      // The mining model has a documented failure mode where it emits the skip message
+      // even when the verdict was REVISE/REWRITE, silently losing training pairs.
+      const upstreamPov = project.steps.find(
+        ps => ps.taskType === 'pov_check' &&
+              ps.chapterNumber === s.chapterNumber &&
+              ps.status === 'completed' &&
+              !!ps.result,
+      );
+      const upstreamVerdictMatch = upstreamPov?.result?.match(/\*?\*?Verdict\*?\*?[:\s]+(\w+)/i);
+      const upstreamVerdict = upstreamVerdictMatch?.[1]?.toUpperCase() || null;
+
+      if (claimedSkip) {
+        if (upstreamVerdict && upstreamVerdict !== 'PASS') {
+          // Mining model claimed skip, but the POV check said REVISE/REWRITE — that's
+          // the silent-loss bug. Log loudly and skip the idempotency mark so this
+          // mining step can be retried later (e.g. after a prompt patch lands).
+          this.log.warn('Neg-pair ingest: FALSE SKIP detected — mining returned skip but upstream verdict is not PASS', {
+            step: s.label,
+            chapterNumber: s.chapterNumber,
+            upstreamVerdict,
+            action: 'NOT marking ingested — retry possible',
+          });
+          continue;
+        }
+        // Legitimate skip: PASS verdict confirmed (or no upstream pov_check found to verify).
+        newlyIngested.push(s.id);
+        continue;
+      }
+
+      // Extract JSON: prefer ```json fenced block, fall back to first {...}
+      let jsonText: string | null = null;
+      const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
+      if (fenceMatch) {
+        jsonText = fenceMatch[1].trim();
+      } else {
+        const braceStart = raw.indexOf('{');
+        const braceEnd = raw.lastIndexOf('}');
+        if (braceStart >= 0 && braceEnd > braceStart) {
+          jsonText = raw.slice(braceStart, braceEnd + 1);
+        }
+      }
+      if (!jsonText) {
+        // No JSON at all — don't mark ingested so future re-runs can retry.
+        this.log.warn('Neg-pair ingest: no JSON found, NOT marking ingested', { step: s.label });
+        continue;
+      }
+
+      // Two-stage parse:
+      // 1. Try strict JSON.parse on the extracted block (with smart-quote normalisation first).
+      // 2. On failure, fall back to a tolerant regex extractor that pulls
+      //    {issue, bad, good, why} fields field-by-field. This recovers pairs
+      //    from outputs where the model emitted unescaped internal double-quotes
+      //    inside the "bad" or "good" string — the most common failure mode.
+      let doc: any = null;
+      const normalisedJson = jsonText
+        .replace(/[“”]/g, '"')   // curly double quotes → straight
+        .replace(/[‘’]/g, "'");  // curly single quotes → straight
+      try {
+        doc = JSON.parse(normalisedJson);
+      } catch {
+        // Strict parse failed — try the tolerant extractor below.
+      }
+      const pairs = Array.isArray(doc?.pairs)
+        ? doc.pairs
+        : this.extractPairsTolerantly(normalisedJson, s.label);
+      const beforeCount = newRecords.length;
+      for (const p of pairs) {
+        if (typeof p?.bad !== 'string' || typeof p?.good !== 'string') continue;
+        if (p.bad.trim().length < 5 || p.good.trim().length < 5) continue;
+        const category = String(p.issue || 'neg_pair_mining').slice(0, 40);
+        newRecords.push(this.buildTrainingRecord(p.bad.trim(), p.good.trim(), category, projectId));
+      }
+
+      // Mark ingested only if we either extracted at least one pair OR the JSON
+      // explicitly had an empty "pairs" array (which is a valid no-op). If JSON
+      // parse failed completely and tolerant extraction also returned nothing,
+      // leave the step unmarked so a later re-ingest (perhaps after a parser
+      // tweak) can recover the pairs.
+      const validEmptyArray = Array.isArray(doc?.pairs) && doc.pairs.length === 0;
+      if (newRecords.length > beforeCount || validEmptyArray) {
+        newlyIngested.push(s.id);
+      } else {
+        this.log.warn('Neg-pair ingest: no pairs recovered, NOT marking ingested for possible retry', {
+          step: s.label,
+          chapterNumber: s.chapterNumber,
+        });
+      }
+    }
+
+    if (newRecords.length > 0) {
+      const minedPath = join(outputDir, 'mined_pairs.jsonl');
+      const lines = newRecords.map(r => JSON.stringify(r)).join('\n') + '\n';
+      await appendFile(minedPath, lines, 'utf-8');
+    }
+
+    // Mark all candidates ingested (even those that produced 0 records — they're skip lines)
+    await writeFile(markerPath, [...alreadyIngested, ...newlyIngested].join('\n') + '\n', 'utf-8');
+
+    this.log.info('Neg-pair ingest complete', {
+      stepsProcessed: candidates.length,
+      pairsAppended: newRecords.length,
+    });
+  }
+
+  /**
+   * Tolerant pair extractor — used as a fallback when JSON.parse fails on the
+   * mining model's output. The most common failure mode is unescaped internal
+   * double-quotes inside the "bad" or "good" string (e.g. dialogue lines that
+   * the model copied verbatim without escaping the quote marks).
+   *
+   * Strategy: scan the text for `"issue"`/`"bad"`/`"good"`/`"why"` field
+   * markers and use lookahead patterns to find the natural value boundary
+   * (the next field marker or the closing brace). Returns whatever pairs we
+   * could recover — better than zero.
+   */
+  private extractPairsTolerantly(text: string, stepLabel: string): Array<{ issue?: string; bad?: string; good?: string; why?: string }> {
+    const pairs: Array<{ issue?: string; bad?: string; good?: string; why?: string }> = [];
+    // Find every `{...}` candidate object inside the "pairs" array.
+    // Pairs are usually enclosed in `"pairs": [ { ... }, { ... } ]`.
+    // Use a simple state machine: locate "pairs"[, then scan brace-by-brace.
+    const pairsStart = text.search(/"pairs"\s*:\s*\[/);
+    const region = pairsStart >= 0 ? text.slice(pairsStart) : text;
+
+    // Field extractor: find `"field"\s*:\s*"` then read until the next field
+    // marker (`,\s*"<known field>"\s*:`) or the closing `}\s*[,\]]`.
+    const FIELD_TERMINATORS = /,\s*"(?:issue|bad|good|why|category|reason)"\s*:|\}\s*[,\]]|$/;
+    const extractField = (block: string, field: string): string | undefined => {
+      const m = block.match(new RegExp(`"${field}"\\s*:\\s*"`));
+      if (!m || m.index === undefined) return undefined;
+      const start = m.index + m[0].length;
+      const tail = block.slice(start);
+      const stop = tail.search(FIELD_TERMINATORS);
+      if (stop < 0) return undefined;
+      // The value runs from start to stop. Trim a trailing closing quote if present.
+      let value = tail.slice(0, stop).trim();
+      value = value.replace(/"$/, ''); // strip trailing closing quote
+      // De-escape \" -> " and \\ -> \
+      value = value.replace(/\\"/g, '"').replace(/\\\\/g, '\\').replace(/\\n/g, '\n');
+      return value;
+    };
+
+    // Find every `{` that begins a pair object inside the pairs array.
+    let depth = 0;
+    let blockStart = -1;
+    for (let i = 0; i < region.length; i++) {
+      const c = region[i];
+      if (c === '{') {
+        if (depth === 0) blockStart = i;
+        depth++;
+      } else if (c === '}') {
+        depth--;
+        if (depth === 0 && blockStart >= 0) {
+          const block = region.slice(blockStart, i + 1);
+          const issue = extractField(block, 'issue');
+          const bad = extractField(block, 'bad');
+          const good = extractField(block, 'good');
+          const why = extractField(block, 'why');
+          if (bad && good) pairs.push({ issue, bad, good, why });
+          blockStart = -1;
+        }
+      }
+    }
+
+    if (pairs.length > 0) {
+      this.log.info('Neg-pair ingest: tolerant parser recovered pairs from malformed JSON', {
+        step: stepLabel,
+        recoveredPairs: pairs.length,
+      });
+    } else {
+      this.log.warn('Neg-pair ingest: tolerant parser could not recover any pairs', {
+        step: stepLabel,
+      });
+    }
+    return pairs;
+  }
+
   // ─── Fine-tune Flag ──────────────────────────────────────────────────────
 
-  private async writeFinetuneFlag(pairCount: number, projectId?: string): Promise<void> {
+  private async writeFinetuneFlag(pairCount: number, projectId?: string, threshold?: number): Promise<void> {
     const outputDir = this.trainingPoolDir(projectId);
     const flagPath = join(outputDir, 'READY_TO_FINETUNE.flag');
     const sentinelPath = join(outputDir, '.last_finetune_threshold');
+
+    const effectiveThreshold = threshold ?? this.resolveFinetuneThreshold(projectId);
 
     // Determine the last threshold we already triggered at (default 0 = never)
     let lastTriggeredAt = 0;
@@ -1416,8 +2683,8 @@ FAIL:[specific reason] - if any issue found`,
       } catch { /* ignore */ }
     }
 
-    // Only trigger if we have crossed a NEW 100-pair boundary since the last trigger
-    const currentBucket = Math.floor(pairCount / FINETUNE_THRESHOLD) * FINETUNE_THRESHOLD;
+    // Only trigger if we have crossed a NEW threshold-sized bucket since the last trigger.
+    const currentBucket = Math.floor(pairCount / effectiveThreshold) * effectiveThreshold;
     if (currentBucket <= lastTriggeredAt) {
       return; // Already triggered at or beyond this threshold
     }
@@ -1438,9 +2705,67 @@ FAIL:[specific reason] - if any issue found`,
       `Generated: ${new Date().toISOString()}`,
     ].join('\n'), 'utf-8');
 
-    // Record that we triggered at this bucket so we don't re-fire until the next +100
+    // Record that we triggered at this bucket so we don't re-fire until the next bucket boundary
     await writeFile(sentinelPath, String(currentBucket), 'utf-8');
 
     this.log.info('Auto-learning: LoRA fine-tune threshold reached — flag written', { pairCount, bucket: currentBucket });
   }
+}
+
+// ── Voice fingerprint helpers ──────────────────────────────────────────
+// Lightweight text metrics for the per-pen voice guardrail. Pure JS — no
+// network or model calls — so it's cheap enough to run on every drained
+// worker pair.
+
+export interface VoiceFingerprint {
+  meanSentenceLenMu: number;
+  meanSentenceLenSigma: number;
+  stdSentenceLenMu: number;
+  stdSentenceLenSigma: number;
+  adverbDensityMu: number;
+  adverbDensitySigma: number;
+  contractionRateMu: number;
+  contractionRateSigma: number;
+  sampleCount: number;
+}
+
+interface TextMetrics {
+  meanSentenceLen: number;
+  stdSentenceLen: number;
+  adverbDensity: number;   // adverbs / total words
+  contractionRate: number; // contractions / total verb-likely positions
+}
+
+const ADVERB_RX = /\b\w+ly\b/gi;
+const CONTRACTION_RX = /\b\w+'(s|t|re|ve|ll|d|m)\b/gi;
+
+function textMetrics(text: string): TextMetrics {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return { meanSentenceLen: 0, stdSentenceLen: 0, adverbDensity: 0, contractionRate: 0 };
+  }
+  // Sentence split — naive but cheap. Treat ., !, ? as terminators; collapse multi.
+  const sentences = cleaned.split(/[.!?]+\s+/).map(s => s.trim()).filter(Boolean);
+  const lens = sentences.map(s => s.split(/\s+/).length);
+  const totalWords = lens.reduce((a, b) => a + b, 0) || 1;
+  const adverbCount = (cleaned.match(ADVERB_RX) || []).length;
+  const contractionCount = (cleaned.match(CONTRACTION_RX) || []).length;
+  return {
+    meanSentenceLen: mean(lens),
+    stdSentenceLen: stddev(lens),
+    adverbDensity: adverbCount / totalWords,
+    contractionRate: contractionCount / Math.max(sentences.length, 1),
+  };
+}
+
+function mean(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+function stddev(xs: number[]): number {
+  if (xs.length < 2) return 0;
+  const m = mean(xs);
+  const variance = xs.reduce((acc, x) => acc + (x - m) ** 2, 0) / (xs.length - 1);
+  return Math.sqrt(variance);
 }

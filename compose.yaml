@@ -4,6 +4,8 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    mem_limit: 8g
+    pids_limit: 200
     environment:
       - OLLAMA_LLM_LIBRARY=cuda_v13
       - OLLAMA_KV_CACHE_TYPE=q8_0
@@ -30,6 +32,8 @@ services:
   ollama-embeddings:
     image: ollama/ollama:latest
     container_name: ollama-embeddings
+    mem_limit: 6g
+    pids_limit: 200
     environment:
       - OLLAMA_LLM_LIBRARY=cuda_v13
       - OLLAMA_KV_CACHE_TYPE=q4_0
@@ -57,6 +61,8 @@ services:
   comfyui:
     image: yanwk/comfyui-boot:cu128-slim
     container_name: comfyui
+    mem_limit: 6g
+    pids_limit: 500
     restart: unless-stopped
     ports:
       - "8188:8188"
@@ -87,18 +93,71 @@ services:
       context: ./perry
       dockerfile: docker/Dockerfile
     container_name: perry
+    mem_limit: 10g
+    pids_limit: 500
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3847/api/system/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     ports:
       - "3847:3847"
     volumes:
       - ./perry/workspace:/app/workspace
       - ./perry/config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Read-write mount of the host .claude/commands/ dir so the Self-Learning
+      # dashboard can list AND promote skills directly into the active dir.
+      # perry-worker also mounts this (read-only on its side) — same source
+      # of truth, two consumers, one writer (perry, via the promote endpoint).
+      - ./.claude/commands:/app/.claude/commands
     environment:
       - NODE_ENV=production
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_LIBRARIAN_BASE_URL=http://ollama-embeddings:11434
       - COMFYUI_BASE_URL=http://comfyui:8188
       - PERRY_VAULT_KEY=${PERRY_VAULT_KEY:-}
+      - PERRY_API_KEY=${PERRY_API_KEY:-}
+      - PERRY_WEBHOOK_SECRET=${PERRY_WEBHOOK_SECRET:-}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
+      - PERRY_BROWSER_URL=http://perry-browser:3848
+      - OLLAMA_LIBRARIAN_MODEL=qwen3:14b
+      - OLLAMA_RESEARCHER_MODEL=qwen3.6:27b
+      # Reddit OAuth (register a "script" app at https://www.reddit.com/prefs/apps).
+      # When set, NetworkClient auto-routes Reddit fetches through oauth.reddit.com.
+      # Without these, Reddit fetches return HTTP 500 (Reddit blocks anonymous
+      # datacenter IPs since June 2024) and Subgenre Trend Pulse / Comp Title
+      # Scout's Reddit slot fail with a clear "Reddit blocked" report.
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID:-}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET:-}
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT:-perry-bookbot/1.0}
+      # Default proxy for Reddit/Amazon scrapers (TorGuard static IP exit).
+      # When set, /app/workspace/scout/reddit-scraper.cjs and any other scout
+      # script that reads REDDIT_PROXY will tunnel through gluetun-torguard
+      # instead of the Docker datacenter IP that Reddit/Amazon block.
+      - REDDIT_PROXY=${REDDIT_PROXY:-http://gluetun-torguard-uk:8888}
+      # Round-robin pool — when set, NetworkClient spreads Reddit fetches
+      # across all listed proxies (one request per dispatcher, rotating).
+      # Doubles per-IP rate-limit headroom. Comma-separated, no spaces.
+      - REDDIT_PROXY_POOL=${REDDIT_PROXY_POOL:-http://gluetun-torguard-uk:8888,http://gluetun-torguard-us:8888}
+      # Amazon proxy pool — perry-browser per-request Playwright context binds
+      # to one of these exits per fetch. Same round-robin as Reddit; keeps
+      # any single IP off Amazon's anti-bot radar during deep-dive scraping.
+      - AMAZON_PROXY_POOL=${AMAZON_PROXY_POOL:-http://gluetun-torguard-uk:8888,http://gluetun-torguard-us:8888}
+      # Google Books API key — restricted to Books API only in Console.
+      # 1k queries/day free. When unset, the Comp Title Scout silently
+      # omits the Google Books source (graceful degrade).
+      - GOOGLE_BOOKS_API_KEY=${GOOGLE_BOOKS_API_KEY:-}
+      # Perry-worker container — WorkerCoordinator POSTs spawn requests to
+      # this URL. Required: spawns are dropped with an error log if unset.
+      - PERRY_WORKER_URL=${PERRY_WORKER_URL:-http://perry-worker:4711}
+      - PERRY_WORKER_SECRET=${PERRY_WORKER_SECRET:-}
+      # PERRY_MCP_HTTP_PORT is set per-process in the Dockerfile CMD, NOT
+      # container-wide — otherwise every child MCP process (e.g. the
+      # dashboard-api's internal stdio MCP clients) tries to bind the
+      # same port and crashes with EADDRINUSE.
       - NODE_OPTIONS=--max-old-space-size=8192
     depends_on:
       ollama:
@@ -107,12 +166,269 @@ services:
         condition: service_healthy
       comfyui:
         condition: service_healthy
+      perry-browser:
+        condition: service_healthy
+      perry-worker:
+        condition: service_healthy
+      gluetun-torguard-uk:
+        condition: service_healthy
+      gluetun-torguard-us:
+        condition: service_healthy
+
+  # ─── Headless browser (Playwright + stealth) for anti-bot sites ─────────
+  #
+  # Renders pages with full JS execution + browser-realistic TLS/header
+  # fingerprint, so sites that CAPTCHA `curl`/`undici` (Amazon, Goodreads,
+  # Bookbub) return real HTML. Exposes a tiny Express endpoint at
+  # `http://perry-browser:3848/fetch` that takes JSON
+  # `{ url, waitUntil?, waitForSelector?, networkPath? }` and returns
+  # `{ status, ok, text, finalUrl, screenshot? }`. Run-time cost: ~1-3s per
+  # request, 1GB image, ~200MB RAM idle / ~500MB per active context.
+  #
+  # NOT exposed to the host — only Perry talks to it via docker DNS. Volume
+  # caches Playwright's browser binaries between rebuilds.
+  perry-browser:
+    build:
+      context: ./perry/browser
+      dockerfile: Dockerfile
+    container_name: perry-browser
+    mem_limit: 4g
+    pids_limit: 1000
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3848
+      # If set, the browser routes requests through this HTTP proxy.
+      # Used by NetworkClient when `networkPath: 'gluetun-xx'` is requested.
+      - DEFAULT_PROXY=${PERRY_BROWSER_DEFAULT_PROXY:-}
+    # No ports — internal-only via docker DNS. No volume mount: chromium ships
+    # pre-installed at /ms-playwright in the base image, and a host mount
+    # shadowed it with an empty dir.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3848/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ─── Cloudflare Tunnel (Perry-owned) ─────────────────────────────────────
+  #
+  # Provisioned + configured by `perry/install-perry-tunnel.ps1`. The install
+  # script creates a remotely-managed tunnel via the Cloudflare API, registers
+  # the DNS, and writes CLOUDFLARE_TUNNEL_TOKEN to .env. This container just
+  # runs the connector — all routing rules live in the Cloudflare dashboard,
+  # so adding more public hostnames is one API call (or dashboard click) and
+  # never needs a code change here.
+  #
+  # The cloudflared connector joins the default perry-system docker network,
+  # so ingress URLs can use docker DNS (e.g. http://perry:3847, http://n8n:5678).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    mem_limit: 256m
+    pids_limit: 100
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      perry:
+        condition: service_healthy
+
+  # ─── Scout VPN exits ─────────────────────────────────────────────────────
+  #
+  # Each gluetun container holds one NordVPN WireGuard connection and exposes
+  # an HTTP proxy on port 8888 INSIDE the docker network (no host port). Other
+  # containers route a request through a specific exit by hitting
+  # `http://gluetun-<country>:8888` as an HTTP proxy.
+  #
+  # Why this pattern (vs `network_mode: service:gluetun-xx`):
+  #   - One scout container can pick a DIFFERENT exit per request → real
+  #     per-task `network_path` switching, no container-per-route fan-out
+  #   - Scout keeps full access to ollama / comfyui on the default network
+  #
+  # NordVPN device limit: 10 simultaneous connections per account.
+  # We use 3 by default — bump if you need wider geographic diversity.
+  #
+  # Setup: drop your WireGuard private key in .env as NORDVPN_WG_PRIVATE_KEY.
+  # See perry/scout/README.md for how to extract it from NordVPN.
+  gluetun-uk:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-uk
+    mem_limit: 256m
+    pids_limit: 100
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${NORDVPN_WG_PRIVATE_KEY:-}
+      - SERVER_COUNTRIES=United Kingdom
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      - HEALTH_VPN_DURATION_INITIAL=15s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "https://api.ipify.org"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  gluetun-us:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-us
+    mem_limit: 256m
+    pids_limit: 100
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${NORDVPN_WG_PRIVATE_KEY:-}
+      - SERVER_COUNTRIES=United States
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      - HEALTH_VPN_DURATION_INITIAL=15s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "https://api.ipify.org"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  gluetun-de:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-de
+    mem_limit: 256m
+    pids_limit: 100
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${NORDVPN_WG_PRIVATE_KEY:-}
+      - SERVER_COUNTRIES=Germany
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      - HEALTH_VPN_DURATION_INITIAL=15s
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "https://api.ipify.org"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # TorGuard OpenVPN — static dedicated IPs (Reddit/Amazon allow-listable).
+  #
+  # Unlike NordVPN's shared WireGuard exits (which Reddit + Amazon blanket-block
+  # as datacenter IPs), TorGuard's static IPs persist per account and aren't on
+  # the public datacenter blocklists. Two containers, one per static IP, both
+  # running simultaneously so scout tasks can pick which IP to exit from:
+  #
+  #   gluetun-torguard-uk → 82.129.66.80 (config: torguard-uk.ovpn, port 1215)
+  #   gluetun-torguard-us → 38.127.121.121 (config: torguard-us.ovpn, port TBD)
+  #
+  # Credentials live in .env (gitignored). To swap which IP a script uses:
+  #   REDDIT_PROXY=http://gluetun-torguard-uk:8888 (default for Reddit)
+  #   REDDIT_PROXY=http://gluetun-torguard-us:8888 (US-only stores, comp scout)
+  gluetun-torguard-uk:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-torguard-uk
+    mem_limit: 256m
+    pids_limit: 100
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - VPN_ENDPOINT_IP=${TG_WG_UK_ENDPOINT_IP:-}
+      - VPN_ENDPOINT_PORT=${TG_WG_UK_ENDPOINT_PORT:-}
+      - WIREGUARD_PRIVATE_KEY=${TG_WG_UK_PRIVATE_KEY:-}
+      - WIREGUARD_PUBLIC_KEY=${TG_WG_UK_PUBLIC_KEY:-}
+      - WIREGUARD_ADDRESSES=${TG_WG_UK_ADDRESSES:-}
+      - WIREGUARD_MTU=${TG_WG_UK_MTU:-1390}
+      # PersistentKeepalive — required for Docker Desktop/WSL2 NAT traversal.
+      # Without this the return handshake packet gets dropped at Docker's NAT
+      # layer because the outbound NAT entry ages out before the reply arrives.
+      - WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL=25s
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "https://api.ipify.org"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  gluetun-torguard-us:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-torguard-us
+    mem_limit: 256m
+    pids_limit: 100
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - VPN_ENDPOINT_IP=${TG_WG_US_ENDPOINT_IP:-}
+      - VPN_ENDPOINT_PORT=${TG_WG_US_ENDPOINT_PORT:-}
+      - WIREGUARD_PRIVATE_KEY=${TG_WG_US_PRIVATE_KEY:-}
+      - WIREGUARD_PUBLIC_KEY=${TG_WG_US_PUBLIC_KEY:-}
+      - WIREGUARD_ADDRESSES=${TG_WG_US_ADDRESSES:-}
+      - WIREGUARD_MTU=${TG_WG_US_MTU:-1390}
+      - WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL=25s
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "https://api.ipify.org"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Placeholder scout container — sits idle until the scout worker is built.
+  # Use it to verify VPN routing works before committing to a worker tech stack:
+  #   docker exec perry-scout curl -x http://gluetun-uk:8888 https://api.ipify.org
+  #   docker exec perry-scout curl -x http://gluetun-us:8888 https://api.ipify.org
+  #   docker exec perry-scout curl -x http://gluetun-de:8888 https://api.ipify.org
+  #   docker exec perry-scout curl -x http://gluetun-torguard:8888 https://api.ipify.org
+  # Each should return a different IP in the matching country.
+  perry-scout:
+    image: alpine/curl:latest
+    container_name: perry-scout
+    mem_limit: 64m
+    pids_limit: 50
+    restart: unless-stopped
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+    depends_on:
+      gluetun-uk:
+        condition: service_healthy
+      gluetun-us:
+        condition: service_healthy
+      gluetun-de:
+        condition: service_healthy
+      gluetun-torguard-uk:
+        condition: service_healthy
+      gluetun-torguard-us:
+        condition: service_healthy
 
   perry-trainer:
     build:
       context: ./perry/trainer
       dockerfile: Dockerfile
     container_name: perry-trainer
+    mem_limit: 16g
+    pids_limit: 2000
     restart: unless-stopped
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -130,3 +446,126 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu, compute, utility]
+
+  # ─── Perry-Worker — containerised CLI worker pool ──────────────────────
+  #
+  # Hosts Claude Code + Gemini CLI inside the container; the host's OAuth
+  # state is mounted read-only so the user's subscription auth keeps
+  # working. This is the only worker-dispatch path — the older host-side
+  # PerryHostSpawner Windows Service + .signals/ file IPC have been removed.
+  #
+  # Subscription-only mode preserved: no API keys, no tokens. The CLIs
+  # authenticate against the same logins you use on your laptop.
+  #
+  # MCP Gateway — Atlassian mcp-compressor wrapped as a sidecar. Workers
+  # connect here instead of straight to perry:3850/mcp; the gateway returns
+  # a compressed tool surface (descriptions + schemas) which saves thousands
+  # of tokens per worker session AND gives us one endpoint to aggregate
+  # future MCP servers behind. Reverse-proxy mode — no model on this box.
+  #
+  # When you add a second MCP server (Stripe / Notion / a custom domain
+  # one), extend ENTRYPOINT to declare a multi-server config — workers
+  # see all tools merged under one connection.
+  mcp-gateway:
+    build:
+      context: ./perry/mcp-gateway
+      dockerfile: Dockerfile
+    container_name: mcp-gateway
+    # Was previously parked behind `profiles: ["gateway"]` because the
+    # original Dockerfile installed only the npm wrapper (cli.js), which
+    # recursively re-spawned itself when no Rust binary was on PATH —
+    # 18k+ PIDs and 34 GB RAM before resource limits caught it. The new
+    # Dockerfile builds the actual Rust binary from source and patches
+    # two upstream limitations (loopback-only bind + Host-header allowlist)
+    # so the proxy works on the docker network.
+    mem_limit: 512m
+    # Belt-and-suspenders: even if a regression introduces another
+    # spawn loop, the kernel blocks new PIDs past 50 and the
+    # healthcheck trips before it impacts the host.
+    pids_limit: 50
+    restart: unless-stopped
+    environment:
+      - COMPRESSION_LEVEL=${MCP_COMPRESSION_LEVEL:-medium}
+      - UPSTREAM_URL=http://perry:3850/mcp
+      - PERRY_WORKER_SECRET=${PERRY_WORKER_SECRET:-}
+    depends_on:
+      perry:
+        condition: service_started
+    healthcheck:
+      # TCP probe + process-count guard. The previous `wget --spider` + the
+      # plain TCP-only check both reported "healthy" while the binary was
+      # silently fork-bombing (port stays bound by the listener even when
+      # the process tree explodes). Failing when PIDs exceed 30 catches the
+      # runaway before pids_limit (50) hard-stops new spawns.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/3851' 2>/dev/null && test $(ls /proc 2>/dev/null | grep -c '^[0-9]') -lt 30"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Reached internally at http://perry-worker:4711 — never exposed to the
+  # host. WorkerCoordinator (in perry) POSTs `{ agent, id, label, reason,
+  # config }` to /spawn and the listener fires the CLI subprocess.
+  perry-worker:
+    build:
+      context: ./perry/worker
+      dockerfile: Dockerfile
+    container_name: perry-worker
+    mem_limit: 8g
+    pids_limit: 500
+    restart: unless-stopped
+    environment:
+      - PERRY_WORKER_PORT=4711
+      - PERRY_WORKER_SECRET=${PERRY_WORKER_SECRET:-}
+      - PERRY_WORKER_LOG_DIR=/app/logs/workers
+      # Trust the container's workspace — Gemini CLI refuses non-interactive
+      # runs in "untrusted" folders by default. Equivalent to clicking
+      # "trust this folder" on interactive use.
+      - GEMINI_CLI_TRUST_WORKSPACE=true
+      # MCP target — direct to perry's MCP server. We tried routing this
+      # through mcp-gateway (atlassian mcp-compressor) for additional
+      # compression, but the Rust binary doesn't forward client HTTP
+      # headers upstream — which means perry never sees the
+      # `X-Perry-MCP-Profile: drainer` header workers send, and workers
+      # end up with the full 28-tool coordinator surface instead of the
+      # 12-tool drainer subset. Perry's own PERRY_MCP_COMPACT=true
+      # already does on-demand schema fetch, which captures ~90% of the
+      # gateway's token win, while drainer profile filtering is the more
+      # important security boundary. To opt back into the gateway, set
+      # PERRY_MCP_URL=http://mcp-gateway:3851/mcp in .env.
+      - PERRY_MCP_URL=${PERRY_MCP_URL:-http://perry:3850/mcp}
+      - PERRY_MCP_PROFILE=${PERRY_MCP_PROFILE:-drainer}
+      # Compact mode: request schemas as placeholders in tools/list. Workers
+      # call mcp__perry__get_tool_schema to pull full schemas only for tools
+      # they actually intend to use. Saves ~11k tokens per worker session.
+      - PERRY_MCP_COMPACT=${PERRY_MCP_COMPACT:-true}
+    volumes:
+      # Auth state — read-only so the container can't corrupt host logins.
+      # Cross-platform: USERPROFILE on Windows, HOME on Linux/Mac.
+      # Container runs as `node` (uid 1000 from base image), so mounts go
+      # to /home/node/. Claude needs BOTH the directory AND the sibling
+      # .claude.json file (dir holds caches; JSON holds OAuth tokens).
+      # .claude needs to be writable — Claude's Bash sandbox creates per-session
+      # env scripts under .claude/session-env/. Same trust boundary as .claude.json.
+      - ${USERPROFILE:-${HOME}}/.claude:/home/node/.claude
+      # .claude.json needs to be writable — Claude updates session state
+      # (last-used model, cache cursors) on every run. Container is on the
+      # internal docker network only; same trust boundary as the host CLI.
+      - ${USERPROFILE:-${HOME}}/.claude.json:/home/node/.claude.json
+      # .gemini needs to be writable — the CLI updates session state /
+      # google_accounts.json / per-account caches on every run. Same trust
+      # boundary as the host CLI (single-user dev box).
+      - ${USERPROFILE:-${HOME}}/.gemini:/home/node/.gemini
+      # Project-local slash commands — `/perry-worker`, `/perry-code-worker`
+      # etc live in ./.claude/commands/ . Claude Code searches CWD
+      # upward, so mounting at /app/.claude/commands makes them visible
+      # when the CLI is spawned with cwd=/app.
+      - ./.claude:/app/.claude:ro
+      # Worker logs — bind-mounted so the dashboard's log viewer keeps working.
+      - ./perry/logs/workers:/app/logs/workers
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:4711/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

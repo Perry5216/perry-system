@@ -19,6 +19,19 @@ import type { StateStore } from '../state-store.js';
 import type { StyleDnaService } from '../services/style-dna-service.js';
 import { ProseMetricsService } from '../services/prose-metrics.js';
 
+// Read-once shim: the gate doesn't have AIRouter injected, so it pulls
+// the blocking flag straight off the state store's meta table. Default
+// is BLOCKING (true) for backward compat; flip to advisory via the
+// dashboard once the writer LoRA is mature.
+function isPovGateBlocking(stateStore: StateStore): boolean {
+  try {
+    const raw = (stateStore as any).getMeta?.('quality.povGate.blocking');
+    if (raw == null) return true;
+    if (typeof raw === 'string') return raw !== 'false';
+    return !!raw;
+  } catch { return true; }
+}
+
 export class PovQualityGate {
   private proseMetrics: ProseMetricsService;
 
@@ -175,6 +188,43 @@ export class PovQualityGate {
       return result;
     }
 
+    // ── Advisory mode ──────────────────────────────────────────────
+    // When `quality.povGate.blocking` is false (set via dashboard), the
+    // gate logs the verdict + records it in meta for dashboard surfacing
+    // but does NOT reset/retry the chapter. The async quality audit and
+    // Style DNA learning already ran above; this just stops the
+    // blocking-rewrite loop that fought v7's voice. Flip back to
+    // blocking if you ever want the loop back.
+    if (!isPovGateBlocking(this.stateStore)) {
+      try {
+        const verdict = {
+          step_id: povStep.id,
+          chapter: povStep.chapterNumber,
+          recorded_at: new Date().toISOString(),
+          povScore: effectiveScore,
+          pacingScore: effectivePacing,
+          hookScore: effectiveHook,
+          outlineMatch,
+          detectedPov,
+          povPassed,
+          pacingPassed,
+          hookPassed,
+          metricsPassed,
+          issues,
+          filterWordsFound: filterWords,
+        };
+        (this.stateStore as any).setMeta?.(`pov_verdict_${povStep.id}`, JSON.stringify(verdict));
+      } catch { /* meta failure is non-fatal */ }
+      this.log.info('POV gate advisory mode — verdict recorded, no rewrite triggered', {
+        step: povStep.label, povScore: effectiveScore, pacing: effectivePacing, hook: effectiveHook,
+      });
+      this.eventBus.emit('step:progress', {
+        projectId: project.id, stepId: povStep.id,
+        message: `POV verdict (advisory): POV ${effectiveScore}/10, pacing ${effectivePacing}/10, hook ${effectiveHook}/10`,
+      });
+      return result;
+    }
+
     // Find ALL chapter steps to rewrite (supports segmented architecture)
     const writeSteps = project.steps.filter(
       (s: ProjectStep) => s.chapterNumber === chapterNum &&
@@ -248,12 +298,16 @@ export class PovQualityGate {
         }
       }
 
-      step.status = 'pending'; 
-      step.result = undefined; 
+      step.status = 'pending';
+      step.result = undefined;
       step.error = undefined;
-      step.startedAt = undefined; 
+      step.startedAt = undefined;
       step.completedAt = undefined;
-      step.prompt = cleanPrompt + correction + healingBlock + `\n\n[TOTAL-REWRITES: ${nextTotalRewrites}]`;
+      const healedPrompt = cleanPrompt + correction + healingBlock + `\n\n[TOTAL-REWRITES: ${nextTotalRewrites}]`;
+      // Persist as override so engine.refreshPendingPrompts doesn't overwrite
+      // the healing block with a fresh template prompt before the retry runs.
+      step.prompt = healedPrompt;
+      step.promptOverride = healedPrompt;
     }
 
     povStep.status = 'pending'; povStep.result = undefined; povStep.error = undefined;

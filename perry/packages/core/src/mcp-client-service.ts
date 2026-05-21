@@ -38,9 +38,16 @@ export class McpClientService {
         if (srvConfig.type === 'sse' && srvConfig.url) {
           transport = new SSEClientTransport(new URL(srvConfig.url));
         } else if (srvConfig.type === 'stdio' && srvConfig.command) {
+          // Forward parent env to the child MCP server. The SDK's default is a
+          // sanitized minimal env (PATH only) which strips PERRY_VAULT_KEY,
+          // PERRY_API_KEY, GOOGLE_BOOKS_API_KEY etc. — every secret the child
+          // needs disappears, and Vault falls back to the hostname-derived
+          // key in the child only, which is why the warning fired despite
+          // the parent having the key set correctly.
           transport = new StdioClientTransport({
             command: srvConfig.command,
-            args: srvConfig.args || []
+            args: srvConfig.args || [],
+            env: process.env as Record<string, string>,
           });
         } else {
           this.log.warn(`Invalid MCP config for ${serverId}`);

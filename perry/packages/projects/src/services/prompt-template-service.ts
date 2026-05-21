@@ -40,32 +40,27 @@ export class PromptTemplateService {
 
   /**
    * Applies user-defined prompt overrides to generated steps.
-   * If a step doesn't have an override yet, it saves the default prompt to the JSON file
-   * so the user can easily discover and edit it later.
+   *
+   * Old behavior auto-wrote every fresh template prompt into JSON the first
+   * time a project of that type was created — then on every subsequent call
+   * the JSON value won, even after `templates.ts` was edited. That was the
+   * actual root cause of the "Digital Drift v2 → The Last Synapse" frozen-
+   * prompt bug: yesterday's refreshPendingPrompts re-rendered the template
+   * fresh, then applyOverrides immediately stomped it with the stale JSON.
+   *
+   * New rule: JSON entries are user overrides only. Apply them when they
+   * exist AND differ from the current template default. Never auto-write
+   * defaults into JSON — that bloats the file and locks in stale text.
    */
   applyOverrides(projectType: string, steps: ProjectStep[]): ProjectStep[] {
-    // Hot reload in dev or whenever called
     this.load();
-
-    if (!this.templates[projectType]) {
-      this.templates[projectType] = {};
-      this.dirty = true;
-    }
-
+    const projectOverrides = this.templates[projectType] || {};
     for (const step of steps) {
-      const templateKey = step.label;
-      
-      // If the user has defined a custom prompt for this step in the JSON file, use it
-      if (this.templates[projectType][templateKey]) {
-        step.prompt = this.templates[projectType][templateKey];
-      } else {
-        // Otherwise, write the default hardcoded prompt into the JSON file so they can edit it
-        this.templates[projectType][templateKey] = step.prompt;
-        this.dirty = true;
+      const override = projectOverrides[step.label];
+      if (override && override !== step.prompt) {
+        step.prompt = override;
       }
     }
-
-    this.save();
     return steps;
   }
 
