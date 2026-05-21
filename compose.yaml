@@ -211,6 +211,40 @@ services:
       retries: 3
       start_period: 30s
 
+  # ─── perry-voice — TTS + STT sidecar (opt-in) ─────────────────────────
+  #
+  # Edge TTS (free Microsoft endpoint, no key) + faster-whisper (local
+  # Whisper STT, no key, ~75MB tiny model). Subscription-only ethos
+  # preserved — no metered API calls.
+  #
+  # Profile: gated behind `voice` profile so it doesn't start by default.
+  # Enable with: `docker compose --profile voice up -d perry-voice`.
+  # Or remove the profile line to make it part of the default stack.
+  #
+  # First STT call downloads the whisper model into the `voice_cache` volume.
+  # Models persist across rebuilds.
+  perry-voice:
+    build:
+      context: ./perry/voice
+      dockerfile: Dockerfile
+    container_name: perry-voice
+    mem_limit: 4g
+    pids_limit: 500
+    restart: unless-stopped
+    profiles: ["voice"]
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-tiny}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+    volumes:
+      - ./data/voice_cache:/cache
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5005/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
   # ─── Cloudflare Tunnel (Perry-owned) ─────────────────────────────────────
   #
   # Provisioned + configured by `perry/install-perry-tunnel.ps1`. The install

@@ -1609,6 +1609,73 @@ export class StateStore {
     return id;
   }
 
+  /**
+   * Count completed steps per UTC date. Returns { 'YYYY-MM-DD': count } for
+   * the date range. Used by /api/system/activity-heatmap.
+   */
+  countStepsByDay(opts: { since?: string } = {}): Record<string, number> {
+    if (!this.usingSqlite || !this.db) return {};
+    const conds = ["status = 'completed'", "completed_at IS NOT NULL"];
+    const params: any[] = [];
+    if (opts.since) { conds.push('completed_at >= ?'); params.push(opts.since); }
+    const where = `WHERE ${conds.join(' AND ')}`;
+    try {
+      const rows = this.db.prepare(
+        `SELECT substr(completed_at, 1, 10) AS d, COUNT(*) AS n FROM steps ${where} GROUP BY d`
+      ).all(...params) as Array<{ d: string; n: number }>;
+      const out: Record<string, number> = {};
+      for (const r of rows) out[r.d] = r.n;
+      return out;
+    } catch { return {}; }
+  }
+
+  /**
+   * Count agent_invocations per UTC date. { 'YYYY-MM-DD': count }.
+   */
+  countInvocationsByDay(opts: { since?: string } = {}): Record<string, number> {
+    if (!this.usingSqlite || !this.db) return {};
+    const conds: string[] = [];
+    const params: any[] = [];
+    if (opts.since) { conds.push('created_at >= ?'); params.push(opts.since); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    try {
+      const rows = this.db.prepare(
+        `SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM agent_invocations ${where} GROUP BY d`
+      ).all(...params) as Array<{ d: string; n: number }>;
+      const out: Record<string, number> = {};
+      for (const r of rows) out[r.d] = r.n;
+      return out;
+    } catch { return {}; }
+  }
+
+  /**
+   * Export agent_trajectories rows for offline analysis / RL training. Returns
+   * a plain array of objects (messages + tool_calls already JSON-parsed). The
+   * caller is responsible for streaming/serialising as JSONL.
+   */
+  exportTrajectories(opts: { since?: string; projectId?: string; limit?: number } = {}): any[] {
+    if (!this.usingSqlite || !this.db) return [];
+    const conds: string[] = [];
+    const params: any[] = [];
+    if (opts.since) { conds.push('created_at >= ?'); params.push(opts.since); }
+    // We don't have a direct project_id column on trajectories; filter by
+    // the invocation's session if needed via join (simple LIKE fallback for now).
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const limit = Math.max(1, Math.min(50_000, opts.limit ?? 10_000));
+    const rows = this.db.prepare(
+      `SELECT id, invocation_id, agent_id, domain, pen_slug, worker_class, model,
+              messages, tool_calls, outcome, quality_score, rated_by, created_at
+       FROM agent_trajectories ${where}
+       ORDER BY created_at DESC
+       LIMIT ?`
+    ).all(...params, limit) as any[];
+    return rows.map(r => ({
+      ...r,
+      messages: r.messages ? (() => { try { return JSON.parse(r.messages); } catch { return []; } })() : [],
+      tool_calls: r.tool_calls ? (() => { try { return JSON.parse(r.tool_calls); } catch { return null; } })() : null,
+    }));
+  }
+
   countAgentTrajectories(opts: { agentId?: string; outcome?: string; domain?: string } = {}): number {
     if (!this.usingSqlite || !this.db) return 0;
     const conds: string[] = [];

@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { DomainSwitcher } from './DomainSwitcher';
 import { Volume2, VolumeX } from 'lucide-react';
 import { isMuted, setMuted, playClickSound } from '../utils/audio';
 
@@ -162,8 +163,9 @@ export function TopStatusBar({ activePen }: { activePen?: string }) {
         <HealthPill name="db" status={health.db} />
       </div>
 
-      {/* Right: active pen + uptime + audio toggle */}
+      {/* Right: active domain switcher + active pen + uptime + audio toggle */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <DomainSwitcher />
         {activePen && (
           <span style={{
             background: 'rgba(168, 85, 247, 0.08)',

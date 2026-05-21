@@ -1,0 +1,23 @@
+{
+  "type": "book-planning",
+  "title": "Five Stages of a Heist",
+  "description": "Project Type: Ensemble Thriller (Standalone, Structurally Tight)\nTone: Lean, propulsive, gallows-humoured — Steven Soderbergh's Out of Sight crossed with Lawrence Block's Bernie Rhodenbarr\n\n\nStory Premise:\n\n\nA retired safecracker is pulled back in for one job: lift a Soviet-era one-time-pad cipher key from a private collector's bunker in rural Estonia. The collector is a former GRU officer who has used the key to extort six Western intelligence services over twenty years. The crew has nine days and a five-stage structure: CREW (assemble the team), PLAN (case the bunker, design the breach), TEST (a dry run in a near-identical safe in Helsinki), EXECUTE (the breach itself), AFTERMATH (the double-cross that was inevitable from page one).\n\n\nThree rotating POV characters across the ensemble:\n\n\n- August Vaher (lead POV): 58, the retired safecracker. Latvian, lost his daughter to one of the people the cipher key has been used to blackmail. The job is personal but he's lying to the crew about that.\n- Mireille Chau (POV): 34, the electronics specialist. French-Cambodian, ex-Sigint. Doesn't trust August's reason for taking the job — won't say so.\n- Konrad \"Kon\" Heininen (POV): 41, the inside man. The collector's former bodyguard, fired three months ago. Loyal to a payday but resents being asked.\n\n\nSupporting ensemble (non-POV but actively used):\n\n\n- Nadia Petrov, the driver. Sober two years; one drink away from blowing the timeline\n- Tarmo, the muscle. Doesn't speak. Reads voraciously\n- The collector himself, Aleksei Yermak: never on the page until the breach\n\n\nProject Goals:\n\n\n- Stress-test the Tension Blueprint and Foreshadowing & Payoff Map on a tightly structured five-act plot\n- Validate ensemble juggling: 3 active POVs + 3 supporting characters who must remain distinct\n- Test pipeline behaviour when the structure is RIGID (five stages, fixed beat-count) rather than emergent\n- Audit for thriller-specific anti-patterns (ticking-clock cliché, mole reveal exhaustion, over-explanation)\n- Confirm the chapter-by-chapter outline respects the five-stage division (4 chapters per stage = 20 total)\n",
+  "context": {
+    "targetChapters": 20,
+    "targetWordsPerChapter": 2500,
+    "hasParent": false,
+    "includePrologue": true,
+    "includeEpilogue": true,
+    "isSeries": false,
+    "seriesTotalBooks": 1,
+    "seriesCurrentBook": 1,
+    "isInfiniteCalibration": false,
+    "penName": "K.Mercer",
+    "penNameSlug": "k-mercer",
+    "coverVariants": 1,
+    "coverFont": "Serif (Georgia)",
+    "brandColor": "#8b0000"
+  },
+  "preferredProvider": "",
+  "domain": "books"
+}

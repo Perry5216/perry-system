@@ -36,10 +36,14 @@
  * cost is irrelevant.
  */
 
-import type { EventBus, Logger, SkillProposer } from '@perry/core';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'fs';
+import { join } from 'path';
+import type { EventBus, Logger, SkillProposer, TrajectorySkillWriter } from '@perry/core';
 import type { StateStore } from '@perry/projects';
 
 const META_KEY = 'learning_state';
+const VERIFIED_PATTERNS_DIR = 'verified-patterns';
+const VERIFIED_PATTERNS_CAP = 30;
 
 /** Per (source, kind, fingerprint) state. */
 interface LearningEntry {
@@ -129,6 +133,8 @@ export class LearningCore {
     private stateStore: StateStore,
     private skillProposer: SkillProposer,
     private log: Logger,
+    private workspaceDir: string,
+    private trajectoryWriter?: TrajectorySkillWriter,
   ) {
     this.loadState();
     this.subscribe();
@@ -188,6 +194,7 @@ export class LearningCore {
     const key = entryKey(source, kind, fingerprint);
     const now = new Date().toISOString();
     let entry = this.state[key];
+    const isFirstSeen = !entry;
     if (!entry) {
       entry = {
         source, kind, fingerprint,
@@ -198,6 +205,22 @@ export class LearningCore {
       this.state[key] = entry;
     }
     entry.count += 1;
+    // Trajectory-skill: first time we see this (source, kind, fingerprint),
+    // write a markdown record. Domain-agnostic — any new source flowing
+    // events through LearningCore gets a trajectory dir automatically. The
+    // writer caps per-source files so a flood of unique fingerprints doesn't
+    // blow up disk.
+    if (isFirstSeen && this.trajectoryWriter) {
+      this.trajectoryWriter.write({
+        source,
+        kind,
+        fingerprint,
+        firstSeen: now,
+        metadata: ev.metadata,
+        durationMs: ev.durationMs,
+        error: ev.error,
+      });
+    }
     entry.lastSeen = now;
     if (ev.kind === 'failure') {
       entry.failures += 1;
@@ -210,9 +233,17 @@ export class LearningCore {
 
     if (!entry.proposed) {
       const threshold = thresholdFor(source, kind);
-      if (entry.count >= threshold && this.shouldPropose(entry)) {
-        const success = this.proposeFor(entry);
-        if (success) entry.proposed = true;
+      if (entry.count >= threshold) {
+        if (this.shouldPropose(entry)) {
+          const success = this.proposeFor(entry);
+          if (success) entry.proposed = true;
+        } else if (entry.failures === 0 && entry.successes > 0) {
+          // Pure-success pattern at threshold — not a skill candidate, but
+          // worth surfacing as a "verified pattern" exemplar. Separate
+          // channel keeps skills-pending focused on actual remedies.
+          this.logVerifiedPattern(entry);
+          entry.proposed = true; // prevents re-logging on every subsequent observation
+        }
       }
     }
   }
@@ -308,6 +339,90 @@ export class LearningCore {
       'When promoted, this skill becomes visible to any consumer reading `workspace/skills-installed/' + e.source + '/`.',
     );
     return lines.filter(l => l !== '').join('\n');
+  }
+
+  // ─── Verified patterns (success-only signal channel) ───────────────────
+
+  /**
+   * Append a pure-success threshold-cross to `workspace/verified-patterns/{source}.md`.
+   * Capped at the most recent `VERIFIED_PATTERNS_CAP` entries per source — older
+   * ones roll off so the file stays human-readable.
+   *
+   * Why a separate channel: success-only counters aren't actionable as skills
+   * ("step Y completed 3x" doesn't propose a remedy), but they ARE meaningful
+   * signal — these are the reliable patterns the operator can lean on. The
+   * dashboard's Verified Patterns tile reads this dir.
+   */
+  private logVerifiedPattern(entry: LearningEntry): void {
+    try {
+      const dir = join(this.workspaceDir, VERIFIED_PATTERNS_DIR);
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, `${entry.source}.md`);
+
+      let existing = '';
+      try { existing = readFileSync(file, 'utf-8'); } catch { /* fresh file */ }
+
+      const header = `# Verified Patterns: ${entry.source}\n\nPatterns that recurred at or above their threshold with zero failures. Surfaced as reliable signals — exemplars to lean on or codify into prompts. Most recent first; capped at ${VERIFIED_PATTERNS_CAP} entries.`;
+
+      const newEntryBlock = this.renderVerifiedPattern(entry);
+
+      // Parse out existing entries by splitting on `\n## ` (the boundary between
+      // entries). The first split piece is header content (we discard it; we
+      // re-emit our own header). Remaining pieces are entries minus their
+      // leading `## ` which we prepend back.
+      const splitParts = existing.split(/\n## /);
+      const existingEntries: string[] = [];
+      for (let i = 1; i < splitParts.length; i++) {
+        existingEntries.push('## ' + splitParts[i].trimEnd());
+      }
+      const updated = [newEntryBlock, ...existingEntries].slice(0, VERIFIED_PATTERNS_CAP);
+      const content = header + '\n\n' + updated.join('\n\n').trimEnd() + '\n';
+      writeFileSync(file, content, 'utf-8');
+      this.log.info('LearningCore logged verified pattern', { source: entry.source, kind: entry.kind, fingerprint: entry.fingerprint, count: entry.count });
+    } catch (err: any) {
+      this.log.warn('logVerifiedPattern failed (non-fatal)', { error: err.message });
+    }
+  }
+
+  private renderVerifiedPattern(entry: LearningEntry): string {
+    const metaLine = entry.lastMetadata
+      ? `\n- **Last metadata:** \`${JSON.stringify(entry.lastMetadata).slice(0, 200)}\``
+      : '';
+    const durationLine = entry.lastDurationMs
+      ? `\n- **Last duration:** ${entry.lastDurationMs}ms`
+      : '';
+    return [
+      `## ${entry.kind} · \`${entry.fingerprint}\``,
+      `*Verified at ${new Date().toISOString()}*`,
+      ``,
+      `- **Recurred:** ${entry.count} times`,
+      `- **Successes:** ${entry.successes} (zero failures)`,
+      `- **First seen:** ${entry.firstSeen}`,
+      `- **Last seen:** ${entry.lastSeen}${durationLine}${metaLine}`,
+      ``,
+    ].join('\n');
+  }
+
+  /**
+   * Snapshot of all verified-pattern files, keyed by source. Used by
+   * `/api/learning/verified-patterns` to render the dashboard tile.
+   */
+  verifiedPatternsSnapshot(): Record<string, { source: string; entryCount: number; chars: number; content: string }> {
+    const out: Record<string, { source: string; entryCount: number; chars: number; content: string }> = {};
+    try {
+      const dir = join(this.workspaceDir, VERIFIED_PATTERNS_DIR);
+      if (!existsSync(dir)) return out;
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.md')) continue;
+        const source = f.replace(/\.md$/, '');
+        try {
+          const content = readFileSync(join(dir, f), 'utf-8');
+          const entryCount = (content.match(/^## /gm) || []).length;
+          out[source] = { source, entryCount, chars: content.length, content };
+        } catch { /* skip unreadable */ }
+      }
+    } catch { /* dir doesn't exist yet */ }
+    return out;
   }
 
   // ─── Persistence ───────────────────────────────────────────────────────

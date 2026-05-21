@@ -27,3 +27,5 @@ export { scanLeaks, firstFailure } from './voice-screens.js';
 export type { LeakHit } from './voice-screens.js';
 export { AGENT_REGISTRY, getAgent, listAgents, listDelegatableAgents } from './agents/registry.js';
 export { AgentRunner } from './agents/runner.js';
+export { DomainRegistry } from './services/domain-registry.js';
+export type { DomainDefinition } from './services/domain-registry.js';

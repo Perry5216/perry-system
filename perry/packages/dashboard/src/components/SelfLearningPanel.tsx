@@ -25,20 +25,108 @@ import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileT
 const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV)
   ? 'http://localhost:4000/api' : '/api';
 
-type SubTab = 'sessions' | 'skills' | 'pens';
+type SubTab = 'sessions' | 'skills' | 'pens' | 'evolution';
 
 export function SelfLearningPanel() {
   const [tab, setTab] = useState<SubTab>('sessions');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 16 }}>
-      <PanelHeader eyebrow="SELF-LEARNING" title="Self-Learning" subtitle="Sessions · Skills · Pen Profiles" />
+      <PanelHeader eyebrow="SELF-LEARNING" title="Self-Learning" subtitle="Sessions · Skills · Pens · Evolution" />
       <LearningActivity />
       <SubTabs current={tab} onChange={setTab} />
       <div style={{ flex: 1, overflowY: 'auto', marginTop: 12 }}>
         {tab === 'sessions' && <SessionsTab />}
         {tab === 'skills' && <SkillsTab />}
         {tab === 'pens' && <PensTab />}
+        {tab === 'evolution' && <EvolutionTab />}
+      </div>
+    </div>
+  );
+}
+
+// ─── Evolution tab ─────────────────────────────────────────────────────────
+// Chronological view of how Perry is evolving: skill-applied events,
+// auto-promotions, manual promotions/deletions, verified-pattern flips.
+// Sourced from workspace/evolution-log.jsonl via /api/learning/evolution.
+function EvolutionTab() {
+  const [events, setEvents] = useState<Array<{ ts: string; kind: string; service?: string; name?: string; source?: string; metadata?: any }>>([]);
+  const [scores, setScores] = useState<Array<{ service: string; name: string; applied: number; lastSeen: string }>>([]);
+  const [suggestions, setSuggestions] = useState<{ installable: any[]; transfer: any[] }>({ installable: [], transfer: [] });
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [eRes, sRes, sgRes] = await Promise.all([
+          fetch(`${API_BASE}/learning/evolution?limit=100`),
+          fetch(`${API_BASE}/learning/scores`),
+          fetch(`${API_BASE}/learning/suggested-skills?limit=10`),
+        ]);
+        if (!eRes.ok) throw new Error(`evolution HTTP ${eRes.status}`);
+        const ej = await eRes.json();
+        const sj = sRes.ok ? await sRes.json() : { scores: [] };
+        const sgj = sgRes.ok ? await sgRes.json() : { installable: [], transfer: [] };
+        if (!cancelled) { setEvents(ej.events || []); setScores(sj.scores || []); setSuggestions(sgj); setErr(null); }
+      } catch (e: any) { if (!cancelled) setErr(e.message); }
+    };
+    load();
+    const id = setInterval(load, 15_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  if (err) return <div style={{ color: '#fca5a5' }}>error: {err}</div>;
+
+  const kindColor = (k: string) => ({
+    'skill-applied': '#22d3ee',
+    'skill-promoted': '#a855f7',
+    'skill-auto-promoted': '#fbbf24',
+    'skill-created': '#34d399',
+    'skill-deleted': '#fca5a5',
+    'verified-pattern': '#94a3b8',
+    'pattern-retired': '#fca5a5',
+  } as Record<string, string>)[k] || '#94a3b8';
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, fontFamily: 'var(--font-mono)' }}>
+      <div>
+        <h3 style={{ color: 'var(--secondary)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 8px' }}>Timeline ({events.length})</h3>
+        <div style={{ maxHeight: 600, overflowY: 'auto', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6 }}>
+          {events.length === 0 && <div style={{ padding: 12, color: 'var(--text-muted)', fontSize: '0.85rem' }}>No evolution events yet. Will populate as skills are applied / promoted.</div>}
+          {events.map((e, i) => (
+            <div key={i} style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '0.8rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: kindColor(e.kind), fontWeight: 600 }}>{e.kind}</span>
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>{new Date(e.ts).toLocaleTimeString()}</span>
+              </div>
+              {(e.service || e.name) && <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>{e.service && <span>{e.service}/</span>}{e.name}</div>}
+              {e.metadata?.count && <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>recurred {e.metadata.count}x</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div>
+          <h3 style={{ color: 'var(--secondary)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 8px' }}>Skill confidence ({scores.length})</h3>
+          {scores.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No skill applications recorded yet.</div>}
+          {scores.slice(0, 12).map(s => (
+            <div key={`${s.service}::${s.name}`} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '0.8rem', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+              <span><span style={{ color: 'var(--text-muted)' }}>{s.service}/</span>{s.name}</span>
+              <span style={{ color: '#22d3ee', fontWeight: 600 }}>{s.applied}x</span>
+            </div>
+          ))}
+        </div>
+        <div>
+          <h3 style={{ color: 'var(--secondary)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 8px' }}>Suggested installs</h3>
+          {suggestions.installable.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No suggestions yet — patterns will accumulate.</div>}
+          {suggestions.installable.slice(0, 5).map((s, i) => (
+            <div key={i} style={{ padding: 6, marginBottom: 4, background: 'rgba(34,211,238,0.05)', border: '1px solid rgba(34,211,238,0.15)', borderRadius: 4, fontSize: '0.8rem' }}>
+              <div><strong style={{ color: 'var(--secondary)' }}>{s.service}/{s.name}</strong></div>
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>{s.description}</div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -157,6 +245,7 @@ function SubTabs({ current, onChange }: { current: SubTab; onChange: (t: SubTab)
     { key: 'sessions', label: 'Sessions',  icon: <Search size={14} /> },
     { key: 'skills',   label: 'Skills',    icon: <Sparkles size={14} /> },
     { key: 'pens',     label: 'Pens',      icon: <BookOpen size={14} /> },
+    { key: 'evolution', label: 'Evolution', icon: <Sparkles size={14} /> },
   ];
   return (
     <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid rgba(34,211,238,0.15)', paddingBottom: 0 }}>

@@ -1,0 +1,23 @@
+{
+  "type": "book-planning",
+  "title": "One Night in Reykjavík",
+  "description": "Project Type: Dual-POV Contemporary Romance (Standalone, Contained)\nTone: Tender, observational, gently humorous — Sally Rooney by way of Beth O'Leary\n\n\nStory Premise:\n\n\nLena Thorvald, a London-based architect three days out from an engagement she just called off, is on a Reykjavík layover when ash from a Hekla eruption grounds every flight in the North Atlantic. Theo Karras, a literary translator returning from his sister's funeral, is on the same flight. The airline reroutes them to a guesthouse on the harbour where the only remaining room has one bed. Over fourteen chapters they negotiate the room, the city, and the things neither of them came here to say.\n\n\nKey Characters:\n\n\n- Lena Thorvald (POV — alternating): 33, architect, half-Icelandic on her mother's side; speaks the language poorly but understands more than she lets on. Just left a fiancé who'd planned her into invisibility.\n- Theo Karras (POV — alternating): 36, translator (Greek <-> English), grieving an older sister he was estranged from at her death. Carries a manuscript in his bag he can't finish.\n- Halla, the guesthouse owner: late 60s, widowed, watches them with quiet professional amusement.\n- Embla, Lena's estranged cousin in Reykjavík: the reason Lena chose this layover deliberately.\n\n\nProject Goals:\n\n\n- Validate that emotional throughlines work without thriller plot mechanics\n- Stress-test the dual-POV voice profile system — two distinct first-person voices that must remain immediately distinguishable\n- Test the chapter-by-chapter outline at the low end (14 chapters)\n- Audit for romance-specific anti-patterns (instant-attraction cliché, miscommunication conflicts, third-act break)\n- Confirm the pipeline can handle a contained-scope premise without ballooning into series-worthy world building\n",
+  "context": {
+    "targetChapters": 14,
+    "targetWordsPerChapter": 1800,
+    "hasParent": false,
+    "includePrologue": false,
+    "includeEpilogue": true,
+    "isSeries": false,
+    "seriesTotalBooks": 1,
+    "seriesCurrentBook": 1,
+    "isInfiniteCalibration": false,
+    "penName": "R.J.Foster",
+    "penNameSlug": "r-j-foster",
+    "coverVariants": 1,
+    "coverFont": "Sans (Inter)",
+    "brandColor": "#e8b4a8"
+  },
+  "preferredProvider": "",
+  "domain": "books"
+}

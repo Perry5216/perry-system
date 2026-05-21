@@ -5,6 +5,7 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
+import { execSync, spawn } from 'child_process';
 import { AIRouter } from '@perry/ai';
 import { ProjectEngine, scanLeaks } from '@perry/projects';
 import { Logger, SecretsService } from '@perry/core';
@@ -30,6 +31,66 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
       res.json({ ok: true, summary });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // ── Backup workspace ──────────────────────────────────────────────────
+  // GET /backup — streams a tar.gz of /app/workspace (excluding the heavy
+  // bind-mounted dirs that are gitignored — comfyui-output, scout-findings,
+  // and the SQLite WAL). Useful before risky operations.
+  router.get('/backup', (_req, res) => {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      res.setHeader('Content-Type', 'application/gzip');
+      res.setHeader('Content-Disposition', `attachment; filename="perry-workspace-${stamp}.tar.gz"`);
+      // Use streaming tar so we don't materialise the archive in memory.
+      const tar = spawn('tar', [
+        '-czf', '-',
+        '--exclude=comfyui-output',
+        '--exclude=scout-findings',
+        '--exclude=*.db-wal',
+        '--exclude=*.db-shm',
+        '--exclude=trainer_cache',
+        '-C', '/app',
+        'workspace',
+      ]);
+      tar.stdout.pipe(res);
+      tar.stderr.on('data', (d: Buffer) => log.warn('backup tar stderr', { msg: d.toString().slice(0, 200) }));
+      tar.on('error', (err: Error) => { log.error('backup tar spawn error', { error: err.message }); if (!res.headersSent) res.status(500).json({ error: err.message }); });
+      tar.on('exit', (code: number) => { if (code !== 0) log.warn('backup tar exited non-zero', { code }); });
+    } catch (e: any) {
+      log.error('GET /system/backup failed', { error: e.message });
+      if (!res.headersSent) res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Activity heatmap — per-day event counts for the last 365 days ──────
+  // Counts step completions + agent invocations per UTC date. Drives a
+  // GitHub-style contribution heatmap so the operator can SEE Perry's
+  // activity over time.
+  router.get('/activity-heatmap', (req, res) => {
+    try {
+      const days = Math.min(730, Math.max(7, parseInt(String(req.query.days || '365'), 10) || 365));
+      const since = new Date(Date.now() - days * 86_400_000).toISOString();
+      const store: any = projectEngine.getStateStore();
+      const stepDaily = store.countStepsByDay?.({ since }) ?? {};
+      const agentDaily = store.countInvocationsByDay?.({ since }) ?? {};
+      const buckets: Record<string, { date: string; steps: number; invocations: number; total: number }> = {};
+      for (let i = 0; i < days; i++) {
+        const d = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+        buckets[d] = { date: d, steps: 0, invocations: 0, total: 0 };
+      }
+      for (const [d, n] of Object.entries(stepDaily)) {
+        if (buckets[d]) { buckets[d].steps = Number(n); buckets[d].total += Number(n); }
+      }
+      for (const [d, n] of Object.entries(agentDaily)) {
+        if (buckets[d]) { buckets[d].invocations = Number(n); buckets[d].total += Number(n); }
+      }
+      const series = Object.values(buckets).sort((a, b) => a.date.localeCompare(b.date));
+      res.json({ days, series, max: Math.max(0, ...series.map(s => s.total)) });
+    } catch (e: any) {
+      log.error('GET /system/activity-heatmap failed', { error: e.message });
+      res.status(500).json({ error: e.message });
     }
   });
 

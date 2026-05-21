@@ -9,6 +9,12 @@ import { ModelsPanel } from './components/ModelsPanel';
 import { SystemPanel } from './components/SystemPanel';
 import { SelfLearningPanel } from './components/SelfLearningPanel';
 import { AnalyticsPanel } from './components/AnalyticsPanel';
+import { DomainsPanel } from './components/DomainsPanel';
+import { OperatorPanel } from './components/OperatorPanel';
+import { CronPanel } from './components/CronPanel';
+import { IntegrationsPanel } from './components/IntegrationsPanel';
+import { FleetHeader } from './components/FleetHeader';
+import { SuggestedAction } from './components/SuggestedAction';
 import { LeftNav, type NavTab } from './components/LeftNav';
 import { TopStatusBar } from './components/TopStatusBar';
 import { LandingChat } from './components/LandingChat';
@@ -202,7 +208,7 @@ export function App() {
   }, []);
 
   // UI State
-  type TabId = 'pipeline' | 'bible' | 'chapters' | 'revision' | 'stats' | 'gpu' | 'workers' | 'fleet' | 'director' | 'pens' | 'secrets' | 'trajectories' | 'analytics' | 'models' | 'projects' | 'system' | 'self-learning';
+  type TabId = 'pipeline' | 'bible' | 'chapters' | 'revision' | 'stats' | 'gpu' | 'workers' | 'fleet' | 'director' | 'pens' | 'secrets' | 'trajectories' | 'analytics' | 'models' | 'projects' | 'system' | 'self-learning' | 'domains' | 'operator' | 'cron' | 'integrations';
   // Fleet is the landing tab — the system's "home view" showing the
   // entire agent constellation. Projects, secrets, models, etc. are
   // all navigated to from Fleet rather than around it.
@@ -706,7 +712,7 @@ export function App() {
    *  These appear in the LeftNav. Other tabs (GPU, Workers,
    *  Pens, Pipeline, etc.) require a selected project — they only surface
    *  once the user opens a project from the sidebar. */
-  const GLOBAL_TAB_IDS: Set<TabId> = useMemo(() => new Set<TabId>(['fleet', 'projects', 'trajectories', 'analytics', 'secrets', 'models', 'self-learning', 'system']), []);
+  const GLOBAL_TAB_IDS: Set<TabId> = useMemo(() => new Set<TabId>(['fleet', 'projects', 'trajectories', 'analytics', 'secrets', 'models', 'self-learning', 'system', 'domains', 'operator', 'cron', 'integrations']), []);
 
   // If we land on a project-scoped tab without a project selected (e.g. user
   // bookmarked /workers, or activeTab is set by some other path), redirect
@@ -1466,7 +1472,7 @@ export function App() {
           edge. Replaces the BridgePlanet metaphor with a conventional rail
           that's familiar to any user. */}
       <LeftNav
-        activeTab={(['fleet', 'projects', 'workers', 'trajectories', 'analytics', 'models', 'self-learning', 'secrets', 'system'].includes(activeTab) ? activeTab : 'fleet') as NavTab}
+        activeTab={(['fleet', 'projects', 'workers', 'trajectories', 'analytics', 'models', 'self-learning', 'secrets', 'system', 'domains', 'operator', 'cron', 'integrations'].includes(activeTab) ? activeTab : 'fleet') as NavTab}
         onSelectTab={(t) => setActiveTab(t as TabId)}
         chatOpen={chatOpen}
         onToggleChat={() => setChatOpen(o => !o)}
@@ -1854,8 +1860,11 @@ export function App() {
         {GLOBAL_TAB_IDS.has(activeTab) && (
           <div className="animate-fade-in" style={{ height: 'calc(100vh - 36px)', width: '100%' }}>
             {activeTab === 'fleet' && (
-              <div style={{ position: 'relative', height: '100%', width: '100%', overflow: 'hidden' }}>
-                <FleetCanvas />
+              <div style={{ position: 'relative', height: '100%', width: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                <FleetHeader />
+                <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+                  <FleetCanvas />
+                </div>
               </div>
             )}
             {activeTab === 'secrets' && <SecretsPanel />}
@@ -1864,8 +1873,25 @@ export function App() {
             {activeTab === 'self-learning' && <SelfLearningPanel />}
             {activeTab === 'analytics' && <AnalyticsPanel />}
             {activeTab === 'system' && <SystemPanel />}
+            {activeTab === 'domains' && <DomainsPanel />}
+            {activeTab === 'operator' && <OperatorPanel />}
+            {activeTab === 'cron' && <CronPanel />}
+            {activeTab === 'integrations' && <IntegrationsPanel />}
           </div>
         )}
+        <SuggestedAction />
+        {(() => {
+          // Wire the SuggestedAction's nav-tab event into the existing setActiveTab.
+          // Mount-once listener; React's reconciliation keeps it stable.
+          if (!(globalThis as any).__perryNavListenerMounted) {
+            (globalThis as any).__perryNavListenerMounted = true;
+            window.addEventListener('perry:nav-tab', (e: any) => {
+              const tab = e?.detail?.tab;
+              if (typeof tab === 'string') setActiveTab(tab as TabId);
+            });
+          }
+          return null;
+        })()}
 
         {(selectedProject || activeTab === 'workers') && !GLOBAL_TAB_IDS.has(activeTab) && (
           <div className="animate-fade-in">

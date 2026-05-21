@@ -20,6 +20,7 @@ import type { EventBus, Logger, McpClientService, SecretsService } from '@perry/
 import type { Gateway, GatewayContext, GatewayStatus } from './gateways/types.js';
 import { TelegramGateway } from './gateways/telegram-gateway.js';
 import { DiscordGateway } from './gateways/discord-gateway.js';
+import { WhatsAppGateway } from './gateways/whatsapp-gateway.js';
 
 export class GatewayManager {
   private gateways: Gateway[] = [];
@@ -55,6 +56,7 @@ export class GatewayManager {
     this.gateways = [
       new TelegramGateway({ ...this.context, log: this.context.log.child('telegram') }),
       new DiscordGateway({ ...this.context, log: this.context.log.child('discord') }),
+      new WhatsAppGateway({ ...this.context, log: this.context.log.child('whatsapp') }),
     ];
     for (const g of this.gateways) {
       try {
@@ -74,6 +76,13 @@ export class GatewayManager {
 
   statuses(): GatewayStatus[] {
     return this.gateways.map(g => g.status());
+  }
+
+  /** Public accessor for the routes layer — returns the WhatsApp gateway
+   *  if it's instantiated (regardless of connection state). Used by the
+   *  /api/gateways/whatsapp/qr endpoint to surface the pairing QR. */
+  getWhatsAppGateway(): WhatsAppGateway | undefined {
+    return this.gateways.find(g => g.platform === 'whatsapp') as WhatsAppGateway | undefined;
   }
 
   /**

@@ -18,7 +18,7 @@ COPY packages/mcp-server/package.json ./packages/mcp-server/
 
 # Install native build tools required for better-sqlite3 and canvas (node-canvas)
 # canvas needs cairo, pango, libjpeg, libpng, giflib, pixman for 2D compositing
-RUN apk add --no-cache python3 make g++ cairo-dev pango-dev libjpeg-turbo-dev giflib-dev docker-cli
+RUN apk add --no-cache python3 make g++ cairo-dev pango-dev libjpeg-turbo-dev giflib-dev docker-cli git
 
 # Install dependencies (allowing scripts to run so better-sqlite3 compiles)
 RUN npm install

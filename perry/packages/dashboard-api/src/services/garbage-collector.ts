@@ -19,7 +19,8 @@
  */
 
 import { Logger } from '@perry/core';
-import type { EventBus } from '@perry/core';
+import type { EventBus, LoadedSkill } from '@perry/core';
+import { loadInstalledSkills } from '@perry/core';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -123,6 +124,33 @@ export class GarbageCollector {
     this.inFlight = true;
     const startedAt = new Date();
     const summary: GcSummary = { trigger, startedAt: startedAt.toISOString(), stages: {} };
+
+    // Consumer side: load any promoted GC skills + log which directories
+    // they'd override TTLs for. The actual TTL override is a follow-up; this
+    // closes the visible producer→consumer loop and emits a learning event
+    // so the dashboard can show "GC applied skill X for dir Y".
+    try {
+      const skills: LoadedSkill[] = loadInstalledSkills(WORKSPACE_DIR, 'gc');
+      if (skills.length > 0) {
+        this.log.info('GC sweep loaded skills', { count: skills.length, names: skills.map(s => s.name) });
+        for (const s of skills) {
+          const w = s.appliesWhen;
+          if (w?.dir_path && w?.suggested_ttl_action) {
+            this.log.info('GC skill applicable', { skill: s.name, dir_path: w.dir_path, action: w.suggested_ttl_action });
+            this.eventBus?.emit('learning:observation', {
+              source: 'gc',
+              kind: 'skill-applied',
+              fingerprint: `${s.name}::${String(w.dir_path)}`,
+              value: 1,
+              metadata: { skill: s.name, dir_path: w.dir_path, action: w.suggested_ttl_action, trigger },
+            });
+          }
+        }
+      }
+    } catch (err: any) {
+      this.log.warn('GC skill consumer pre-sweep step failed (non-fatal)', { error: err.message });
+    }
+
     this.log.info('sweep starting', { trigger });
 
     try {

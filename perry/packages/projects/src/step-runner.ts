@@ -12,6 +12,7 @@ import type {
   Project, ProjectStep, CompletionRequest, CompletionResponse,
   EventBus, Logger, McpClientService
 } from '@perry/core';
+import { loadInstalledSkills } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
 import { ComfyUIService, QwenTextRenderService } from '@perry/ai';
 import * as fs from 'fs';
@@ -936,6 +937,15 @@ export class StepRunner {
 
   private mcpClient: McpClientService;
 
+  // Consumer side of producer→curator→consumer for director skills.
+  // Skills landed at `workspace/skills-installed/director/` describe
+  // remedies for recurring `(task_type, error_fingerprint)` failure
+  // patterns. Loaded on a TTL so newly-promoted skills come into effect
+  // without restart.
+  private directorSkills: import('@perry/core').LoadedSkill[] = [];
+  private directorSkillsLoadedAt = 0;
+  private readonly DIRECTOR_SKILLS_TTL_MS = 60_000;
+
   // Extracted services
   private povGate: PovQualityGate;
   private continuityGate: ContinuityGate;
@@ -984,6 +994,51 @@ export class StepRunner {
     // framework-wide LearningCore to aggregate + propose against. No
     // per-service SkillProposer wiring lives here anymore — pure event emit.
     this.attachDirectorLearningEmitter();
+
+    // Consumer side — initial load of any promoted director skills.
+    this.refreshDirectorSkills();
+  }
+
+  private refreshDirectorSkills(): void {
+    try {
+      this.directorSkills = loadInstalledSkills(this.config.workspaceDir, 'director');
+      this.directorSkillsLoadedAt = Date.now();
+      if (this.directorSkills.length > 0) {
+        this.log.info('StepRunner loaded director skills', { count: this.directorSkills.length });
+      }
+    } catch (err: any) {
+      this.log.warn('refreshDirectorSkills failed', { error: err.message });
+      this.directorSkills = [];
+    }
+  }
+
+  /**
+   * Look up any installed director skill that matches the current step's
+   * failure context. Returns the first matching skill, or null. Called from
+   * the step retry/failure paths so a promoted skill can override defaults.
+   */
+  private findDirectorSkillForFailure(taskType: string, errorFingerprint: string): import('@perry/core').LoadedSkill | null {
+    if (Date.now() - this.directorSkillsLoadedAt > this.DIRECTOR_SKILLS_TTL_MS) {
+      this.refreshDirectorSkills();
+    }
+    for (const s of this.directorSkills) {
+      const w = s.appliesWhen;
+      if (!w) continue;
+      const taskMatch = !w.task_type || w.task_type === '*' || w.task_type === taskType;
+      const errMatch = !w.error_fingerprint || w.error_fingerprint === '*' || w.error_fingerprint === errorFingerprint;
+      if (taskMatch && errMatch) {
+        this.log.info('Director skill applied', { skill: s.name, task_type: taskType, error_fingerprint: errorFingerprint });
+        this.eventBus.emit('learning:observation', {
+          source: 'director',
+          kind: 'skill-applied',
+          fingerprint: `${s.name}::${taskType}::${errorFingerprint}`,
+          value: 1,
+          metadata: { skill: s.name, task_type: taskType, error_fingerprint: errorFingerprint },
+        });
+        return s;
+      }
+    }
+    return null;
   }
 
   /**

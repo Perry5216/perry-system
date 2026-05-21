@@ -1,3 +1,4 @@
+import { ActivityHeatmap } from './ActivityHeatmap';
 /**
  * AnalyticsPanel — Perry-flavoured analytics view.
  *
@@ -145,6 +146,12 @@ export function AnalyticsPanel() {
       />
 
       <div style={{ flex: 1, overflowY: 'auto', marginTop: 12, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {/* Activity heatmap — 365-day calendar of step completions + agent
+            invocations. Visible evolution at a glance. */}
+        <div style={{ padding: 14, background: 'rgba(7,9,15,0.6)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6 }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem', color: 'var(--secondary)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Activity heatmap</div>
+          <ActivityHeatmap days={365} />
+        </div>
         {err && <div style={errBox}>{err}</div>}
         {loading && <div style={{ color: 'var(--text-muted)', padding: 12 }}>Loading…</div>}
 

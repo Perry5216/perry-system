@@ -18,7 +18,8 @@
  * standalone module without coupling.
  */
 
-import type { Logger, EventBus } from '@perry/core';
+import type { Logger, EventBus, LoadedSkill } from '@perry/core';
+import { loadInstalledSkills } from '@perry/core';
 import { StateStore } from '../state-store.js';
 import { writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -90,6 +91,10 @@ export interface PenProfileWriter {
 }
 
 export class AuditService {
+  private auditSkills: LoadedSkill[] = [];
+  private auditSkillsLoadedAt = 0;
+  private readonly AUDIT_SKILLS_TTL_MS = 60_000;
+
   constructor(
     private stateStore: StateStore,
     private workspaceDir: string,
@@ -97,7 +102,37 @@ export class AuditService {
     private rag?: LearningIndexer,
     private penProfile?: PenProfileWriter,
     private eventBus?: EventBus,
-  ) {}
+  ) {
+    this.refreshAuditSkills();
+  }
+
+  /**
+   * Reload installed audit skills from `workspace/skills-installed/audit/`.
+   * Mirrors the prompt-builder consumer pattern: cache for AUDIT_SKILLS_TTL_MS
+   * so a long audit run picks up newly-promoted skills without restart.
+   */
+  private refreshAuditSkills(): void {
+    try {
+      this.auditSkills = loadInstalledSkills(this.workspaceDir, 'audit');
+      this.auditSkillsLoadedAt = Date.now();
+      if (this.auditSkills.length > 0) {
+        this.log.info('AuditService loaded skills', { count: this.auditSkills.length });
+      }
+    } catch (err: any) {
+      this.log.warn('refreshAuditSkills failed', { error: err.message });
+      this.auditSkills = [];
+    }
+  }
+
+  private getAuditSkillsForPen(slug: string): LoadedSkill[] {
+    if (Date.now() - this.auditSkillsLoadedAt > this.AUDIT_SKILLS_TTL_MS) {
+      this.refreshAuditSkills();
+    }
+    return this.auditSkills.filter(s => {
+      const w = s.appliesWhen;
+      return w && (w.pen_slug === slug || w.pen_slug === '*');
+    });
+  }
 
   /**
    * Run the audit for a specific LoRA version. Returns the report and
@@ -118,7 +153,7 @@ export class AuditService {
     for (const p of prompts) {
       try {
         const response = await this.generate(ollamaTag, p.prompt);
-        const failures = this.scoreResponse(response);
+        const failures = this.scoreResponse(response, slug);
         results.push({
           id: p.id, sceneType: p.sceneType, statBand: p.statBand, pov: p.pov,
           prompt: p.prompt, response,
@@ -267,8 +302,33 @@ export class AuditService {
     return (json.response || '').trim();
   }
 
-  private scoreResponse(text: string): AuditFailure[] {
-    return scanLeaks(text);
+  private scoreResponse(text: string, penSlug?: string): AuditFailure[] {
+    const failures = scanLeaks(text);
+    // Consumer side of the producer→curator→consumer loop: check whether any
+    // promoted audit skills for this pen called out a leak_tag that scanLeaks
+    // also caught. Log the match so we can see skills being learned from in
+    // dashboards / logs. Doesn't change scoring — same failures, more signal.
+    if (penSlug && failures.length > 0) {
+      const matchedSkills = this.getAuditSkillsForPen(penSlug);
+      for (const skill of matchedSkills) {
+        const skillTag = String(skill.appliesWhen?.leak_tag ?? '');
+        if (skillTag && failures.some(f => f.tag === skillTag)) {
+          this.log.info('AuditService skill applied', {
+            skill: skill.name,
+            pen_slug: penSlug,
+            leak_tag: skillTag,
+          });
+          this.eventBus?.emit('learning:observation', {
+            source: 'audit',
+            kind: 'skill-applied',
+            fingerprint: `${skill.name}::${penSlug}`,
+            value: 1,
+            metadata: { skill: skill.name, pen_slug: penSlug, leak_tag: skillTag },
+          });
+        }
+      }
+    }
+    return failures;
   }
 
   private aggregateTopTags(results: AuditPromptResult[]): Array<{ tag: string; count: number; affectedPrompts: number }> {

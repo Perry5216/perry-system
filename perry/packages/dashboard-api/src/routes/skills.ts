@@ -223,6 +223,88 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string) {
     }
   });
 
+  // Create a new skill directly (bypasses propose → curate flow). Lands the
+  // skill straight into the installed dir for its service. Used by the
+  // dashboard's "Add custom skill" form so operators can hand-author skills
+  // without going through the worker propose_skill MCP tool.
+  //
+  // Body: { name, description, service, body, appliesWhen? }
+  router.post('/', async (req, res) => {
+    try {
+      const { name, description, service, body, appliesWhen } = req.body || {};
+      if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{2,39}$/.test(name)) {
+        return res.status(400).json({ error: 'name must be kebab-case, 3-40 chars' });
+      }
+      if (typeof description !== 'string' || description.length < 10 || description.length > 200) {
+        return res.status(400).json({ error: 'description must be 10-200 chars' });
+      }
+      if (typeof service !== 'string' || !/^[a-z][a-z0-9-]{1,20}$/.test(service)) {
+        return res.status(400).json({ error: 'service must be kebab-case, 2-20 chars (e.g. worker, audit, director, scout, gc, prompt-builder, or a custom domain name)' });
+      }
+      if (typeof body !== 'string' || body.length < 50) {
+        return res.status(400).json({ error: 'body must be at least 50 chars' });
+      }
+
+      const dstDir = service === 'worker'
+        ? '/app/.claude/commands'
+        : join(workspaceDir, 'skills-installed', service);
+      if (!existsSync(dstDir)) await mkdir(dstDir, { recursive: true });
+      const dst = join(dstDir, `${name}.md`);
+      if (existsSync(dst)) {
+        return res.status(409).json({ error: `skill "${name}" already exists for service "${service}"` });
+      }
+
+      let appliesBlock = '';
+      if (appliesWhen && typeof appliesWhen === 'object' && Object.keys(appliesWhen).length > 0) {
+        const lines = ['applies_when:'];
+        for (const [k, v] of Object.entries(appliesWhen)) {
+          lines.push(`  ${k}: ${JSON.stringify(v)}`);
+        }
+        appliesBlock = lines.join('\n') + '\n';
+      }
+      const now = new Date().toISOString();
+      const content =
+        `---\nname: ${name}\nservice: ${service}\ndescription: ${description}\ncreated_at: ${now}\npromoted_at: ${now}\nproposed_by: operator\nstatus: installed\n${appliesBlock}---\n\n` +
+        body.trim() + '\n';
+
+      await writeFile(dst, content, 'utf-8');
+      log.info('skill created by operator', { name, service, path: dst });
+      res.status(201).json({ created: true, name, service, path: dst });
+    } catch (err) {
+      log.error('POST /skills failed', { error: (err as Error).message });
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Delete an installed skill. Service is required so we can resolve the
+  // right subdir. Worker skills live in /app/.claude/commands.
+  router.delete('/installed/:service/:name', async (req, res) => {
+    try {
+      const { service, name } = req.params;
+      if (!/^[a-z][a-z0-9-]{1,20}$/.test(service) || !/^[a-z][a-z0-9-]{2,39}$/.test(name)) {
+        return res.status(400).json({ error: 'invalid service or name' });
+      }
+      const candidates = service === 'worker'
+        ? ['/app/.claude/commands']
+        : [join(workspaceDir, 'skills-installed', service)];
+      let deleted = false;
+      for (const dir of candidates) {
+        const path = join(dir, `${name}.md`);
+        if (existsSync(path)) {
+          await unlink(path);
+          deleted = true;
+          log.info('installed skill deleted', { name, service, path });
+          break;
+        }
+      }
+      if (!deleted) return res.status(404).json({ error: `skill ${service}/${name} not found` });
+      res.json({ deleted: true, name, service });
+    } catch (err) {
+      log.error('DELETE /skills/installed failed', { error: (err as Error).message });
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   router.delete('/pending/:filename', async (req, res) => {
     try {
       const filename = req.params.filename;

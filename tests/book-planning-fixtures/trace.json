@@ -1,0 +1,23 @@
+{
+  "type": "book-planning",
+  "title": "Trace",
+  "description": "Project Type: Single-POV Procedural Mystery (Standalone)\nTone: Restrained, observational, forensic — closer to Tana French than Agatha Christie\n\n\nStory Premise:\n\n\nDetective Inspector Esra Doyle is the only woman on the Major Investigations team in Cromer, a fading English port town. When a fisherman finds a severed thumb in a lobster pot, Esra discovers it belongs to a missing teenage girl who was last seen leaving an end-of-pier funfair three weeks earlier. As Esra follows the trail, she uncovers a network of disappearances tracing back to an unlicensed forensics lab operating out of a decommissioned coastguard station — a lab whose existence implicates the same Senior Investigating Officer who passed her over for promotion last spring.\n\n\nKey Characters:\n\n\n- Esra Doyle (POV): late 30s, divorced, recovering alcoholic, two years out of frontline work after a sectioning incident. Sees patterns where others see chaos; struggles to articulate hunches in formal reports.\n- DCI Mark Penhaligon: her superior. Bluff, fatherly, dangerous.\n- Dr Iolanthe \"Iola\" Pryce: a forensic pathologist with a private practice on the side. Esra's only ally inside the system.\n- The girls: Five missing teenagers, four unsolved, one returned mute.\n\n\nProject Goals:\n\n\n- Test restraint: the pipeline should produce a procedural without cliché thriller pyrotechnics\n- Stress-test foreshadowing and payoff mapping with a layered clue structure\n- Validate that single-POV deep interiority works at chapter scale\n- Audit the voice profile for first-person procedural register (clipped sentences, sensory undertow, dry humour)\n",
+  "context": {
+    "targetChapters": 18,
+    "targetWordsPerChapter": 2200,
+    "hasParent": false,
+    "includePrologue": false,
+    "includeEpilogue": true,
+    "isSeries": false,
+    "seriesTotalBooks": 1,
+    "seriesCurrentBook": 1,
+    "isInfiniteCalibration": false,
+    "penName": "E.M.Quinn",
+    "penNameSlug": "e-m-quinn",
+    "coverVariants": 1,
+    "coverFont": "Serif (Georgia)",
+    "brandColor": "#2c3e50"
+  },
+  "preferredProvider": "",
+  "domain": "books"
+}

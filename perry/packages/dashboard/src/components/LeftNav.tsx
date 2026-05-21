@@ -18,12 +18,17 @@
  */
 
 import type { ReactNode } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  Cpu, MessageSquare, FolderOpen, BarChart3, LineChart, ArrowDownToLine, Settings, Users, GitBranch, Sparkles,
+  Cpu, MessageSquare, FolderOpen, BarChart3, LineChart, ArrowDownToLine, Settings, Users, GitBranch, Sparkles, Layers, UserCircle2, Clock, Plug, ChevronsLeft, ChevronsRight,
 } from 'lucide-react';
 import { playHoverSound, playSelectSound } from '../utils/audio';
 
-export type NavTab = 'fleet' | 'projects' | 'workers' | 'trajectories' | 'analytics' | 'models' | 'self-learning' | 'secrets' | 'system';
+const NAV_COLLAPSED_PX = 56;
+const NAV_EXPANDED_PX = 200;
+const NAV_STATE_KEY = 'perry-leftnav-collapsed';
+
+export type NavTab = 'fleet' | 'projects' | 'workers' | 'trajectories' | 'analytics' | 'models' | 'self-learning' | 'secrets' | 'system' | 'domains' | 'operator' | 'cron' | 'integrations';
 
 interface NavItem {
   key: string;
@@ -32,6 +37,12 @@ interface NavItem {
   active: boolean;
   onClick: () => void;
   accent?: boolean; // highlight (used for the chat toggle when chat is open)
+}
+
+interface NavSection {
+  /** Short label shown above the group (uppercase tracking-wide). Omitted for the leading section. */
+  label?: string;
+  items: NavItem[];
 }
 
 export function LeftNav({
@@ -45,77 +56,54 @@ export function LeftNav({
   chatOpen: boolean;
   onToggleChat: () => void;
 }) {
-  const items: NavItem[] = [
+  // Collapse / expand state — persists across reloads.
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem(NAV_STATE_KEY) === 'true'; } catch { return false; }
+  });
+  // Sync CSS variable so positioned elements elsewhere in the app adjust.
+  useEffect(() => {
+    const w = collapsed ? NAV_COLLAPSED_PX : NAV_EXPANDED_PX;
+    document.documentElement.style.setProperty('--left-nav-w', `${w}px`);
+    try { localStorage.setItem(NAV_STATE_KEY, String(collapsed)); } catch {}
+  }, [collapsed]);
+
+  // Grouped sections — Operate (live work) / Configure (set things up) /
+  // Observe (look at what's happening). Each renders with a small uppercase
+  // label above and a divider below.
+  const sections: NavSection[] = [
     {
-      key: 'fleet',
-      label: 'Fleet',
-      icon: <Cpu size={22} />,
-      active: activeTab === 'fleet',
-      onClick: () => onSelectTab('fleet'),
+      // Leading section (no header) — primary entry points.
+      items: [
+        { key: 'fleet',  label: 'Fleet', icon: <Cpu size={22} />,           active: activeTab === 'fleet',   onClick: () => onSelectTab('fleet') },
+        { key: 'chat',   label: 'Chat',  icon: <MessageSquare size={22} />, active: chatOpen,                onClick: onToggleChat, accent: true },
+      ],
     },
     {
-      key: 'chat',
-      label: 'Chat',
-      icon: <MessageSquare size={22} />,
-      active: chatOpen,
-      onClick: onToggleChat,
-      accent: true,
+      label: 'Operate',
+      items: [
+        { key: 'projects',     label: 'Projects',     icon: <FolderOpen size={22} />,  active: activeTab === 'projects',     onClick: () => onSelectTab('projects') },
+        { key: 'workers',      label: 'Workers',      icon: <Users size={22} />,       active: activeTab === 'workers',      onClick: () => onSelectTab('workers') },
+        { key: 'trajectories', label: 'Trajectories', icon: <BarChart3 size={22} />,   active: activeTab === 'trajectories', onClick: () => onSelectTab('trajectories') },
+      ],
     },
     {
-      key: 'projects',
-      label: 'Projects',
-      icon: <FolderOpen size={22} />,
-      active: activeTab === 'projects',
-      onClick: () => onSelectTab('projects'),
+      label: 'Configure',
+      items: [
+        { key: 'domains',      label: 'Domains',      icon: <Layers size={22} />,        active: activeTab === 'domains',      onClick: () => onSelectTab('domains') },
+        { key: 'integrations', label: 'Integrate',    icon: <Plug size={22} />,          active: activeTab === 'integrations', onClick: () => onSelectTab('integrations') },
+        { key: 'operator',     label: 'You',          icon: <UserCircle2 size={22} />,   active: activeTab === 'operator',     onClick: () => onSelectTab('operator') },
+        { key: 'models',       label: 'Models',       icon: <ArrowDownToLine size={22} />, active: activeTab === 'models',     onClick: () => onSelectTab('models') },
+        { key: 'cron',         label: 'Cron',         icon: <Clock size={22} />,         active: activeTab === 'cron',         onClick: () => onSelectTab('cron') },
+        { key: 'secrets',      label: 'Secrets',      icon: <Settings size={22} />,      active: activeTab === 'secrets',      onClick: () => onSelectTab('secrets') },
+      ],
     },
     {
-      key: 'workers',
-      label: 'Workers',
-      icon: <Users size={22} />,
-      active: activeTab === 'workers',
-      onClick: () => onSelectTab('workers'),
-    },
-    {
-      key: 'trajectories',
-      label: 'Trajectories',
-      icon: <BarChart3 size={22} />,
-      active: activeTab === 'trajectories',
-      onClick: () => onSelectTab('trajectories'),
-    },
-    {
-      key: 'analytics',
-      label: 'Analytics',
-      icon: <LineChart size={22} />,
-      active: activeTab === 'analytics',
-      onClick: () => onSelectTab('analytics'),
-    },
-    {
-      key: 'models',
-      label: 'Models',
-      icon: <ArrowDownToLine size={22} />,
-      active: activeTab === 'models',
-      onClick: () => onSelectTab('models'),
-    },
-    {
-      key: 'self-learning',
-      label: 'Self-Learn',
-      icon: <Sparkles size={22} />,
-      active: activeTab === 'self-learning',
-      onClick: () => onSelectTab('self-learning'),
-    },
-    {
-      key: 'secrets',
-      label: 'Secrets',
-      icon: <Settings size={22} />,
-      active: activeTab === 'secrets',
-      onClick: () => onSelectTab('secrets'),
-    },
-    {
-      key: 'system',
-      label: 'System',
-      icon: <GitBranch size={22} />,
-      active: activeTab === 'system',
-      onClick: () => onSelectTab('system'),
+      label: 'Observe',
+      items: [
+        { key: 'self-learning', label: 'Self-Learn', icon: <Sparkles size={22} />,  active: activeTab === 'self-learning', onClick: () => onSelectTab('self-learning') },
+        { key: 'analytics',     label: 'Analytics',  icon: <LineChart size={22} />, active: activeTab === 'analytics',     onClick: () => onSelectTab('analytics') },
+        { key: 'system',        label: 'System',     icon: <GitBranch size={22} />, active: activeTab === 'system',        onClick: () => onSelectTab('system') },
+      ],
     },
   ];
 
@@ -134,14 +122,57 @@ export function LeftNav({
       zIndex: 80,
       fontFamily: 'var(--font-mono)',
     }}>
-      {items.map((item, idx) => (
-        <NavButton key={item.key} item={item} divider={idx === 1} />
+      {sections.map((section, sIdx) => (
+        <div key={sIdx} style={{ display: 'flex', flexDirection: 'column' }}>
+          {section.label && !collapsed && (
+            <div style={{
+              padding: '12px 14px 4px',
+              fontSize: '0.55rem',
+              fontWeight: 700,
+              letterSpacing: '0.18em',
+              textTransform: 'uppercase',
+              color: 'rgba(34, 211, 238, 0.5)',
+              textAlign: 'center',
+            }}>
+              {section.label}
+            </div>
+          )}
+          {section.items.map(item => <NavButton key={item.key} item={item} collapsed={collapsed} />)}
+          {sIdx < sections.length - 1 && (
+            <div style={{ margin: '6px 18px', height: 1, background: 'rgba(34, 211, 238, 0.1)' }} />
+          )}
+        </div>
       ))}
+      <div style={{ flex: 1 }} />
+      <button
+        onClick={() => setCollapsed(c => !c)}
+        title={collapsed ? 'Expand nav' : 'Collapse nav'}
+        style={{
+          margin: '8px 10px 4px',
+          padding: '8px',
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.06)',
+          borderRadius: 6,
+          color: 'var(--text-muted)',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          fontFamily: 'inherit',
+          fontSize: '0.7rem',
+          letterSpacing: '0.05em',
+        }}
+        onMouseEnter={(e: any) => { e.currentTarget.style.background = 'rgba(34,211,238,0.06)'; e.currentTarget.style.color = 'var(--secondary)'; }}
+        onMouseLeave={(e: any) => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
+      >
+        {collapsed ? <ChevronsRight size={16} /> : <><ChevronsLeft size={16} /> COLLAPSE</>}
+      </button>
     </nav>
   );
 }
 
-function NavButton({ item, divider }: { item: NavItem; divider?: boolean }) {
+function NavButton({ item, divider, collapsed }: { item: NavItem; divider?: boolean; collapsed?: boolean }) {
   const activeColor = item.accent ? 'var(--accent)' : 'var(--secondary)';
   const activeBg = item.accent ? 'rgba(168, 85, 247, 0.08)' : 'rgba(34, 211, 238, 0.06)';
   const activeBorder = item.accent ? 'rgba(168, 85, 247, 0.3)' : 'rgba(34, 211, 238, 0.3)';
@@ -161,14 +192,16 @@ function NavButton({ item, divider }: { item: NavItem; divider?: boolean }) {
           background: item.active ? activeBg : 'transparent',
           border: '1px solid',
           borderColor: item.active ? activeBorder : 'transparent',
-          padding: '12px 4px',
-          margin: '0 10px',
+          padding: collapsed ? '10px 4px' : '10px 12px',
+          margin: '0 8px',
           borderRadius: 8,
           cursor: 'pointer',
           color: item.active ? activeColor : 'var(--text-muted)',
-          display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center',
-          gap: 6,
+          display: 'flex',
+          flexDirection: collapsed ? 'column' : 'row',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          gap: collapsed ? 6 : 12,
           boxShadow: item.active ? `inset 0 0 10px ${activeBg}, 0 0 12px ${item.accent ? 'rgba(168,85,247,0.1)' : 'rgba(34,211,238,0.1)'}` : 'none',
           transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
@@ -210,13 +243,17 @@ function NavButton({ item, divider }: { item: NavItem; divider?: boolean }) {
           {item.icon}
         </div>
         <span style={{
-          fontSize: '0.65rem',
+          fontSize: collapsed ? '0.65rem' : '0.78rem',
           fontWeight: 600,
-          letterSpacing: '0.08em',
+          letterSpacing: collapsed ? '0.08em' : '0.05em',
           textTransform: 'uppercase',
-          textAlign: 'center',
+          textAlign: collapsed ? 'center' : 'left',
           lineHeight: 1.1,
           opacity: item.active ? 1 : 0.8,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          maxWidth: collapsed ? 'none' : 130,
         }}>{item.label}</span>
       </button>
       {divider && (
