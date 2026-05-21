@@ -1,28 +1,51 @@
-# Perry — AI Novel Writing Engine
+# Perry — Self-Hosted Multi-Agent Platform
 
-> A self-hosted, multi-agent AI system for writing novels under multiple pen names —
-> with per-pen-name fine-tuned models, competitive title research, and a
-> self-learning feedback loop.
+> A self-hosted, event-driven multi-agent AI platform you can train on any
+> domain. Ships with a complete novel-writing pipeline as the flagship
+> showcase — bring your own domain to point the same worker pool, learning
+> loop, and fine-tuning stack at whatever you want.
 
-Perry (**P**rose, **E**valuation, **R**esearch, & **R**evision Engine) is a decoupled book-writing
-pipeline that runs entirely on your own hardware. Plug in your Claude / Gemini
-subscription, and Perry handles concept generation, market research, scene-by-scene
-drafting, audit gates, and revision — all coordinated by an event-driven multi-agent
-framework with its own learning loop.
+Perry (**P**rose, **E**valuation, **R**esearch, & **R**evision Engine) is a
+decoupled AI agent framework that runs entirely on your own hardware. Plug
+in your Claude / Gemini subscription, and Perry orchestrates a fleet of
+containerised workers, a self-learning skills loop, a local-LLM inference
+stack, and a LoRA fine-tuning pipeline. The novel-writing pipeline is the
+first end-to-end domain shipped on top of the platform; the architecture
+itself is domain-agnostic.
 
-## What it does
+## What you get out of the box
 
-- **Multi-pen-name pipeline** — manage parallel book projects under different
-  voices, each with its own style profile, anti-pattern filters, and fine-tuned
-  LoRA on top of a local LLM
-- **Competitive scout** — Amazon / Goodreads / Bookbub / Reddit research via
-  VPN-routed proxy pool, indexed into a per-pen RAG corpus
-- **Self-learning loop** — every component (director, audit, scout, GC, prompt
-  builder) emits learning events; recurring patterns get auto-proposed as skills
-  that humans can promote or reject from the dashboard
-- **Subscription-only cost model** — Perry routes all heavy reasoning to your
-  Claude Pro/Max and Gemini Advanced subscriptions via the official CLIs. No
-  per-token API charges; metered API providers are blocked at the runtime level by design
+**The platform (domain-agnostic)**
+- **Multi-agent worker pool** — Claude Code + Gemini CLI workers running in containers, claiming tasks from a shared MCP-exposed queue
+- **Self-learning framework** — every component emits learning events; recurring patterns auto-propose skills that humans curate from the dashboard. Add a new domain and it gets the learning loop for free
+- **Local LLM inference** — Ollama + ComfyUI with GPU scheduling, embedding / librarian / inference model split
+- **LoRA fine-tuning pipeline** — train domain-specific adapters from your own curated data; auto-rebuild Modelfile and re-tag in Ollama
+- **RAG corpus** — SQLite FTS5 + vector embeddings; pluggable per domain
+- **VPN-routed scouting** — gluetun containers with NordVPN + TorGuard exits for any traffic that needs IP rotation or geographic diversity
+- **React + TypeScript dashboard** — fleet view, skill curation, analytics, secrets vault
+- **Subscription-only cost model** — Claude Pro/Max + Gemini Advanced via the official CLIs; metered API providers are blocked at the runtime level by design
+
+**The first domain — novel writing**
+- Multi-pen-name pipeline (parallel projects under different voices)
+- Per-pen-name fine-tuned LoRA on top of a local LLM
+- Concept → market research → bible → scene breakdown → chapter drafting → audit → revision
+- Anti-pattern lint, voice anchors, style DNA filters
+- Comp title scouting (Amazon / Goodreads / Bookbub / Reddit)
+- ComfyUI book cover generation
+
+## Bring your own domain
+
+The framework is intentionally domain-flexible. To point Perry at a new task
+type (code generation, security research, customer support automation,
+content moderation — anything you have training data for), you add:
+
+1. New step definitions in the pipeline engine
+2. Domain-specific MCP tools (the worker pool picks them up automatically)
+3. Optional: a domain-specific LoRA training corpus
+4. Optional: domain-specific audit gates / quality filters
+
+The self-learning loop, worker pool, RAG corpus, dashboard, and fine-tuning
+stack are reused as-is across domains.
 
 ## Architecture (one-paragraph version)
 
