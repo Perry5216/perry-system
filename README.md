@@ -162,4 +162,5 @@ contact **5216perry@gmail.com** to arrange a commercial license.
 
 Issues and pull requests welcome. By submitting a PR, you agree to license your
 contribution under the same terms (PolyForm Noncommercial 1.0.0) so the
-project's commercial-licensing path stays clean.
+project's commercial-licensing path stays clean. 
+
