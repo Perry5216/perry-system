@@ -11,7 +11,7 @@ in your Claude / Gemini subscription, and Perry orchestrates a fleet of
 containerised workers, a self-learning skills loop, a local-LLM inference
 stack, and a LoRA fine-tuning pipeline. The novel-writing pipeline is the
 first end-to-end domain shipped on top of the platform; the architecture
-itself is domain-agnostic.
+itself is completely domain-agnostic.
 
 ## What you get out of the box
 
