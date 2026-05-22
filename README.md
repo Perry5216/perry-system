@@ -158,6 +158,18 @@ and noncommercial purposes.**
 company, ghostwriting services, or any revenue-generating deployment — please
 contact **5216perry@gmail.com** to arrange a commercial license.
 
+## Telemetry
+
+P.E.R.R.Y. System collects completely anonymous telemetry data on startup. This is used solely to audit active installations and ensure compliance with our PolyForm Noncommercial license. 
+
+### What we collect
+- A one-way SHA-256 hash of your system hostname (to count unique installs)
+- Operating system platform, release version, and CPU architecture
+- Active Node.js and P.E.R.R.Y. version numbers
+- Allowed CORS origin domains (to verify deployment environments)
+
+We do not collect any personal data, project names, or creative outputs. You can opt out at any time by setting `PERRY_TELEMETRY_DISABLED=true` in your `.env` file.
+
 ## Contributing
 
 Issues and pull requests welcome. By submitting a PR, you agree to license your
