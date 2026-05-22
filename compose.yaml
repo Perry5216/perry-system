@@ -155,6 +155,8 @@ services:
       - PERRY_WORKER_URL=${PERRY_WORKER_URL:-http://perry-worker:4711}
       - PERRY_WORKER_SECRET=${PERRY_WORKER_SECRET:-}
       - PERRY_CORS_ORIGINS=${PERRY_CORS_ORIGINS:-}
+      - PERRY_TELEMETRY_DISABLED=${PERRY_TELEMETRY_DISABLED:-}
+      - PERRY_TELEMETRY_URL=${PERRY_TELEMETRY_URL:-}
       # PERRY_MCP_HTTP_PORT is set per-process in the Dockerfile CMD, NOT
       # container-wide — otherwise every child MCP process (e.g. the
       # dashboard-api's internal stdio MCP clients) tries to bind the
@@ -605,19 +607,5 @@ services:
       retries: 3
       start_period: 30s
 
-  telemetry-collector:
-    build:
-      context: ./telemetry-server
-      dockerfile: Dockerfile
-    container_name: telemetry-collector
-    mem_limit: 512m
-    pids_limit: 50
-    restart: unless-stopped
-    ports:
-      - "4444:4444"
-    volumes:
-      - ./data/telemetry:/app/data
-    environment:
-      - PORT=4444
-      - PERRY_TELEMETRY_LOG_PATH=/app/data/telemetry_logs.jsonl
+
 
