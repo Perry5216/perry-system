@@ -60,6 +60,8 @@ export const KNOWN_SECRETS = [
     purpose: 'Comma-separated Telegram user IDs allowed to message the bot.' },
   { name: 'discord_allowed_user_ids',  envFallback: 'DISCORD_ALLOWED_USER_IDS',  required: false,
     purpose: 'Comma-separated Discord user IDs allowed to message the bot.' },
+  { name: 'whatsapp_typing_mode', envFallback: 'WHATSAPP_TYPING_MODE', required: false,
+    purpose: 'Typing illusion behavior: "edit" (send space, then edit), "delete" (send space, then delete), or "typing_only" (keep typing status active and send normally).' },
 ] as const;
 
 export type KnownSecretName = (typeof KNOWN_SECRETS)[number]['name'];

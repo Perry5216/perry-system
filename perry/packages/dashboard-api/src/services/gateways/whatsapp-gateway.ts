@@ -217,22 +217,36 @@ export class WhatsAppGateway implements Gateway {
       const existing = this.ctx.stateStore.listAgentSessions({ domain: agent.domain }).find((s: any) => s.title === sessionTitle && !s.closed_at);
       const sessionId = existing?.id || this.ctx.stateStore.createAgentSession({ domain: agent.domain, title: sessionTitle });
 
+      const typingMode = (this.ctx.secrets.getSync('whatsapp_typing_mode') || 'typing_only').toLowerCase();
+      let sent: any;
+      let typingInterval: NodeJS.Timeout | undefined;
+
       try {
-        // Send space placeholder message first
-        let sent: any;
-        try {
-          sent = await this.sock.sendMessage(senderJid, { text: ' ' });
-        } catch (sendErr: any) {
-          this.ctx.log.error('whatsapp: failed to send space placeholder', { error: sendErr.message });
-          throw sendErr;
+        if (typingMode === 'delete' || typingMode === 'edit') {
+          // Send space placeholder message first
+          try {
+            sent = await this.sock.sendMessage(senderJid, { text: ' ' });
+          } catch (sendErr: any) {
+            this.ctx.log.error('whatsapp: failed to send space placeholder', { error: sendErr.message });
+            throw sendErr;
+          }
         }
 
-        // Trigger composing/typing presence AFTER sending the placeholder so it stays active
+        // Trigger composing/typing presence
         try {
           await this.sock.sendPresenceUpdate('composing', senderJid);
         } catch (presenceErr: any) {
           this.ctx.log.warn('whatsapp: failed to send composing presence', { error: presenceErr.message });
         }
+
+        // Keep sending composing presence updates periodically to avoid WhatsApp automatic idle timeouts (~15s)
+        typingInterval = setInterval(async () => {
+          try {
+            await this.sock.sendPresenceUpdate('composing', senderJid);
+          } catch (presenceErr: any) {
+            this.ctx.log.warn('whatsapp: failed to refresh composing presence', { error: presenceErr.message });
+          }
+        }, 10000); // refresh every 10s
 
         try {
           const inv = await this.ctx.agentRunner.invoke({ agent, sessionId, input: text });
@@ -240,25 +254,65 @@ export class WhatsAppGateway implements Gateway {
           const output = cleanOutputText(rawOutput);
           const chunks = chunkText(output, WHATSAPP_MAX_MESSAGE_LENGTH);
           
-          if (chunks.length > 0) {
-            // Edit the space placeholder with the first chunk
-            await this.sock.sendMessage(senderJid, { edit: sent.key, text: chunks[0] });
-            // Send remaining chunks normally
-            for (let i = 1; i < chunks.length; i++) {
-              await this.sendMessage(senderJid, chunks[i]);
+          if (typingMode === 'typing_only') {
+            for (const chunk of chunks) {
+              await this.sendMessage(senderJid, chunk);
+            }
+          } else if (typingMode === 'delete') {
+            if (sent) {
+              try {
+                await this.sock.sendMessage(senderJid, { delete: sent.key });
+              } catch (delErr: any) {
+                this.ctx.log.warn('whatsapp: failed to delete space placeholder', { error: delErr.message });
+              }
+            }
+            for (const chunk of chunks) {
+              await this.sendMessage(senderJid, chunk);
             }
           } else {
-            await this.sock.sendMessage(senderJid, { edit: sent.key, text: '(empty response)' });
+            // edit mode
+            if (sent) {
+              if (chunks.length > 0) {
+                await this.sock.sendMessage(senderJid, { edit: sent.key, text: chunks[0] });
+                for (let i = 1; i < chunks.length; i++) {
+                  await this.sendMessage(senderJid, chunks[i]);
+                }
+              } else {
+                await this.sock.sendMessage(senderJid, { edit: sent.key, text: '(empty response)' });
+              }
+            } else {
+              for (const chunk of chunks) {
+                await this.sendMessage(senderJid, chunk);
+              }
+            }
           }
         } catch (e: any) {
           this.ctx.log.error('whatsapp: invocation failed', { error: e.message });
-          try {
-            await this.sock.sendMessage(senderJid, { edit: sent.key, text: `⚠️ ${e.message}` });
-          } catch {
+          if (typingMode === 'typing_only') {
             await this.sendMessage(senderJid, `⚠️ ${e.message}`);
+          } else if (typingMode === 'delete') {
+            if (sent) {
+              try {
+                await this.sock.sendMessage(senderJid, { delete: sent.key });
+              } catch {}
+            }
+            await this.sendMessage(senderJid, `⚠️ ${e.message}`);
+          } else {
+            if (sent) {
+              try {
+                await this.sock.sendMessage(senderJid, { edit: sent.key, text: `⚠️ ${e.message}` });
+              } catch {
+                await this.sendMessage(senderJid, `⚠️ ${e.message}`);
+              }
+            } else {
+              await this.sendMessage(senderJid, `⚠️ ${e.message}`);
+            }
           }
         }
       } finally {
+        if (typingInterval) {
+          clearInterval(typingInterval);
+        }
         // Turn off composing presence
         try {
           await this.sock.sendPresenceUpdate('paused', senderJid);
