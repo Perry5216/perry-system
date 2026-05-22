@@ -7,23 +7,24 @@
 
 Perry (**P**rose, **E**valuation, **R**esearch, & **R**evision Engine) is a
 decoupled AI agent framework that runs entirely on your own hardware. Plug
-in your Claude / Gemini subscription, and Perry orchestrates a fleet of
-containerised workers, a self-learning skills loop, a local-LLM inference
-stack, and a LoRA fine-tuning pipeline. The novel-writing pipeline is the
-first end-to-end domain shipped on top of the platform; the architecture
-itself is completely domain-agnostic.
+in your existing subscription-CLI accounts (Anthropic, Google, OpenAI —
+any or all), and Perry orchestrates a fleet of containerised workers, a
+self-learning skills loop, a local-LLM inference stack, and a LoRA
+fine-tuning pipeline. The novel-writing pipeline is the first end-to-end
+domain shipped on top of the platform; the architecture itself is
+completely domain-agnostic.
 
 ## What you get out of the box
 
 **The platform (domain-agnostic)**
-- **Multi-agent worker pool** — Claude Code + Gemini CLI workers running in containers, claiming tasks from a shared MCP-exposed queue
+- **Multi-agent worker pool** — three subscription-CLI workers (Anthropic, Google, OpenAI) running in containers, claiming tasks from a shared MCP-exposed queue
 - **Self-learning framework** — every component emits learning events; recurring patterns auto-propose skills that humans curate from the dashboard. Add a new domain and it gets the learning loop for free
 - **Local LLM inference** — Ollama + ComfyUI with GPU scheduling, embedding / librarian / inference model split
 - **LoRA fine-tuning pipeline** — train domain-specific adapters from your own curated data; auto-rebuild Modelfile and re-tag in Ollama
 - **RAG corpus** — SQLite FTS5 + vector embeddings; pluggable per domain
 - **VPN-routed scouting** — gluetun containers with NordVPN + TorGuard exits for any traffic that needs IP rotation or geographic diversity
 - **React + TypeScript dashboard** — fleet view, project pipelines, Goals Board (Kanban visualizer), Skills Librarian (curation, telemetry, pin/unpin, merge, backup & rollback), analytics, secrets vault
-- **Subscription-only cost model** — Claude Pro/Max + Gemini Advanced via the official CLIs; metered API providers are blocked at the runtime level by design
+- **Subscription-only cost model** — workers authenticate against your existing CLI subscriptions (Anthropic Pro/Max, Google Advanced, ChatGPT Plus/Pro) via the official CLIs; metered API providers are blocked at the runtime level by design
 
 **The first domain — novel writing**
 - Multi-pen-name pipeline (parallel projects under different voices)
@@ -51,11 +52,12 @@ stack are reused as-is across domains.
 
 A React + TypeScript dashboard talks to an Express coordinator backend (Node).
 The coordinator enqueues complex steps as tasks in SQLite; an MCP server exposes
-those tasks to a fleet of headless workers running Claude Code / Gemini CLI in
-containers. Workers claim, complete, and report tasks back via MCP. Local Ollama
-serves embedding + librarian models on GPU. Scout traffic routes through gluetun
-containers holding WireGuard tunnels (NordVPN + TorGuard static IPs). Cloudflare
-Tunnel exposes the dashboard to your devices.
+those tasks to a fleet of headless workers running the three subscription CLIs
+(Anthropic, Google, OpenAI) in containers. Workers claim, complete, and report
+tasks back via MCP. Local Ollama serves embedding + librarian models on GPU.
+Scout traffic routes through gluetun containers holding WireGuard tunnels
+(NordVPN + TorGuard static IPs). Cloudflare Tunnel exposes the dashboard to
+your devices.
 
 Full diagrams and component breakdown in [`docs/perry_system_architecture.md`](docs/perry_system_architecture.md).
 
@@ -64,30 +66,58 @@ Full diagrams and component breakdown in [`docs/perry_system_architecture.md`](d
 - Docker Desktop with WSL2 (Windows) or Docker Engine (Linux)
 - NVIDIA GPU with CUDA support (Ollama containers expect `runtime: nvidia`)
 - 32 GB+ system RAM recommended; ~80 GB of disk for local model weights
-- A Claude Pro/Max subscription and/or a Gemini Advanced subscription
+- At least one subscription CLI account: Anthropic Pro/Max, Google Advanced, or ChatGPT Plus/Pro
 - Cloudflare account (free tier) if you want remote dashboard access
 
-## Quickstart
+## Quickstart — one command
+
+The installer asks 6 questions (access scope, which CLI subscriptions, GPU
+layout, optional features, Cloudflare Tunnel token if relevant), generates a
+tailored `.env` with random secrets, picks the right compose profiles, and
+brings the stack up. ~3-5 min to a working dashboard once you answer.
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://perry.5216perry.uk/install.ps1 | iex
+```
+
+**Linux / macOS**
+
+```bash
+curl -fsSL https://perry.5216perry.uk/install.sh | bash
+```
+
+The custom-domain URLs are Cloudflare 302 redirects to raw GitHub. If the
+redirect isn't set up yet (or you'd rather not trust it), use raw GitHub
+directly:
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/Perry5216/perry-system/main/install.ps1 | iex
+```
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Perry5216/perry-system/main/install.sh | bash
+```
+
+After the installer finishes, log into each subscription CLI you opted
+in to — `claude login`, `gemini login`, `codex login` — on the host
+once. Auth state mounts into the worker container automatically and
+persists across rebuilds.
+
+The first boot pulls ~80 GB of model weights — give it 15–30 minutes on
+first run.
+
+### Manual install (if you'd rather not pipe a script)
 
 ```bash
 git clone https://github.com/Perry5216/perry-system.git
 cd perry-system
-
-# Copy the environment template and fill in your keys
-cp .env.sample .env
-# Edit .env — see comments for what each block does
-
-# Authenticate the CLIs once on the host (persists across container runs)
-claude login
-gemini login
-
-# Bring up the stack
-docker compose up -d
-
-# Dashboard at http://localhost:3847 (or your custom domain like https://perry.5216perry.uk) once perry reports healthy
+cp .env.sample .env             # Edit .env — set PERRY_VAULT_KEY, PERRY_API_KEY, COMPOSE_PROFILES
+docker compose up -d            # Default profile = local minimum stack
+# Profile opt-ins: COMPOSE_PROFILES=covers,vpn,public,voice,train
 ```
-
-The first boot pulls ~80 GB of model weights — give it 15–30 minutes on first run.
 
 ## Project layout
 
@@ -104,7 +134,7 @@ perry-system/
 │  │  ├─ dashboard-api/    # Express REST + WS server
 │  │  ├─ dashboard/        # React frontend
 │  │  └─ mcp-server/       # MCP tool surface for workers
-│  ├─ worker/              # Containerised Claude / Gemini CLI workers
+│  ├─ worker/              # Containerised subscription-CLI workers (Anthropic, Google, OpenAI)
 │  ├─ scout/               # VPN-routed scraper containers
 │  └─ trainer/             # Python LoRA fine-tuning pipeline
 ├─ data/                   # Bind-mounted model + image storage (gitignored)
@@ -145,7 +175,7 @@ for the full breakdown, dependencies, and effort estimates.
 - ✅ FTS5 session search + RAG-indexed verified-success corpus per pen
 - ✅ ~30 KB tokens saved per book via three rounds of prompt compression
 - ✅ Per-pen `SOUL.md` / `LESSONS.md` curation editor
-- ✅ Containerised worker pool (Claude Code + Gemini CLI) with MCP profile filtering
+- ✅ Containerised worker pool — three subscription CLIs (Anthropic, Google, OpenAI) with MCP profile filtering
 
 ## License & Commercial Use
 

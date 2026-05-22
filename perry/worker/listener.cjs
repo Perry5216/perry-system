@@ -2,9 +2,9 @@
  * Perry Worker HTTP Listener
  *
  * Listens on a docker-internal port for spawn requests from the perry
- * container's WorkerCoordinator. Each request fires a CLI subprocess
- * (Claude Code or Gemini CLI) with the same auth state the user has on
- * the host (mounted read-only via docker volumes).
+ * container's WorkerCoordinator. Each request fires a subscription-CLI
+ * subprocess (Anthropic / Google / OpenAI) with the same auth state the
+ * user has on the host (mounted via docker volumes).
  *
  * Endpoints:
  *   POST /spawn   body: { command, agent, id, label, reason, config, working_dir }
@@ -31,7 +31,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const PORT = parseInt(process.env.PERRY_WORKER_PORT || '4711', 10);
 const SECRET = process.env.PERRY_WORKER_SECRET || '';
@@ -76,6 +76,30 @@ try {
   console.error('[listener] failed to write MCP config files', err);
 }
 
+// ── Codex MCP config — passed inline per-spawn via `-c` overrides ─────
+// Codex's `codex mcp add` CLI subcommand only accepts --url and
+// --bearer-token-env-var; there's no flag for custom HTTP headers. We
+// need X-Perry-MCP-Profile (worker class) + X-Perry-MCP-Compact (token
+// budget) headers, so we drive the MCP server config inline on every
+// `codex exec` invocation via `-c key="value"` overrides. This also
+// avoids mutating the host's ~/.codex/config.toml, which would surprise
+// the user if they later run codex interactively.
+//
+// Schema (verified against `codex mcp get` 2026-05-22):
+//   [mcp_servers.perry]
+//   url = "<MCP_URL>"
+//   [mcp_servers.perry.http_headers]
+//   "X-Perry-MCP-Profile" = "<MCP_PROFILE>"
+//   "X-Perry-MCP-Compact" = "true"   # only when PERRY_MCP_COMPACT
+const codexMcpFlags = [
+  '-c', `mcp_servers.perry.url="${MCP_URL}"`,
+  '-c', `mcp_servers.perry.http_headers."X-Perry-MCP-Profile"="${MCP_PROFILE}"`,
+];
+if (MCP_COMPACT) {
+  codexMcpFlags.push('-c', `mcp_servers.perry.http_headers."X-Perry-MCP-Compact"="true"`);
+}
+console.log(`[listener] codex MCP config prepared (per-spawn): perry -> ${MCP_URL} (profile=${MCP_PROFILE}, compact=${MCP_COMPACT})`);
+
 fs.mkdirSync(LOG_DIR, { recursive: true });
 
 const activeWorkers = new Map(); // id -> { pid, startedAt, killTimer }
@@ -101,12 +125,13 @@ function buildFinalCommand(signal) {
   const cfg = signal.config || {};
   const agent = signal.agent;
   // Per-agent command builders.
-  if (agent === 'claude') {
+  if (agent === 'anthropic') {
+    // Anthropic CLI — binary name is `claude` (from @anthropic-ai/claude-code).
     const flags = ['-p', '"/perry-worker"', '--max-turns', '60'];
     // Force-load /app/.mcp.json (Perry MCP HTTP transport) and ignore any
-    // other MCP config the host's mounted .claude state might contain.
+    // other MCP config the host's mounted auth state might contain.
     // Without --strict-mcp-config the workspace-trust dialog blocks the
-    // server registration in non-interactive mode and Claude boots with
+    // server registration in non-interactive mode and the CLI boots with
     // no Perry tools.
     flags.push('--mcp-config', '/app/.mcp.json', '--strict-mcp-config');
     if (cfg.yolo !== false) flags.push('--dangerously-skip-permissions');
@@ -123,6 +148,35 @@ function buildFinalCommand(signal) {
       if (cfg.model && cfg.model !== 'auto') flags.push(`--model ${cfg.model}`);
       const flagsStr = flags.join(' ');
       return `cat ${slashCmdPath} | gemini ${flagsStr}`;
+    }
+  }
+  if (agent === 'codex') {
+    // Codex CLI — no native slash-command discovery, so pipe the shared
+    // perry-worker prompt (already mounted at /app/.claude/commands/) into
+    // `codex exec -` via stdin. Content is agent-agnostic; the only
+    // Claude-specific bit is an example worker_id pattern which Codex
+    // workers can adapt.
+    //
+    // MCP server config is passed inline via `-c` overrides (see
+    // codexMcpFlags built at boot). Each `-c` value contains TOML literal
+    // syntax with embedded double-quotes, so we shell-quote with single
+    // quotes to keep the parser happy.
+    const promptPath = '/app/.claude/commands/perry-worker.md';
+    if (fs.existsSync(promptPath)) {
+      const flags = [];
+      // -c overrides go BEFORE the `exec` subcommand (top-level global flag).
+      for (let i = 0; i < codexMcpFlags.length; i += 2) {
+        flags.push(codexMcpFlags[i], `'${codexMcpFlags[i + 1]}'`);
+      }
+      flags.push('exec');
+      // --yolo aliases --dangerously-bypass-approvals-and-sandbox — the
+      // Claude `--dangerously-skip-permissions` / Gemini `--yolo` analogue.
+      if (cfg.yolo !== false) flags.push('--yolo');
+      if (cfg.model && cfg.model !== 'auto') flags.push('-m', cfg.model);
+      flags.push('-C', '/app');
+      // Trailing `-` tells `codex exec` to read the prompt body from stdin.
+      flags.push('-');
+      return `cat ${promptPath} | codex ${flags.join(' ')}`;
     }
   }
   return signal.command;  // fallback to whatever the coordinator sent

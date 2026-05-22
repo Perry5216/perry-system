@@ -335,8 +335,8 @@ export class GarbageCollector {
         const matches = db.prepare(`SELECT key FROM meta WHERE key LIKE '${prefix}%'`).all() as Array<{ key: string }>;
         for (const { key } of matches) {
           const slug = key.slice(prefix.length);
-          // assist_*_<agent> keys aren't pen-scoped; assist agent is 'claude' | 'antigrav'.
-          if (slug === 'claude' || slug === 'antigrav') continue;
+          // assist_*_<agent> keys aren't pen-scoped; assist agents are anthropic / antigrav / codex.
+          if (slug === 'anthropic' || slug === 'antigrav' || slug === 'codex') continue;
           if (!validSlugs.has(slug)) {
             db.prepare('DELETE FROM meta WHERE key=?').run(key);
             orphanDeleted++;

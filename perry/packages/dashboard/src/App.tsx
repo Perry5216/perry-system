@@ -312,7 +312,7 @@ export function App() {
   const [targetInfo, setTargetInfo] = useState<WorkerTargetInfo | null>(null);
   const [targetInput, setTargetInput] = useState<string>('');
   const [maxWorkersInput, setMaxWorkersInput] = useState<string>('');
-  const [agentInput, setAgentInput] = useState<string>('claude');
+  const [agentInput, setAgentInput] = useState<string>('anthropic');
   const [targetBusy, setTargetBusy] = useState(false);
   // Pool audit — scans claude_injected.jsonl + training_data.jsonl with the
   // same scanLeaks bank used by Phase B + worker drain. One-click visibility
@@ -402,7 +402,7 @@ export function App() {
   // librarian GPU 5070 Ti). Used by book-planning research phase.
   const [researcherStatus, setResearcherStatus] = useState<{ loadedCount: number; gpu: string; onLibrarianGpu: boolean; currentEndpoint: string; models?: Array<{ name: string }>; mode?: string } | null>(null);
   const [isSwitchingResearcher, setIsSwitchingResearcher] = useState(false);
-  // Claude assist worker — daemon polls /assist-status and fires `claude -p
+  // Anthropic assist worker — daemon polls /assist-status and fires `claude -p
   // /perry-worker` when (mode='auto' and tasks pending) OR (manual fire
   // button clicked). This state mirrors the server side for the panel.
   type AssistAgentSlice = {
@@ -415,8 +415,9 @@ export function App() {
   };
   const [assistStatus, setAssistStatus] = useState<{
     pending: number; claimed: number;
-    claude: AssistAgentSlice;
+    anthropic: AssistAgentSlice;
     antigrav: AssistAgentSlice;
+    codex: AssistAgentSlice;
   } | null>(null);
   const [isFiringAssist, setIsFiringAssist] = useState<string | null>(null);
   // Create Modal State
@@ -1058,7 +1059,7 @@ export function App() {
   const refreshAssistStatus = () => {
     fetch(`${API_BASE}/system/assist-status`).then(r => r.json()).then(setAssistStatus).catch(() => { });
   };
-  const handleAssistFireNow = async (agent: 'claude' | 'antigrav') => {
+  const handleAssistFireNow = async (agent: 'anthropic' | 'antigrav' | 'codex') => {
     // Optimistic: show "fire requested" stamp immediately so the button
     // disables + the badge updates without waiting for the round-trip.
     const nowIso = new Date().toISOString();
@@ -1079,7 +1080,7 @@ export function App() {
       setIsFiringAssist(null);
     }
   };
-  const handleAssistModeToggle = async (agent: 'claude' | 'antigrav') => {
+  const handleAssistModeToggle = async (agent: 'anthropic' | 'antigrav' | 'codex') => {
     const current = assistStatus?.[agent]?.mode;
     const newMode: 'auto' | 'manual' = current === 'auto' ? 'manual' : 'auto';
     // Optimistic: flip the checkbox immediately. UI feels instant.
@@ -1097,7 +1098,7 @@ export function App() {
       alert(`Failed to set ${agent} assist mode: ${e.message}`);
     }
   };
-  const handleAssistConfigChange = async (agent: 'claude' | 'antigrav', patch: { yolo?: boolean; model?: string }) => {
+  const handleAssistConfigChange = async (agent: 'anthropic' | 'antigrav' | 'codex', patch: { yolo?: boolean; model?: string }) => {
     // Capture previous config BEFORE the optimistic merge so a failure can
     // restore it locally — covers the case where the refresh GET also fails
     // and would otherwise leave the UI stuck in the wrong optimistic state.
@@ -1904,7 +1905,7 @@ export function App() {
                 <div className="eyebrow" style={{ marginBottom: 6 }}>P.E.R.R.Y. // Workers</div>
                 <h2 style={{ fontSize: '1.4rem', fontWeight: 600, letterSpacing: '-0.015em' }}>Worker pool</h2>
                 <p className="text-muted" style={{ marginTop: 4, fontSize: '0.85rem' }}>
-                  Spawn and monitor the Claude / Anti-Grav workers that drain the task queue.
+                  Spawn and monitor the subscription-CLI workers that drain the task queue.
                 </p>
               </div>
             )}
@@ -2859,7 +2860,7 @@ export function App() {
                       marginBottom: '1.25rem',
                     }}>
                       {/* (Worker Target + daemon banner removed — superseded by the
-                          Claude Assist Worker panel below + per-agent PS daemons.) */}
+                          Anthropic Assist Worker panel below + per-agent PS daemons.) */}
                       {/* Pool audit — runs scanLeaks against claude_injected.jsonl
                           and training_data.jsonl. Same regex bank as Phase B + worker
                           drain, so this confirms what would actually end up in v4. */}
@@ -3241,7 +3242,7 @@ export function App() {
                           })()}
 
                           {/* VOICE MATCH: per-source z-distance from the pen's voice corpus.
-                              Catches subtle stylistic drift (Antigravity vs Claude vs A.Perry)
+                              Catches subtle stylistic drift (Antigravity vs Anthropic vs A.Perry)
                               that the regex leak filter misses. */}
                           {poolAudit.voiceMatch && (() => {
                             const vm = poolAudit.voiceMatch;
@@ -3502,7 +3503,7 @@ export function App() {
                           <div>
                             <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>Researcher</div>
                             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                              book-planning research phase · currently on <strong style={{ color: '#a855f7' }}>{researcherStatus?.mode === 'workers' ? 'Workers (Claude/Gemini)' : (researcherStatus?.gpu || '—')}</strong>
+                              book-planning research phase · currently on <strong style={{ color: '#a855f7' }}>{researcherStatus?.mode === 'workers' ? 'Workers (subscription CLIs)' : (researcherStatus?.gpu || '—')}</strong>
                               {researcherStatus && researcherStatus.mode !== 'workers' && ` · ${researcherStatus.loadedCount} model${researcherStatus.loadedCount === 1 ? '' : 's'} loaded`}
                               {researcherStatus?.mode === 'workers' && ' · external queue (no local model loaded)'}
                             </div>
@@ -3540,8 +3541,8 @@ export function App() {
                                     onClick={() => handleResearcherEndpointSwap('workers')}
                                     disabled={isSwitchingResearcher || workersActive}
                                     style={btnStyle(workersActive)}
-                                    title="Route book-planning research phase to Claude/Gemini workers via task_pool. Bypasses local Ollama; uses your existing worker queue."
-                                  >Workers (Claude/Gemini)</button>
+                                    title="Route book-planning research phase to subscription-CLI workers via task_pool. Bypasses local Ollama; uses your existing worker queue."
+                                  >Workers (subscription CLIs)</button>
                                 </>
                               );
                             })()}
@@ -3575,12 +3576,12 @@ export function App() {
 
                 </>)}
                 {activeTab === 'workers' && (<>
-                    {/* Per-agent Assist Worker panels — Claude + Anti-Grav side by side.
+                    {/* Per-agent Assist Worker panels — Anthropic + Anti-Grav + Codex side by side.
                         Each panel toggles auto/manual fire decisions; WorkerCoordinator
                         (inside perry) POSTs spawn requests to the perry-worker container
-                        which runs the claude / gemini CLI. Pending task count is shared
-                        — whichever agent fires first races to claim. */}
-                    {(['claude', 'antigrav'] as const).map(agent => {
+                        which runs the matching subscription CLI. Pending task count is
+                        shared — whichever agent fires first races to claim. */}
+                    {(['anthropic', 'antigrav', 'codex'] as const).map(agent => {
                       const slice = assistStatus?.[agent];
                       const pending = assistStatus?.pending ?? 0;
                       const claimed = assistStatus?.claimed ?? 0;
@@ -3591,15 +3592,23 @@ export function App() {
                       const ageStr = ageSec == null ? 'never' : ageSec < 60 ? `${ageSec}s ago` : ageSec < 3600 ? `${Math.floor(ageSec/60)}m ago` : `${Math.floor(ageSec/3600)}h ago`;
                       const fireReqAge = fireReq ? Math.floor((Date.now() - new Date(fireReq).getTime()) / 1000) : null;
                       const fireRequestActive = fireReqAge != null && fireReqAge < 60;
-                      const label = agent === 'claude' ? 'Claude Assist Worker' : 'Anti-Grav Assist Worker (Gemini CLI)';
-                      const accentRgb = agent === 'claude' ? '34,197,94' : '168,85,247';
+                      const agentDisplay =
+                        agent === 'anthropic' ? 'Anthropic'
+                        : agent === 'antigrav' ? 'Anti-Grav'
+                        : 'Codex';
+                      const label =
+                        agent === 'anthropic' ? 'Anthropic Assist Worker'
+                        : agent === 'antigrav' ? 'Anti-Grav Assist Worker (Gemini CLI)'
+                        : 'Codex Assist Worker (OpenAI CLI)';
+                      const accentRgb =
+                        agent === 'anthropic' ? '34,197,94'
+                        : agent === 'antigrav' ? '168,85,247'
+                        : '251,146,60';
                       const daemonAlive = slice?.daemonAlive ?? false;
-                      const daemonInstall = agent === 'claude'
-                        ? { script: 'docker compose up -d perry-worker', desc: 'Claude / Gemini CLI worker container (subprocess host for both panels)' }
-                        : { script: 'docker compose up -d perry-worker', desc: 'Claude / Gemini CLI worker container (subprocess host for both panels)' };
+                      const daemonInstall = { script: 'docker compose up -d perry-worker', desc: 'Subscription-CLI worker container (host for all three panels)' };
                       const fireBtnLabel = fireRequestActive ? 'Fire Pending…'
                         : isFiringAssist === agent ? '…'
-                        : agent === 'claude' ? 'Fire Claude Worker Now' : 'Fire Anti-Grav Worker Now';
+                        : `Fire ${agentDisplay} Worker Now`;
                       return (
                         <div key={agent} style={{
                           background: `rgba(${accentRgb},0.04)`,
@@ -3689,23 +3698,30 @@ export function App() {
                                   borderRadius: '4px', color: 'white',
                                   cursor: 'pointer',
                                 }}
-                                title={agent === 'claude'
-                                  ? 'Claude model. opus = best for hard reasoning, sonnet = balanced, haiku = fastest/cheapest, auto = let CLI pick'
-                                  : 'Gemini model. flash = high quota, pro = higher quality, auto = let CLI pick'}
+                                title={agent === 'anthropic'
+                                  ? 'Anthropic model. opus = best for hard reasoning, sonnet = balanced, haiku = fastest/cheapest, auto = let CLI pick'
+                                  : agent === 'antigrav'
+                                  ? 'Gemini model. flash = high quota, pro = higher quality, auto = let CLI pick'
+                                  : 'Codex model picked by your ChatGPT subscription tier; override only if you know the exact model id (e.g. gpt-5.5).'}
                               >
-                                {agent === 'claude' ? (
+                                {agent === 'anthropic' ? (
                                   <>
                                     <option value="auto">auto (CLI picks)</option>
                                     <option value="opus">opus (best reasoning)</option>
                                     <option value="sonnet">sonnet (balanced)</option>
                                     <option value="haiku">haiku (fast/cheap)</option>
                                   </>
-                                ) : (
+                                ) : agent === 'antigrav' ? (
                                   <>
                                     <option value="auto">auto (CLI picks)</option>
                                     <option value="gemini-2.5-flash">gemini-2.5-flash (high quota)</option>
                                     <option value="gemini-2.5-pro">gemini-2.5-pro (better quality)</option>
                                     <option value="gemini-3-pro">gemini-3-pro (highest quality, low quota)</option>
+                                  </>
+                                ) : (
+                                  <>
+                                    <option value="auto">auto (CLI picks)</option>
+                                    <option value="gpt-5.5">gpt-5.5</option>
                                   </>
                                 )}
                               </select>
@@ -3733,7 +3749,7 @@ export function App() {
                               borderRadius: '6px',
                               fontSize: '0.7rem', lineHeight: 1.4,
                             }}>
-                              <strong style={{ color: '#f59e0b' }}>⚠ {agent === 'claude' ? 'Claude' : 'Anti-Grav'} coordinator not heartbeating.</strong>{' '}
+                              <strong style={{ color: '#f59e0b' }}>⚠ {agentDisplay} coordinator not heartbeating.</strong>{' '}
                               The perry container or its WorkerCoordinator is offline. Bring it up: <code>{daemonInstall.script}</code>
                               <div style={{ marginTop: '0.3rem', color: 'var(--text-muted)' }}>
                                 {daemonInstall.desc}
@@ -3746,7 +3762,7 @@ export function App() {
 
                     {/* Pair Mining (Worker Target) — orchestrates bulk training
                         data generation. Set a pair target; the coordinator fires
-                        up to Max parallel Claude sessions (your Max plan compute)
+                        up to Max parallel CLI sessions (your subscription compute)
                         via perry-worker, running /perry-worker to crank through
                         synthesize_pair / long_form_scene tasks until the manifest
                         is satisfied. */}
@@ -3755,9 +3771,10 @@ export function App() {
                       const cur = targetInfo?.currentPairs ?? 0;
                       const pct = t ? Math.min(100, Math.round((cur / t) * 100)) : 0;
                       const targetReached = t != null && cur >= t;
-                      const claudePanelOnline = assistStatus?.claude?.daemonAlive ?? false;
+                      const anthropicPanelOnline = assistStatus?.anthropic?.daemonAlive ?? false;
                       const antigravPanelOnline = assistStatus?.antigrav?.daemonAlive ?? false;
-                      const anyDaemonOnline = claudePanelOnline || antigravPanelOnline;
+                      const codexPanelOnline = assistStatus?.codex?.daemonAlive ?? false;
+                      const anyDaemonOnline = anthropicPanelOnline || antigravPanelOnline || codexPanelOnline;
                       return (
                         <div style={{
                           background: 'rgba(99,102,241,0.04)',
@@ -3778,7 +3795,7 @@ export function App() {
                               }} />
                               <strong style={{ color: '#6366f1', fontSize: '0.875rem' }}>Pair Mining Target</strong>
                               <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                                {t ? `target ${t} pairs` : 'no target set'} · uses {agentInput === 'antigrav' ? 'Anti-Grav' : 'Claude'} daemon
+                                {t ? `target ${t} pairs` : 'no target set'} · uses {agentInput === 'antigrav' ? 'Anti-Grav' : agentInput === 'codex' ? 'Codex' : 'Anthropic'} daemon
                               </span>
                             </div>
                             <div style={{ fontSize: '0.85rem', display: 'flex', gap: '1.25rem', flexWrap: 'wrap' }}>
@@ -3793,7 +3810,7 @@ export function App() {
                                 </>
                               ) : (
                                 <span style={{ color: 'var(--text-muted)' }}>
-                                  Daemon fires up to <strong>Max</strong> {agentInput === 'antigrav' ? 'Anti-Grav (Gemini)' : 'Claude'} sessions in parallel until the target is hit. Burns through assist + mining tasks; right approach for filling v7's training pool.
+                                  Daemon fires up to <strong>Max</strong> {agentInput === 'antigrav' ? 'Anti-Grav (Gemini)' : agentInput === 'codex' ? 'Codex (OpenAI)' : 'Anthropic'} sessions in parallel until the target is hit. Burns through assist + mining tasks; right approach for filling v7's training pool.
                                 </span>
                               )}
                             </div>
@@ -3838,8 +3855,9 @@ export function App() {
                                       borderRadius: '4px', color: 'white', fontSize: '0.75rem',
                                     }}
                                   >
-                                    <option value="claude">Claude</option>
+                                    <option value="anthropic">Anthropic</option>
                                     <option value="antigrav">Anti-Grav</option>
+                                    <option value="codex">Codex</option>
                                   </select>
                                   <button
                                     onClick={handleSetWorkerTarget}
@@ -3888,7 +3906,7 @@ export function App() {
                               border: '1px solid rgba(245,158,11,0.3)',
                               borderRadius: '4px', color: '#f59e0b',
                             }}>
-                              ⚠ No daemon online to claim mining tasks. Start the <strong>{agentInput === 'antigrav' ? 'Anti-Grav' : 'Claude'}</strong> daemon above ↑
+                              ⚠ No daemon online to claim mining tasks. Start the <strong>{agentInput === 'antigrav' ? 'Anti-Grav' : agentInput === 'codex' ? 'Codex' : 'Anthropic'}</strong> daemon above ↑
                             </div>
                           )}
                         </div>
@@ -4316,17 +4334,17 @@ export function App() {
                         </p>
                       )}
 
-                      {/* Claude-assisted pair collection (Phase D / MCP) */}
+                      {/* CLI-assisted pair collection (Phase D / MCP) */}
                       <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem', marginTop: '1rem', marginBottom: '0.5rem', background: 'rgba(99, 102, 241, 0.1)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                         <input
                           type="checkbox"
                           checked={newProject.context.claudeCollectionEnabled || false}
                           onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, claudeCollectionEnabled: e.target.checked } })}
                         />
-                        <strong style={{ color: '#6366f1' }}>Claude-Assisted Pair Collection</strong>
+                        <strong style={{ color: '#6366f1' }}>CLI-Assisted Pair Collection</strong>
                       </label>
                       <p className="text-xs text-muted" style={{ marginLeft: '0.5rem', marginBottom: '1rem' }}>
-                        When on, this project is flagged for synthetic pair contribution via the MCP server. Claude can see mined / rejected output and inject curated pairs that bypass the gates.
+                        When on, this project is flagged for synthetic pair contribution via the MCP server. Subscription-CLI workers can see mined / rejected output and inject curated pairs that bypass the gates.
                       </p>
 
                       {/* Auto-promote on audit pass (Phase B) */}

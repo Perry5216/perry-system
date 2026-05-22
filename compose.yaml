@@ -58,9 +58,16 @@ services:
       timeout: 10s
       retries: 3
 
+  # ─── ComfyUI book-cover generator (opt-in via `covers` profile) ────────
+  # Gated by `profiles: ["covers"]` so fresh installs don't pull the 6 GB
+  # image unless the operator opted in. setup.ps1 / setup.sh writes
+  # COMPOSE_PROFILES=covers,... to .env when the operator answers yes to
+  # "Book covers? (ComfyUI, ~6 GB)" — `docker compose up` then picks it
+  # up automatically.
   comfyui:
     image: yanwk/comfyui-boot:cu128-slim
     container_name: comfyui
+    profiles: ["covers"]
     mem_limit: 6g
     pids_limit: 500
     restart: unless-stopped
@@ -162,20 +169,19 @@ services:
       # dashboard-api's internal stdio MCP clients) tries to bind the
       # same port and crashes with EADDRINUSE.
       - NODE_OPTIONS=--max-old-space-size=8192
+    # Hard-required services only — anything behind a `profiles:` gate
+    # (comfyui, gluetun-*) is intentionally NOT in this list so the perry
+    # container can start in a local-only / no-VPN / no-covers config. The
+    # in-container clients (ComfyUI client, NetworkClient proxy router)
+    # degrade gracefully when the optional services are absent.
     depends_on:
       ollama:
         condition: service_healthy
       ollama-embeddings:
         condition: service_healthy
-      comfyui:
-        condition: service_healthy
       perry-browser:
         condition: service_healthy
       perry-worker:
-        condition: service_healthy
-      gluetun-torguard-uk:
-        condition: service_healthy
-      gluetun-torguard-us:
         condition: service_healthy
 
   # ─── Headless browser (Playwright + stealth) for anti-bot sites ─────────
@@ -262,6 +268,11 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
+    # Gated by `profiles: ["public"]` — only starts when the operator
+    # chose public-access mode in setup. Local-only and LAN-only installs
+    # never pull the cloudflared image. setup.ps1 / setup.sh writes the
+    # token to .env and adds `public` to COMPOSE_PROFILES.
+    profiles: ["public"]
     mem_limit: 256m
     pids_limit: 100
     restart: unless-stopped
@@ -292,6 +303,10 @@ services:
   gluetun-uk:
     image: qmcgaw/gluetun:latest
     container_name: gluetun-uk
+    # Gated by `profiles: ["vpn"]` — all 5 gluetun exits + perry-scout
+    # only start when the operator opted into VPN-routed scouting in
+    # setup. Local-only / no-scrape installs skip the whole VPN stack.
+    profiles: ["vpn"]
     mem_limit: 256m
     pids_limit: 100
     cap_add: [NET_ADMIN]
@@ -316,6 +331,7 @@ services:
   gluetun-us:
     image: qmcgaw/gluetun:latest
     container_name: gluetun-us
+    profiles: ["vpn"]
     mem_limit: 256m
     pids_limit: 100
     cap_add: [NET_ADMIN]
@@ -340,6 +356,7 @@ services:
   gluetun-de:
     image: qmcgaw/gluetun:latest
     container_name: gluetun-de
+    profiles: ["vpn"]
     mem_limit: 256m
     pids_limit: 100
     cap_add: [NET_ADMIN]
@@ -377,6 +394,7 @@ services:
   gluetun-torguard-uk:
     image: qmcgaw/gluetun:latest
     container_name: gluetun-torguard-uk
+    profiles: ["vpn"]
     mem_limit: 256m
     pids_limit: 100
     cap_add: [NET_ADMIN]
@@ -408,6 +426,7 @@ services:
   gluetun-torguard-us:
     image: qmcgaw/gluetun:latest
     container_name: gluetun-torguard-us
+    profiles: ["vpn"]
     mem_limit: 256m
     pids_limit: 100
     cap_add: [NET_ADMIN]
@@ -443,6 +462,7 @@ services:
   perry-scout:
     image: alpine/curl:latest
     container_name: perry-scout
+    profiles: ["vpn"]
     mem_limit: 64m
     pids_limit: 50
     restart: unless-stopped
@@ -464,6 +484,10 @@ services:
       context: ./perry/trainer
       dockerfile: Dockerfile
     container_name: perry-trainer
+    # Gated by `profiles: ["train"]` — only starts when the operator has
+    # training data and chose to enable the LoRA fine-tuning pipeline.
+    # Fresh installs skip the 16 GB image until they have a pen + corpus.
+    profiles: ["train"]
     mem_limit: 16g
     pids_limit: 2000
     restart: unless-stopped
@@ -486,10 +510,11 @@ services:
 
   # ─── Perry-Worker — containerised CLI worker pool ──────────────────────
   #
-  # Hosts Claude Code + Gemini CLI inside the container; the host's OAuth
-  # state is mounted read-only so the user's subscription auth keeps
-  # working. This is the only worker-dispatch path — the older host-side
-  # PerryHostSpawner Windows Service + .signals/ file IPC have been removed.
+  # Hosts the three subscription-CLI tools (Anthropic / Google / OpenAI)
+  # inside the container; the host's OAuth state is mounted so the user's
+  # subscription auth keeps working. This is the only worker-dispatch
+  # path — the older host-side PerryHostSpawner Windows Service +
+  # .signals/ file IPC have been removed.
   #
   # Subscription-only mode preserved: no API keys, no tokens. The CLIs
   # authenticate against the same logins you use on your laptop.
@@ -577,15 +602,16 @@ services:
       # they actually intend to use. Saves ~11k tokens per worker session.
       - PERRY_MCP_COMPACT=${PERRY_MCP_COMPACT:-true}
     volumes:
-      # Auth state — read-only so the container can't corrupt host logins.
-      # Cross-platform: USERPROFILE on Windows, HOME on Linux/Mac.
+      # Auth state — mounted RW so the container can refresh session
+      # tokens. Cross-platform: USERPROFILE on Windows, HOME on Linux/Mac.
       # Container runs as `node` (uid 1000 from base image), so mounts go
-      # to /home/node/. Claude needs BOTH the directory AND the sibling
-      # .claude.json file (dir holds caches; JSON holds OAuth tokens).
-      # .claude needs to be writable — Claude's Bash sandbox creates per-session
-      # env scripts under .claude/session-env/. Same trust boundary as .claude.json.
+      # to /home/node/. The Anthropic CLI needs BOTH the .claude directory
+      # AND the sibling .claude.json file (dir holds caches; JSON holds
+      # OAuth tokens). The dir must be writable — the CLI's Bash sandbox
+      # creates per-session env scripts under .claude/session-env/. Same
+      # trust boundary as the host CLI.
       - ${USERPROFILE:-${HOME}}/.claude:/home/node/.claude
-      # .claude.json needs to be writable — Claude updates session state
+      # .claude.json needs to be writable — the CLI updates session state
       # (last-used model, cache cursors) on every run. Container is on the
       # internal docker network only; same trust boundary as the host CLI.
       - ${USERPROFILE:-${HOME}}/.claude.json:/home/node/.claude.json
@@ -593,10 +619,17 @@ services:
       # google_accounts.json / per-account caches on every run. Same trust
       # boundary as the host CLI (single-user dev box).
       - ${USERPROFILE:-${HOME}}/.gemini:/home/node/.gemini
+      # .codex needs to be writable — Codex CLI updates session rollouts,
+      # OAuth refresh tokens, and the MCP server registry on every run.
+      # Same trust boundary as the host CLI. Codex stores OAuth credentials
+      # and config.toml under this dir; without the mount the container has
+      # no ChatGPT subscription auth and `codex exec` exits unauthenticated.
+      - ${USERPROFILE:-${HOME}}/.codex:/home/node/.codex
       # Project-local slash commands — `/perry-worker`, `/perry-code-worker`
-      # etc live in ./.claude/commands/ . Claude Code searches CWD
-      # upward, so mounting at /app/.claude/commands makes them visible
-      # when the CLI is spawned with cwd=/app.
+      # etc live in ./.claude/commands/ . The Anthropic CLI searches CWD
+      # upward for that directory, so mounting at /app/.claude/commands
+      # makes them visible when the CLI is spawned with cwd=/app. The
+      # Codex worker also reads from this path via stdin pipe.
       - ./.claude:/app/.claude:ro
       # Worker logs — bind-mounted so the dashboard's log viewer keeps working.
       - ./perry/logs/workers:/app/logs/workers

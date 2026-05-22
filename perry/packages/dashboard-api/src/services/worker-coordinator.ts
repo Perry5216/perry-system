@@ -30,7 +30,7 @@ import { ProjectEngine } from '@perry/projects';
 
 const WORKER_URL = process.env.PERRY_WORKER_URL || '';
 const WORKER_SECRET = process.env.PERRY_WORKER_SECRET || '';
-const VALID_AGENTS = ['claude', 'antigrav'] as const;
+const VALID_AGENTS = ['anthropic', 'antigrav', 'codex'] as const;
 type Agent = typeof VALID_AGENTS[number];
 
 interface AgentSpec {
@@ -40,14 +40,23 @@ interface AgentSpec {
 }
 
 const AGENTS: Record<Agent, AgentSpec> = {
-  claude: {
-    label: 'Claude',
+  anthropic: {
+    label: 'Anthropic',
+    // `claude` is the on-disk binary name installed by @anthropic-ai/claude-code.
     hostCommand: 'claude -p "/perry-worker" --max-turns 60 --dangerously-skip-permissions',
   },
   antigrav: {
     label: 'Anti-Grav',
     // Prefer gemini (Companion), fall back to antigravity. Both run /perry-worker.
     hostCommand: '(where gemini >NUL 2>NUL && gemini -p "/perry-worker") || antigravity chat -r "/perry-worker"',
+  },
+  codex: {
+    label: 'Codex',
+    // OpenAI Codex CLI — ChatGPT Plus/Pro subscription auth. listener.cjs
+    // pipes the shared worker prompt into `codex exec -` via stdin (no
+    // native slash-command discovery). hostCommand here is a best-effort
+    // fallback the listener overrides; it never runs as-is.
+    hostCommand: 'codex exec --yolo -C /app -',
   },
 };
 
@@ -64,8 +73,9 @@ export class WorkerCoordinator {
 
   constructor(private projectEngine: ProjectEngine) {
     this.state = {
-      claude:   { lastFireAt: 0 },
-      antigrav: { lastFireAt: 0 },
+      anthropic: { lastFireAt: 0 },
+      antigrav:  { lastFireAt: 0 },
+      codex:     { lastFireAt: 0 },
     };
   }
 
@@ -74,9 +84,37 @@ export class WorkerCoordinator {
       this.log.error('PERRY_WORKER_URL is unset — spawns will be dropped. Set it in compose.yaml or .env.');
     }
     this.log.info('starting', { pollMs: this.pollMs, cooldownSec: this.cooldownSec, workerUrl: WORKER_URL || '<unset>' });
+    this.migrateLegacyAgentMeta();
     void this.tick();
     this.timer = setInterval(() => void this.tick(), this.pollMs);
     this.bindPrewarmListeners();
+  }
+
+  /**
+   * One-shot migration: rename meta rows + target_pool rows that still
+   * use the legacy agent slug for the Anthropic worker. Older installs
+   * stored per-agent state under `assist_*_claude` keys; the agent enum
+   * has been renamed and the new code looks under `assist_*_anthropic`.
+   * Idempotent — no-op after the first boot post-upgrade.
+   */
+  private migrateLegacyAgentMeta(): void {
+    try {
+      const store: any = this.projectEngine.getStateStore();
+      const db = store?.db;
+      if (!db) return;
+      const renamed = db.prepare(
+        "UPDATE meta SET key = REPLACE(key, '_claude', '_anthropic') WHERE key LIKE 'assist_%_claude'"
+      ).run();
+      const targetUpdated = db.prepare(
+        "UPDATE target_pool SET agent = 'anthropic' WHERE agent = 'claude'"
+      ).run();
+      if (renamed.changes > 0 || targetUpdated.changes > 0) {
+        this.log.info('legacy agent meta migrated', { metaRows: renamed.changes, targetPoolRows: targetUpdated.changes });
+      }
+    } catch (e: any) {
+      // Don't fail boot — a missing table or no rows is fine.
+      this.log.warn('legacy agent meta migration skipped', { error: e.message });
+    }
   }
 
   /**
@@ -223,7 +261,10 @@ export class WorkerCoordinator {
     // Read per-agent CLI config (yolo + model) from meta and pass via signal.
     // Falls back to sensible defaults if config not set.
     const store: any = this.projectEngine.getStateStore();
-    let config: { yolo: boolean; model: string } = { yolo: true, model: agent === 'antigrav' ? 'gemini-2.5-flash' : 'auto' };
+    let config: { yolo: boolean; model: string } = {
+      yolo: true,
+      model: agent === 'antigrav' ? 'gemini-2.5-flash' : 'auto',
+    };
     try {
       const raw = store.getMeta(`assist_worker_config_${agent}`);
       if (raw) config = { ...config, ...JSON.parse(raw) };

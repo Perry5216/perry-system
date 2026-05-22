@@ -349,7 +349,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     res.json({
       slug,
       target: target?.target ?? null,
-      agent: target?.agent ?? 'claude',
+      agent: target?.agent ?? 'anthropic',
       maxWorkers: target?.maxWorkers ?? null,
       startedAt: target?.startedAt ?? null,
       ...progress,
@@ -372,7 +372,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     if (!Number.isFinite(t) || t <= 0) {
       return res.status(400).json({ error: 'target must be a positive number' });
     }
-    const payload = { target: Math.floor(t), slug, agent: agent || 'claude', maxWorkers: Number(maxWorkers) || null, startedAt: new Date().toISOString() };
+    const payload = { target: Math.floor(t), slug, agent: agent || 'anthropic', maxWorkers: Number(maxWorkers) || null, startedAt: new Date().toISOString() };
     projectEngine.getStateStore().setMeta(targetKey(slug), JSON.stringify(payload));
     res.json({ ok: true, ...payload });
   });
@@ -1257,7 +1257,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // The task queue (pipeline_step_assist) is shared — whichever agent's
   // mode/fire-flag fires first races to claim. Pending count is therefore
   // the same for both; everything else is per-agent.
-  const VALID_AGENTS = ['claude', 'antigrav'] as const;
+  const VALID_AGENTS = ['anthropic', 'antigrav', 'codex'] as const;
   type AssistAgent = typeof VALID_AGENTS[number];
   const isAgent = (a: any): a is AssistAgent => VALID_AGENTS.includes(a);
   const modeKey   = (a: AssistAgent) => `assist_worker_mode_${a}`;
@@ -1270,8 +1270,9 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // these in each spawn payload; perry-worker's listener builds the actual
   // command line from them. Defaults match the prior hardcoded values.
   const DEFAULT_CONFIG: Record<AssistAgent, { yolo: boolean; model: string }> = {
-    claude:   { yolo: true,  model: 'auto' },       // claude doesn't expose model via CLI; yolo = --dangerously-skip-permissions
-    antigrav: { yolo: true,  model: 'gemini-2.5-flash' },
+    anthropic: { yolo: true, model: 'auto' },       // CLI doesn't expose model selection; yolo = --dangerously-skip-permissions
+    antigrav:  { yolo: true, model: 'gemini-2.5-flash' },
+    codex:     { yolo: true, model: 'auto' },       // model picked by ChatGPT subscription tier; yolo = --dangerously-bypass-approvals-and-sandbox
   };
   const readConfig = (store: any, a: AssistAgent) => {
     try {
@@ -1308,7 +1309,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
       ).get().n as number;
       res.json({
         pending, claimed,
-        claude:   agentSlice(store, 'claude'),
+        anthropic: agentSlice(store, 'anthropic'),
         antigrav: agentSlice(store, 'antigrav'),
       });
     } catch (e: any) {
@@ -1319,7 +1320,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // POST — set auto-loop toggle for ONE agent. body: { agent, mode }
   router.post('/assist-mode', (req, res) => {
     const { agent, mode } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     if (mode !== 'auto' && mode !== 'manual') return res.status(400).json({ error: "mode must be 'auto' or 'manual'" });
     projectEngine.getStateStore().setMeta(modeKey(agent), mode);
     log.info('Assist worker mode set', { agent, mode });
@@ -1329,7 +1330,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // POST — one-shot manual fire request for ONE agent. body: { agent }
   router.post('/fire-assist-worker', (req, res) => {
     const { agent } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     const now = new Date().toISOString();
     projectEngine.getStateStore().setMeta(fireKey(agent), now);
     log.info('Assist worker fire requested (manual)', { agent, at: now });
@@ -1340,7 +1341,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // body: { agent }
   router.post('/assist-fired', (req, res) => {
     const { agent } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     const now = new Date().toISOString();
     const store: any = projectEngine.getStateStore();
     store.setMeta(lastKey(agent), now);
@@ -1349,11 +1350,11 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   });
 
   // POST — update per-agent CLI config (yolo flag, model). Body:
-  //   { agent: 'claude'|'antigrav', yolo?: boolean, model?: string }
+  //   { agent: 'anthropic'|'antigrav'|'codex', yolo?: boolean, model?: string }
   // Only the provided fields are updated; rest stay as before.
   router.post('/assist-config', (req, res) => {
     const { agent, ...patch } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     const store: any = projectEngine.getStateStore();
     const current = readConfig(store, agent);
     const updated: any = { ...current };
@@ -1367,7 +1368,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // POST — daemon heartbeat. body: { agent }
   router.post('/assist-heartbeat', (req, res) => {
     const { agent } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     projectEngine.getStateStore().setMeta(heartKey(agent), new Date().toISOString());
     res.json({ ok: true });
   });
@@ -1383,7 +1384,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
 
   router.post('/daemon-control', (req, res) => {
     const { agent, action } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     if (action !== 'start' && action !== 'stop') return res.status(400).json({ error: "action must be 'start' or 'stop'" });
     const store: any = projectEngine.getStateStore();
     const now = new Date().toISOString();
@@ -1416,7 +1417,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // body: { agent, action }
   router.post('/daemon-control-ack', (req, res) => {
     const { agent } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     const store: any = projectEngine.getStateStore();
     store.db.prepare("DELETE FROM meta WHERE key=?").run(controlKey(agent));
     res.json({ ok: true, agent });
@@ -1426,7 +1427,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // for this agent within the last 5min (gives daemons time to react).
   router.get('/daemon-stop-check', (req, res) => {
     const agent = req.query.agent as string;
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     const raw = projectEngine.getStateStore().getMeta(stopRequestKey(agent));
     if (!raw) return res.json({ shouldStop: false });
     const age = (Date.now() - new Date(raw).getTime()) / 1000;
@@ -1436,7 +1437,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   // POST — daemon acks the stop (so it doesn't fire again on next start).
   router.post('/daemon-stop-ack', (req, res) => {
     const { agent } = req.body || {};
-    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be 'claude' or 'antigrav'" });
+    if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     const store: any = projectEngine.getStateStore();
     store.db.prepare("DELETE FROM meta WHERE key=?").run(stopRequestKey(agent));
     res.json({ ok: true, agent });
