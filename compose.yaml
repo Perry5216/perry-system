@@ -604,3 +604,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  telemetry-collector:
+    build:
+      context: ./telemetry-server
+      dockerfile: Dockerfile
+    container_name: telemetry-collector
+    mem_limit: 512m
+    pids_limit: 50
+    restart: unless-stopped
+    ports:
+      - "4444:4444"
+    volumes:
+      - ./data/telemetry:/app/data
+    environment:
+      - PORT=4444
+      - PERRY_TELEMETRY_LOG_PATH=/app/data/telemetry_logs.jsonl
+
