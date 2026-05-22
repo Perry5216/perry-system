@@ -91,29 +91,37 @@ export class WorkerCoordinator {
   }
 
   /**
-   * One-shot migration: rename meta rows + target_pool rows that still
-   * use the legacy agent slug for the Anthropic worker. Older installs
-   * stored per-agent state under `assist_*_claude` keys; the agent enum
-   * has been renamed and the new code looks under `assist_*_anthropic`.
+   * One-shot migration: rename legacy meta rows that still use the prior
+   * agent slug for the Anthropic worker. Older installs stored per-agent
+   * state under `assist_*_claude` keys (and the Pair Mining target stored
+   * `assist_worker_agent = 'claude'`); the agent enum has been renamed
+   * and the new code expects `assist_*_anthropic` / `'anthropic'`.
    * Idempotent — no-op after the first boot post-upgrade.
    */
   private migrateLegacyAgentMeta(): void {
+    const store: any = this.projectEngine.getStateStore();
+    const db = store?.db;
+    if (!db) return;
+    // Each statement in its own try so a single failure doesn't skip the
+    // others. All operations are conditional on legacy data existing.
+    let keysRenamed = 0;
+    let valuesUpdated = 0;
     try {
-      const store: any = this.projectEngine.getStateStore();
-      const db = store?.db;
-      if (!db) return;
-      const renamed = db.prepare(
+      keysRenamed = db.prepare(
         "UPDATE meta SET key = REPLACE(key, '_claude', '_anthropic') WHERE key LIKE 'assist_%_claude'"
-      ).run();
-      const targetUpdated = db.prepare(
-        "UPDATE target_pool SET agent = 'anthropic' WHERE agent = 'claude'"
-      ).run();
-      if (renamed.changes > 0 || targetUpdated.changes > 0) {
-        this.log.info('legacy agent meta migrated', { metaRows: renamed.changes, targetPoolRows: targetUpdated.changes });
-      }
+      ).run().changes;
     } catch (e: any) {
-      // Don't fail boot — a missing table or no rows is fine.
-      this.log.warn('legacy agent meta migration skipped', { error: e.message });
+      this.log.warn('legacy meta-key rename skipped', { error: e.message });
+    }
+    try {
+      valuesUpdated = db.prepare(
+        "UPDATE meta SET value = 'anthropic' WHERE key = 'assist_worker_agent' AND value = 'claude'"
+      ).run().changes;
+    } catch (e: any) {
+      this.log.warn('legacy meta-value rewrite skipped', { error: e.message });
+    }
+    if (keysRenamed > 0 || valuesUpdated > 0) {
+      this.log.info('legacy agent meta migrated', { keysRenamed, valuesUpdated });
     }
   }
 
