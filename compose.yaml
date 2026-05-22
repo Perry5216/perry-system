@@ -154,6 +154,7 @@ services:
       # this URL. Required: spawns are dropped with an error log if unset.
       - PERRY_WORKER_URL=${PERRY_WORKER_URL:-http://perry-worker:4711}
       - PERRY_WORKER_SECRET=${PERRY_WORKER_SECRET:-}
+      - PERRY_CORS_ORIGINS=${PERRY_CORS_ORIGINS:-}
       # PERRY_MCP_HTTP_PORT is set per-process in the Dockerfile CMD, NOT
       # container-wide — otherwise every child MCP process (e.g. the
       # dashboard-api's internal stdio MCP clients) tries to bind the

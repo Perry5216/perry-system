@@ -22,7 +22,7 @@ itself is domain-agnostic.
 - **LoRA fine-tuning pipeline** — train domain-specific adapters from your own curated data; auto-rebuild Modelfile and re-tag in Ollama
 - **RAG corpus** — SQLite FTS5 + vector embeddings; pluggable per domain
 - **VPN-routed scouting** — gluetun containers with NordVPN + TorGuard exits for any traffic that needs IP rotation or geographic diversity
-- **React + TypeScript dashboard** — fleet view, skill curation, analytics, secrets vault
+- **React + TypeScript dashboard** — fleet view, project pipelines, Goals Board (Kanban visualizer), Skills Librarian (curation, telemetry, pin/unpin, merge, backup & rollback), analytics, secrets vault
 - **Subscription-only cost model** — Claude Pro/Max + Gemini Advanced via the official CLIs; metered API providers are blocked at the runtime level by design
 
 **The first domain — novel writing**
@@ -84,7 +84,7 @@ gemini login
 # Bring up the stack
 docker compose up -d
 
-# Dashboard at http://localhost:3847 once perry reports healthy
+# Dashboard at http://localhost:3847 (or your custom domain like https://perry.5216perry.uk) once perry reports healthy
 ```
 
 The first boot pulls ~80 GB of model weights — give it 15–30 minutes on first run.
@@ -138,6 +138,9 @@ for the full breakdown, dependencies, and effort estimates.
 - [ ] Theme picker — additional dashboard themes beyond the cyan/purple default
 
 **Recently shipped**
+- ✅ Goals Board (Kanban visualizer) for tracking /goal loops, subgoal DAG node statuses, and dependencies
+- ✅ Skills Librarian (dashboard tab to curate proposals, view skill telemetry, pin/unpin, merge, run Passes, backups & rollbacks)
+- ✅ CORS configuration (`PERRY_CORS_ORIGINS`) and Docker hosting via Cloudflare Tunnels (e.g. perry.5216perry.uk)
 - ✅ Event-driven self-learning framework (single `LearningCore`, auto-applies to new domains)
 - ✅ FTS5 session search + RAG-indexed verified-success corpus per pen
 - ✅ ~30 KB tokens saved per book via three rounds of prompt compression

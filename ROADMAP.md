@@ -14,6 +14,23 @@ models. Shareable, idiot-proof, open-source. ([[shareability-goal]],
 
 ---
 
+## ✅ Shipped (as of 2026-05-22)
+
+### Public Deployment & Domain Setup
+- **CORS configuration support** — added `PERRY_CORS_ORIGINS` to `compose.yaml`, `.env.sample` and `.env` to enable secure cross-origin dashboard requests.
+- **Custom public domain exposure** — configured public access routing to the dashboard and API under `perry.5216perry.uk` inside Docker using Cloudflare Tunnel.
+
+### Goals Board
+- **Kanban goals board visualizer** — added a brand new dashboard view and coordinator APIs to track complex `/goal` loops, subgoal DAG node status transitions (`pending`, `active`, `completed`, `failed`), and task dependencies.
+- **Director command tunnel** — enabled real-time interaction and command tunneling via the dashboard Goals panel directly to `/api/projects/:id/chat`.
+
+### Skills Librarian
+- **Curation proposals queue** — human approval interface for worker-proposed and service-proposed skills, backed by `LibrarianService` integrations.
+- **LLM-assisted skill merging** — allow operators to merge/synthesize duplicate or highly overlapping guidelines into a single parameterized skill, with automatic codebase-wide reference updates.
+- **Skill locking & pins** — pin/unpin skills to protect them from garbage collection sweeps or librarian cleanup passes.
+- **Manual/Automatic backups** — automatically snapshot skills before mutations (archiving/merging) and enable one-click rollback of active skills to past backup timestamps.
+- **Execution telemetry** — gather historical hit rates, success rates, and average execution durations for installed skills.
+
 ## ✅ Shipped (as of 2026-05-21)
 
 ### Core pipeline

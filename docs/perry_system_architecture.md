@@ -149,7 +149,7 @@ wiring beyond the emit and the consume.
 
 Configuration flows through three layers, from least-trusted to most-trusted:
 
-1. **`.env`** — Bootstrap-only. Holds `PERRY_VAULT_KEY` (the master key that unlocks everything else), `PERRY_API_KEY` (gates `/api/*`), and any external integrations that need values before the vault is unlocked (Reddit OAuth, Cloudflare tunnel token, WireGuard private keys). Gitignored.
+1. **`.env`** — Bootstrap-only. Holds `PERRY_VAULT_KEY` (the master key that unlocks everything else), `PERRY_API_KEY` (gates `/api/*`), `PERRY_CORS_ORIGINS` (comma-separated allowed origins for CORS validation), and any external integrations that need values before the vault is unlocked (Reddit OAuth, Cloudflare tunnel token, WireGuard private keys). Gitignored.
 2. **Encrypted vault** (`perry/config/.vault/vault.enc.json`) — Migrated from `.env` on first boot. After bootstrap, secrets are added/rotated through the dashboard Secrets panel; `.env` becomes optional. Gitignored.
 3. **Runtime config** (`perry/config/*.json`) — Non-secret operational config (provider limits, default model picks, GC retention rules). Mix of tracked and gitignored: `default.json` + `provider_limits.json` are tracked; `user.json` is gitignored as it can contain user-specific overrides.
 
@@ -172,7 +172,7 @@ cost model collapses to "your subscriptions" + "your hardware electricity".
 
 | Service | Port | Exposure |
 |---|---|---|
-| `perry` (dashboard API) | 3847 | Host-exposed (and Cloudflare-tunnel) |
+| `perry` (dashboard API) | 3847 | Host-exposed (and Cloudflare-tunnel routing to `perry.5216perry.uk`) |
 | `comfyui` | 8188 | Host-exposed (for direct ComfyUI access) |
 | `ollama` | 11434 | Internal only |
 | `ollama-embeddings` | 11434 | Internal only |
@@ -221,6 +221,8 @@ Key tables:
 | `pen_names` | Pen registry for the novel-writing domain |
 | `rag_chunks` | RAG corpus rows. `kind` column discriminates `learning_chapter`, `learning_calibration`, `learning_cover_prompt`, `scout_finding`, `verified_scout_finding`, `chat_memory`, etc. |
 | `rag_chunks_fts` | SQLite FTS5 virtual table over `rag_chunks` for BM25 search |
+| `librarian_proposals` | Stores skill lifecycle proposals created by the automated LLM librarian pass (archive/merge requests awaiting human approval) |
+| `skill_telemetry` | Telemetry logs for applied skills, tracking invocation performance, duration, errors, and success/failure flags |
 
 The RAG corpus uses a single table with a `kind` discriminator rather than per-kind tables. New domains add new `kind` values without schema migration.
 
@@ -311,12 +313,18 @@ The **Fleet** tab displays a visual map of all active agent nodes, current step 
 
 ![Perry Dashboard UI Mockup](./images/perry_dashboard.png)
 
-### Self-Learning & Curation Panel
+### Goals Board (Kanban & DAG Visualizer)
 
-The **Self-Learn** tab is divided into three key sub-tabs:
+The **Goals** tab displays a Kanban-style goals board that tracks complex, multi-turn `/goal` runs. It visualizes the hierarchical subgoal Directed Acyclic Graph (DAG) representing tasks, execution progress, dependencies, and state transitions (e.g., `pending`, `active`, `completed`, `failed`). Operators can monitor the loop, inspect turn counts, and interact with the agent using direct command tunneling routed via the Express coordinator chat handler.
+
+### Self-Learning & Curation Panel (Skills Librarian)
+
+The **Self-Learn** tab surfaces Perry's self-learning machinery across four key sub-tabs:
 1. **Activity strip**: Displays five producer cards (Director, Scout, Audit, GC, Prompt-Builder) that track active learning observations. They pulse purple when approaching threshold limits.
-2. **Pending & Installed Skills**: Lists procedural suggestions authored by workers or backend services. Operators can read the frontmatter rules, edit bodies, and approve or reject them.
-3. **Pen Profiles**: Direct editor for pen-name specific `SOUL.md` (defining identity) and `LESSONS.md` (re-distilled audit rules) for the novel-writing domain.
+2. **Sessions**: Allows FTS5 keyword and BM25 search over completed step outputs to view what the system learned and when.
+3. **Skills**: Houses the **Skills Librarian** interface. It lists installed and pending skills (slash commands). Operators can approve or reject proposals, view historical telemetry/analytics (success rates, call volume, and average durations), toggle pinned status (protecting skills from deletion), and manually trigger a librarian pass (which runs an LLM review to detect and merge duplicate or redundant rules) or roll back the entire skills directory to past backup snapshots.
+4. **Pen Profiles**: Direct editor for pen-name specific `SOUL.md` (defining identity) and `LESSONS.md` (re-distilled audit rules) for the novel-writing domain.
+5. **Evolution**: Displays a chronological timeline of skills applied, promotions, and auto-archiving events alongside confidence scores and suggested installs.
 
 ![Perry Self-Learning UI Mockup](./images/perry_self_learning.png)
 
