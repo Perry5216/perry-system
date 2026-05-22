@@ -23,7 +23,7 @@ import { Logger } from '@perry/core';
 import { readdir, readFile, unlink, mkdir, writeFile, rename } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { StateStore, LibrarianService } from '@perry/projects';
+import { StateStore, LibrarianService, SkillOptimizerService } from '@perry/projects';
 import { AIRouter } from '@perry/ai';
 
 
@@ -506,6 +506,21 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
       res.json({ history, stats });
     } catch (err: any) {
       log.error('GET /skills/telemetry failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/optimize', async (req, res) => {
+    try {
+      const { service, name } = req.body || {};
+      if (!service || !name) {
+        return res.status(400).json({ error: 'service and name are required' });
+      }
+      const optimizer = new SkillOptimizerService(workspaceDir, stateStore, aiRouter, log);
+      const result = await optimizer.runOptimization(service, name);
+      res.json(result);
+    } catch (err: any) {
+      log.error('POST /skills/optimize failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

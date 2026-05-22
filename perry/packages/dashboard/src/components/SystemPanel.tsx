@@ -44,6 +44,7 @@ export function SystemPanel() {
   const [dnaEnabled, setDnaEnabled] = useState<boolean | null>(null);
   const [povBlocking, setPovBlocking] = useState<boolean | null>(null);
   const [sceneByScene, setSceneByScene] = useState<boolean | null>(null);
+  const [wifeModeEnabled, setWifeModeEnabled] = useState<boolean | null>(null);
   const [pens, setPens] = useState<Array<{ slug: string; displayName?: string }>>([]);
   const [selectedPen, setSelectedPen] = useState<string>('');
   const [anchors, setAnchors] = useState<AnchorEntry[]>([]);
@@ -63,17 +64,19 @@ export function SystemPanel() {
 
   const refresh = async () => {
     try {
-      const [r, dna, pov, scene, p] = await Promise.all([
+      const [r, dna, pov, scene, p, wife] = await Promise.all([
         fetch(`${API_BASE}/system/routing/steps`).then(r => r.json()),
         fetch(`${API_BASE}/system/style-dna/enabled`).then(r => r.json()),
         fetch(`${API_BASE}/system/quality/pov-gate-blocking`).then(r => r.json()),
         fetch(`${API_BASE}/system/pipeline/scene-by-scene`).then(r => r.json()),
         fetch(`${API_BASE}/pens`).then(r => r.ok ? r.json() : { pens: [] }).catch(() => ({ pens: [] })),
+        fetch(`${API_BASE}/system/wife-mode/enabled`).then(r => r.json()).catch(() => ({ enabled: null })),
       ]);
       if (r?.effective) setRouting({ effective: r.effective, overrides: r.overrides || {}, validTargets: r.validTargets });
       if (typeof dna?.enabled === 'boolean') setDnaEnabled(dna.enabled);
       if (typeof pov?.blocking === 'boolean') setPovBlocking(pov.blocking);
       if (typeof scene?.enabled === 'boolean') setSceneByScene(scene.enabled);
+      if (typeof wife?.enabled === 'boolean') setWifeModeEnabled(wife.enabled);
       const penList: Array<{ slug: string; displayName?: string }> = Array.isArray(p?.pens) ? p.pens : [];
       setPens(penList);
       if (!selectedPen && penList.length > 0) setSelectedPen(penList[0].slug);
@@ -217,6 +220,21 @@ export function SystemPanel() {
     }
   };
 
+  const toggleWifeMode = async () => {
+    if (wifeModeEnabled == null) return;
+    const next = !wifeModeEnabled;
+    setWifeModeEnabled(next);
+    try {
+      await fetch(`${API_BASE}/system/wife-mode/enabled`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+    } catch (e: any) {
+      setWifeModeEnabled(!next);
+      setError(e.message);
+    }
+  };
+
   const submitAnchor = async () => {
     if (!selectedPen || !anchorPasteText.trim()) return;
     setAnchorSubmitting(true);
@@ -298,6 +316,13 @@ export function SystemPanel() {
             onToggle={toggleSceneByScene}
             descOn="New projects split chapters at ~1200 words per scene. LoRA writes tighter prose."
             descOff="Chapters write as 3000-word monoliths (legacy). Existing projects unaffected by this toggle."
+          />
+          <ToggleCard
+            label="Wife Mode"
+            state={wifeModeEnabled}
+            onToggle={toggleWifeMode}
+            descOn="Wife responder agent runs locally on RTX 5070 Ti using MistralRP-Noromaid GGUF."
+            descOff="Wife responder agent disabled. Model is unloaded from VRAM when turned off."
           />
         </div>
       </section>

@@ -11,8 +11,8 @@
  *
  * Resolution: we look up the agent's `domain` from the registry so the
  * proposed skill's `service` field matches the actual subsystem name
- * ("books", "code", "hacking", "meta") rather than the cryptic agent id
- * ("books.critic", "hacking.recon"). One skill catalog per domain.
+ * ("code", "hacking", "meta") rather than the cryptic agent id
+ * ("code.review", "hacking.recon"). One skill catalog per domain.
  *
  * Fingerprint policy:
  *   - On success: fingerprint is the agentId. Tracks "agent X completed
@@ -25,15 +25,14 @@
  *     want to flag.
  */
 
+import crypto from 'crypto';
 import type { EventBus, Logger } from '@perry/core';
 import { getAgent } from '@perry/projects';
 
 function shortErrorHash(err: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const c = require('crypto');
   // Normalise before hashing so "Timeout: 30s" and "Timeout: 31s" collide.
   const norm = String(err).toLowerCase().replace(/\d+/g, 'N').slice(0, 200);
-  return c.createHash('sha1').update(norm).digest('hex').slice(0, 8);
+  return crypto.createHash('sha1').update(norm).digest('hex').slice(0, 8);
 }
 
 export class AgentLearningBridge {

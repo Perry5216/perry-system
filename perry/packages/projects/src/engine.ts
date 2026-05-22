@@ -144,11 +144,11 @@ export class ProjectEngine {
         const parentId = payload?.projectId;
         if (!parentId) return;
         const parent = this.stateStore.get(parentId);
-        if (!parent || parent.type !== 'book-planning') return;
+        if (!parent || (parent.type as string) !== 'book-planning') return;
 
         const children = this.stateStore.list().filter(
           p => p.parentId === parentId &&
-               p.type === 'style-calibration' &&
+               (p.type as string) === 'style-calibration' &&
                p.status !== 'completed' &&
                p.status !== 'active',
         );
@@ -219,21 +219,21 @@ export class ProjectEngine {
       if (sourceProject) {
         // Always inherit core structure settings
         inheritedContext = {
-          targetChapters: sourceProject.context.targetChapters,
-          targetWordsPerChapter: sourceProject.context.targetWordsPerChapter,
-          includePrologue: sourceProject.context.includePrologue,
-          includeEpilogue: sourceProject.context.includeEpilogue,
-        };
+          targetChapters: (sourceProject.context as any).targetChapters,
+          targetWordsPerChapter: (sourceProject.context as any).targetWordsPerChapter,
+          includePrologue: (sourceProject.context as any).includePrologue,
+          includeEpilogue: (sourceProject.context as any).includeEpilogue,
+        } as any;
 
         // Style Calibration uses targetChapters as "number of passes" —
         // a completely different meaning from the parent's chapter count.
         // Never inherit it; always use the user's explicit input.
-        if (input.type === 'style-calibration') {
-          delete inheritedContext.targetChapters;
+        if ((input.type as string) === 'style-calibration') {
+          delete (inheritedContext as any).targetChapters;
         }
 
         // For revision templates, also inherit per-chapter word counts
-        const isRevisionTemplate = input.type === 'deep-revision' || input.type === 'revision-execution';
+        const isRevisionTemplate = (input.type as string) === 'deep-revision' || (input.type as string) === 'revision-execution';
         if (isRevisionTemplate) {
           const chapterWordCounts: Record<number, number> = {};
           for (const step of sourceProject.steps) {
@@ -241,21 +241,21 @@ export class ProjectEngine {
               chapterWordCounts[step.chapterNumber] = step.result.trim().split(/\s+/).length;
             }
           }
-          inheritedContext.chapterWordCounts = chapterWordCounts;
+          (inheritedContext as any).chapterWordCounts = chapterWordCounts;
         }
 
         this.log.info('Inherited context from parent project', {
           sourceProjectId: sourceProject.id,
           sourceTitle: sourceProject.title,
-          targetChapters: inheritedContext.targetChapters,
-          targetWordsPerChapter: inheritedContext.targetWordsPerChapter,
+          targetChapters: (inheritedContext as any).targetChapters,
+          targetWordsPerChapter: (inheritedContext as any).targetWordsPerChapter,
         });
 
         // Style Calibration: auto-populate description from parent book bible.
         // IMPORTANT: stateStore.get() returns steps with result=placeholder string.
         // Real content is in: (1) steps table in SQLite, (2) markdown files on disk.
         // We use the steps table first, disk files as fallback.
-        if (input.type === 'style-calibration' && !input.description) {
+        if ((input.type as string) === 'style-calibration' && !input.description) {
           try {
             const bibleLabels = ['character', 'world', 'faction'];
             const bibleSteps = sourceProject!.steps.filter(
@@ -352,8 +352,8 @@ export class ProjectEngine {
     // Resolve calibration anti-patterns (universal + pen-specific) once, here,
     // so styleCalibration's buildSteps sees a pre-merged list rather than
     // hardcoding a Digital-Drift-flavoured one for every pen.
-    if (input.type === 'style-calibration') {
-      const merged = resolveCalibrationAntiPatterns(this.stateStore, context.penNameSlug);
+    if ((input.type as string) === 'style-calibration') {
+      const merged = resolveCalibrationAntiPatterns(this.stateStore, (context as any).penNameSlug);
       context.config = { ...(context.config || {}), calibrationAntiPatterns: merged };
     }
 

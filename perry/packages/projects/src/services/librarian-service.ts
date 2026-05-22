@@ -465,6 +465,40 @@ List the names of any redundant skills that should be archived.`;
       const { skillA, skillB, newSkillName } = prop.details;
       await this.executeMerge(service, skillA, skillB, newSkillName);
       this.stateStore.updateLibrarianProposalStatus(id, 'executed');
+    } else if (prop.action === 'optimize') {
+      const { mutated, original } = prop.details;
+      if (!mutated) throw new Error('Mutation content missing in proposal details');
+
+      const installedDir = join(this.workspaceDir, 'skills-installed');
+      const paths = [
+        join('/app/.claude/commands', `${skillName}.md`),
+        join(installedDir, service, `${skillName}.md`),
+      ];
+      let skillPath: string | null = null;
+      for (const p of paths) {
+        if (existsSync(p)) {
+          skillPath = p;
+          break;
+        }
+      }
+      if (!skillPath) {
+        const dstDir = service === 'worker' ? '/app/.claude/commands' : join(installedDir, service);
+        if (!existsSync(dstDir)) mkdirSync(dstDir, { recursive: true });
+        skillPath = join(dstDir, `${skillName}.md`);
+      }
+
+      const currentContent = existsSync(skillPath) ? readFileSync(skillPath, 'utf-8') : original || '';
+
+      await this.createBackup('librarian_optimize', [{
+        name: skillName,
+        service,
+        path: skillPath,
+        content: currentContent
+      }]);
+
+      writeFileSync(skillPath, mutated, 'utf-8');
+      this.log.info('Successfully applied skill prompt optimization', { service, skillName, path: skillPath });
+      this.stateStore.updateLibrarianProposalStatus(id, 'executed');
     }
   }
 

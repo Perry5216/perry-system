@@ -23,6 +23,9 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import type { Logger, EventBus } from '@perry/core';
+import type { StateStore } from '@perry/projects';
+import { SkillOptimizerService } from '@perry/projects';
+import type { AIRouter } from '@perry/ai';
 
 const SCORES_FILE = 'skill-scores.json';
 const EVOLUTION_LOG = 'evolution-log.jsonl';
@@ -62,11 +65,14 @@ export class SkillEvolution {
   private dirty = false;
   private flushTimer: NodeJS.Timeout | null = null;
   private autoPromoteTimer: NodeJS.Timeout | null = null;
+  private lastOptimizedAt: Map<string, number> = new Map();
 
   constructor(
     private workspaceDir: string,
     private log: Logger,
     private eventBus?: EventBus,
+    private stateStore?: StateStore,
+    private aiRouter?: AIRouter,
   ) {
     this.scoresPath = join(workspaceDir, SCORES_FILE);
     this.evolutionPath = join(workspaceDir, EVOLUTION_LOG);
@@ -95,6 +101,52 @@ export class SkillEvolution {
         this.recordSkillApplied(p.source, p.metadata.skill, p.metadata);
       }
     });
+
+    this.eventBus.on('skill:execution', (p: { service: string; name: string; success: boolean; durationMs: number; error: string | null }) => {
+      void this.handleSkillExecution(p);
+    });
+  }
+
+  private async handleSkillExecution(p: { service: string; name: string; success: boolean; durationMs: number; error: string | null }): Promise<void> {
+    if (!this.stateStore || !this.aiRouter) {
+      return;
+    }
+    const { service, name, success } = p;
+    const key = `${service}::${name}`;
+    const now = Date.now();
+    const lastOptimized = this.lastOptimizedAt.get(key) || 0;
+
+    // Throttle checks
+    if (!success) {
+      // Failure: optimize immediately, debounced by 60s
+      if (now - lastOptimized < 60_000) {
+        this.log.debug('Skipping auto-evolution optimization on failure (throttled)', { service, name });
+        return;
+      }
+    } else {
+      // Success: optimize periodically, debounced by 10 mins (600,000 ms)
+      if (now - lastOptimized < 600_000) {
+        return;
+      }
+    }
+
+    this.lastOptimizedAt.set(key, now);
+    this.log.info('Triggering background skill auto-evolution', { service, name, success });
+
+    // Run optimization asynchronously in the background so it doesn't block the execution pipeline.
+    setTimeout(async () => {
+      try {
+        const optimizer = new SkillOptimizerService(this.workspaceDir, this.stateStore!, this.aiRouter!, this.log);
+        const result = await optimizer.runOptimization(service, name);
+        if (result.success) {
+          this.log.info('Background skill auto-evolution succeeded and staged a proposal', { service, name, proposalId: result.proposalId });
+        } else {
+          this.log.info('Background skill auto-evolution completed without new proposals', { service, name, reason: result.reason });
+        }
+      } catch (err: any) {
+        this.log.error('Background skill auto-evolution failed', { service, name, error: err.message });
+      }
+    }, 0);
   }
 
   // ─── B. Scoring ────────────────────────────────────────────────────────

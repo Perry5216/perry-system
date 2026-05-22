@@ -1,8 +1,8 @@
 /**
  * DomainRegistry — file-based storage for Perry's domain definitions.
  *
- * A "domain" is the task vertical Perry is being pointed at (books,
- * code-review, security-research, etc.). The platform itself is
+ * A "domain" is the task vertical Perry is being pointed at (code,
+ * email, hacking, etc.). The platform itself is
  * domain-agnostic; domain definitions tell the dashboard which projects
  * belong where, which color/icon to render, and (for the plugin contract)
  * which dashboard panels to surface.
@@ -10,7 +10,7 @@
  * Storage layout:
  *   workspace/domains/{id}.json
  *
- * `books` is the built-in default and is auto-created on first boot if
+ * `code` is the built-in default and is auto-created on first boot if
  * the file is missing. User-created domains are added via the dashboard's
  * Domains panel + POST /api/domains.
  */
@@ -27,7 +27,7 @@ export interface DomainSkillRef {
 export interface DomainDefinition {
   /** Slug identifier — lowercase-kebab. Used as the `domain` field on projects. */
   id: string;
-  /** Display name (e.g. "Books", "Code Review"). */
+  /** Display name (e.g. "Code", "Email"). */
   label: string;
   /** One-line purpose statement. */
   description: string;
@@ -41,6 +41,11 @@ export interface DomainDefinition {
    *  a skill by service + name. Consumers can read this list when initialising
    *  domain-specific behavior. Empty array if none configured. */
   defaultSkills: DomainSkillRef[];
+  /** Allowed MCP servers for this domain. If empty, no MCP servers are allowed.
+   *  If undefined/null, all MCP servers are allowed (legacy behavior). */
+  allowedMcpServers?: string[];
+  /** Selected base model for LLM operations in this domain. */
+  baseModel?: string;
   /** Whether the domain is a built-in (locked from deletion). */
   builtin: boolean;
   createdAt: string;
@@ -55,6 +60,7 @@ const BUILTIN_CODE: DomainDefinition = {
   icon: 'code',
   dashboardPanels: ['projects', 'self-learning', 'trajectories', 'analytics', 'models'],
   defaultSkills: [],
+  baseModel: 'workers',
   builtin: true,
   createdAt: '2026-05-13T00:00:00.000Z',
   updatedAt: '2026-05-13T00:00:00.000Z',
@@ -88,7 +94,11 @@ export class DomainRegistry {
       return readdirSync(this.dir)
         .filter(f => f.endsWith('.json'))
         .map(f => {
-          try { return JSON.parse(readFileSync(join(this.dir, f), 'utf-8')) as DomainDefinition; }
+          try {
+            const d = JSON.parse(readFileSync(join(this.dir, f), 'utf-8')) as DomainDefinition;
+            if (d && !d.baseModel) d.baseModel = 'workers';
+            return d;
+          }
           catch { return null; }
         })
         .filter((d): d is DomainDefinition => d !== null)
@@ -103,7 +113,11 @@ export class DomainRegistry {
     if (!safe) return null;
     const p = join(this.dir, `${safe}.json`);
     if (!existsSync(p)) return null;
-    try { return JSON.parse(readFileSync(p, 'utf-8')) as DomainDefinition; }
+    try {
+      const d = JSON.parse(readFileSync(p, 'utf-8')) as DomainDefinition;
+      if (d && !d.baseModel) d.baseModel = 'workers';
+      return d;
+    }
     catch { return null; }
   }
 
@@ -124,6 +138,8 @@ export class DomainRegistry {
         ? input.dashboardPanels
         : ['projects', 'self-learning', 'trajectories'],
       defaultSkills: Array.isArray(input.defaultSkills) ? input.defaultSkills : [],
+      allowedMcpServers: Array.isArray(input.allowedMcpServers) ? input.allowedMcpServers : undefined,
+      baseModel: input.baseModel ?? 'workers',
       builtin: false,
       createdAt: now,
       updatedAt: now,
@@ -146,6 +162,15 @@ export class DomainRegistry {
       createdAt: existing.createdAt,
       updatedAt: new Date().toISOString(),
     };
+
+    if ('allowedMcpServers' in patch) {
+      if (patch.allowedMcpServers === null || patch.allowedMcpServers === undefined) {
+        delete merged.allowedMcpServers;
+      } else if (Array.isArray(patch.allowedMcpServers)) {
+        merged.allowedMcpServers = patch.allowedMcpServers;
+      }
+    }
+
     writeFileSync(join(this.dir, `${id}.json`), JSON.stringify(merged, null, 2), 'utf-8');
     return merged;
   }

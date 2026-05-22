@@ -20,7 +20,8 @@
 
 import { useEffect, useState } from 'react';
 import { PanelHeader } from './PanelHeader';
-import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileText, Sparkles, Edit3, Save, Pin, Trash2, Activity, Shield, Layers, Loader2 } from 'lucide-react';
+import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileText, Sparkles, Edit3, Save, Pin, Trash2, Activity, Shield, Layers, Loader2, AlertTriangle, Wand2 } from 'lucide-react';
+import { DiffViewer } from './DiffViewer';
 
 const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV)
   ? 'http://localhost:4000/api' : '/api';
@@ -405,10 +406,12 @@ function SkillsTab() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState<{ filename: string; raw: string } | null>(null);
+  const [optimizing, setOptimizing] = useState<string | null>(null);
+  const [diffingProposal, setDiffingProposal] = useState<any | null>(null);
 
   // Librarian states
   const [pins, setPins] = useState<Array<{ service: string; name: string }>>([]);
-  const [proposals, setProposals] = useState<Array<{ id: string; skill_name: string; service: string; action: string; status: string; details: string }>>([]);
+  const [proposals, setProposals] = useState<Array<{ id: string; skill_name: string; service: string; action: string; status: string; details: any }>>([]);
   const [telemetry, setTelemetry] = useState<{
     stats: Array<{ service: string; name: string; total: number; successRate: number; avgDurationMs: number }>;
     history: Array<{ id: string; service: string; skill_name: string; timestamp: string; success: number; duration_ms: number; error: string | null }>;
@@ -472,6 +475,31 @@ function SkillsTab() {
   };
 
   useEffect(() => { refresh(serviceFilter); }, [serviceFilter]);
+
+  const optimizeSkill = async (service: string, name: string) => {
+    if (!confirm(`Run GEPA Prompt Optimization for skill "${service}/${name}"?\nThis will analyze past failures, generate mutations, backtest them, and propose improvements.`)) return;
+    setOptimizing(`${service}/${name}`);
+    setErr(null);
+    try {
+      const r = await fetch(`${API_BASE}/skills/optimize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service, name }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Optimization failed');
+      if (data.success) {
+        alert(`Optimization completed! A new proposal was created: ${data.proposalId}`);
+      } else {
+        alert(`Optimization finished but no improvements found: ${data.reason || 'none'}`);
+      }
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setOptimizing(null);
+    }
+  };
 
   const preview = async (filename: string) => {
     try {
@@ -751,6 +779,10 @@ function SkillsTab() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 380, overflowY: 'auto' }}>
                 {installed.map(s => {
                   const isPinned = pins.some(p => p.service === s.service && p.name === s.name);
+                  const stat = telemetry.stats.find(st => st.service === s.service && st.name === s.name);
+                  const isLowPerf = stat && stat.total >= 3 && stat.successRate < 0.85;
+                  const isSvcName = `${s.service}/${s.name}`;
+                  const isCurrentlyOptimizing = optimizing === isSvcName;
                   return (
                     <div key={`${s.service}::${s.filename}`} style={skillRow}>
                       <div style={{ flex: 1 }}>
@@ -762,11 +794,31 @@ function SkillsTab() {
                               <Pin size={10} style={{ fill: '#c4a8ff' }} /> PINNED
                             </span>
                           )}
+                          {isLowPerf && (
+                            <span style={lowPerfWarningStyle} title={`Success rate: ${(stat.successRate * 100).toFixed(1)}% over ${stat.total} runs. Optimization recommended.`}>
+                              <AlertTriangle size={10} style={{ color: '#FCA5A5', marginRight: 3 }} /> LOW PERF
+                            </span>
+                          )}
                         </div>
                         <div style={skillDesc}>{s.description}</div>
-                        <div style={skillMeta}><code>{s.filename}</code> · {s.bodyLength} chars</div>
+                        <div style={skillMeta}>
+                          <code>{s.filename}</code> · {s.bodyLength} chars
+                          {stat && ` · Runs: ${stat.total} · Success: ${(stat.successRate * 100).toFixed(0)}%`}
+                        </div>
                       </div>
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <button
+                          onClick={() => optimizeSkill(s.service, s.name)}
+                          disabled={isCurrentlyOptimizing}
+                          style={isLowPerf ? btnOptimizeHighlight(isCurrentlyOptimizing) : btnGhost}
+                          title="Run GEPA Prompt Optimization"
+                        >
+                          {isCurrentlyOptimizing ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Wand2 size={14} />
+                          )}
+                        </button>
                         <button
                           onClick={() => togglePin(s.service, s.name)}
                           style={isPinned ? btnPinActive : btnGhost}
@@ -992,11 +1044,36 @@ function SkillsTab() {
                       </div>
                       {p.details && (
                         <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: 2 }}>
-                          {p.details}
+                          {(() => {
+                            if (typeof p.details === 'string') return p.details;
+                            if (typeof p.details === 'object' && p.details !== null) {
+                              const d = p.details;
+                              return (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                  {d.reason && <div>{d.reason}</div>}
+                                  {d.telemetry && (
+                                    <div style={{ color: 'var(--secondary)', fontSize: '0.68rem', fontFamily: 'var(--font-mono)' }}>
+                                      Telemetry: <span style={{ color: '#86EFAC', fontWeight: 'bold' }}>{d.telemetry.improvementScore}</span> improvement over {d.telemetry.failureCount} failure(s) / {d.telemetry.successCount} success(s)
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
                         </div>
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      {p.action === 'optimize' && p.details && p.details.original && p.details.mutated && (
+                        <button
+                          onClick={() => setDiffingProposal(p)}
+                          style={btnGhost}
+                          title="View original vs mutated diff"
+                        >
+                          <FileText size={14} />
+                        </button>
+                      )}
                       <button onClick={() => approveProposal(p.id)} style={btnSuccess} title="Approve Recommendation">
                         <Check size={14} />
                       </button>
@@ -1109,6 +1186,16 @@ function SkillsTab() {
             }}>{previewing.raw}</pre>
           </div>
         </div>
+      )}
+
+      {diffingProposal && (
+        <DiffViewer
+          before={diffingProposal.details.original}
+          after={diffingProposal.details.mutated}
+          beforeLabel="Original Skill Instructions"
+          afterLabel="Evolved Mutated Instructions (GEPA)"
+          onClose={() => setDiffingProposal(null)}
+        />
       )}
     </div>
   );
@@ -1596,6 +1683,34 @@ const btnDangerDisabled: React.CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
 };
+
+const lowPerfWarningStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: '0.6rem',
+  padding: '1px 5px',
+  borderRadius: 3,
+  background: 'rgba(239,68,68,0.15)',
+  border: '1px solid rgba(239,68,68,0.4)',
+  color: '#FCA5A5',
+  letterSpacing: 0.5,
+  display: 'inline-flex',
+  alignItems: 'center',
+};
+
+function btnOptimizeHighlight(disabled?: boolean): React.CSSProperties {
+  return {
+    padding: 6,
+    background: 'rgba(34,211,238,0.15)',
+    border: '1px solid rgba(34,211,238,0.5)',
+    borderRadius: 6,
+    color: 'var(--secondary)',
+    cursor: disabled ? 'wait' : 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxShadow: '0 0 8px rgba(34,211,238,0.25)',
+  };
+}
 
 const formRow: React.CSSProperties = {
   display: 'flex',

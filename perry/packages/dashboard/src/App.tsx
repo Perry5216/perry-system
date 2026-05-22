@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { Play, Pause, AlertCircle, CheckCircle2, Circle, Loader2, Plus, X, BookOpen, Settings, Trash2, ChevronDown, ChevronRight, RotateCcw, Radio, Eye, EyeOff, ArrowDownToLine, ArrowUpFromLine, BarChart3, GitBranch, Cpu, Users } from 'lucide-react';
+import { Play, Pause, AlertCircle, CheckCircle2, Circle, Loader2, Plus, X, Settings, Trash2, ChevronDown, ChevronRight, RotateCcw, Radio, Eye, EyeOff, ArrowDownToLine, ArrowUpFromLine, BarChart3, GitBranch, Cpu, Users } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { Project, ProjectStep } from '@perry/core';
 import { FleetCanvas } from './components/FleetCanvas';
@@ -20,6 +20,7 @@ import { LeftNav, type NavTab } from './components/LeftNav';
 import { TopStatusBar } from './components/TopStatusBar';
 import { LandingChat } from './components/LandingChat';
 import { BootScreen } from './components/BootScreen';
+import { HelpGuide } from './components/HelpGuide';
 
 // ── Live Feed Types ────────────────────────────────────────────────────────────
 interface FeedEntry {
@@ -113,6 +114,85 @@ const API_BASE = import.meta.env.DEV ? 'http://localhost:4000/api' : '/api';
   };
 })();
 
+
+function cleanAuthLogs(logs: string): string {
+  if (!logs) return '';
+  // Strip ANSI escape codes
+  const withoutAnsi = logs.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+  const lines = withoutAnsi.split(/\r?\n/);
+  const filteredLines = lines.filter(line => {
+    const trimmed = line.trim().toLowerCase();
+    
+    if (trimmed.includes('security warning')) return false;
+    if (trimmed.includes('device codes are a common phishing target')) return false;
+    if (trimmed.includes('never share this code')) return false;
+    if (trimmed.includes('continue only if you started this sign-in')) return false;
+    if (trimmed.includes('if you weren') && trimmed.includes('expecting this page')) return false;
+    if (trimmed.includes('got this link from someone else')) return false;
+    if (trimmed.includes('close this tab')) return false;
+    
+    return true;
+  });
+  return filteredLines.join('\n').trim();
+}
+
+function parseDeviceAuth(logs: string): { url: string; code: string } | null {
+  if (!logs) return null;
+  // Strip ANSI escape codes
+  const cleanLogs = logs.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+  const urlMatch = cleanLogs.match(/https?:\/\/[^\s"'`]+/);
+  if (!urlMatch) return null;
+  
+  const url = urlMatch[0];
+  let code = null;
+  
+  const lines = cleanLogs.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].toLowerCase();
+    if (line.includes('one-time code') || line.includes('enter the code') || line.includes('enter this code')) {
+      const currentLineMatch = lines[i].match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b/i);
+      if (currentLineMatch) {
+        code = currentLineMatch[1].toUpperCase();
+        break;
+      }
+      for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
+        const nextLineMatch = lines[j].match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b/i);
+        if (nextLineMatch) {
+          code = nextLineMatch[1].toUpperCase();
+          break;
+        }
+        const nextLineAlphaMatch = lines[j].trim().match(/^([A-Z0-9]{8,12})$/i);
+        if (nextLineAlphaMatch) {
+          code = nextLineAlphaMatch[1].toUpperCase();
+          break;
+        }
+      }
+    }
+    if (code) break;
+  }
+  
+  if (!code) {
+    const codeMatchPhrase = logs.match(/(?:enter\s+the\s+code|code:?)\s+([A-Za-z0-9-]+)/i);
+    if (codeMatchPhrase) {
+      code = codeMatchPhrase[1].toUpperCase();
+    } else {
+      const codeMatchHyphen = logs.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b/i);
+      if (codeMatchHyphen) {
+        code = codeMatchHyphen[1].toUpperCase();
+      } else {
+        const codeMatchAlpha = logs.match(/\b([A-Z0-9]{8,12})\b/i);
+        if (codeMatchAlpha) {
+          code = codeMatchAlpha[1].toUpperCase();
+        }
+      }
+    }
+  }
+  
+  if (url && code) {
+    return { url, code };
+  }
+  return null;
+}
 
 
 export function App() {
@@ -342,8 +422,7 @@ export function App() {
   const [auditPenSlug, setAuditPenSlug] = useState<string>('a-perry');
   const [isUnloadingLibrarian, setIsUnloadingLibrarian] = useState(false);
   const [librarianLoaded, setLibrarianLoaded] = useState<{ loadedCount: number; rerouted?: boolean } | null>(null);
-  // Researcher slot — runs on configurable endpoint (writer GPU 5090 or
-  // librarian GPU 5070 Ti). Used by book-planning research phase.
+  // Researcher slot — runs on configurable endpoint. Used by planning research phase.
   const [researcherStatus, setResearcherStatus] = useState<{ loadedCount: number; gpu: string; onLibrarianGpu: boolean; currentEndpoint: string; models?: Array<{ name: string }>; mode?: string } | null>(null);
   const [isSwitchingResearcher, setIsSwitchingResearcher] = useState(false);
   // Anthropic assist worker — daemon polls /assist-status and fires `claude -p
@@ -356,6 +435,7 @@ export function App() {
     daemonAlive: boolean;
     daemonAgeSec: number | null;
     config?: { yolo: boolean; model: string };
+    authenticated?: boolean;
   };
   const [assistStatus, setAssistStatus] = useState<{
     pending: number; claimed: number;
@@ -364,22 +444,121 @@ export function App() {
     codex: AssistAgentSlice;
   } | null>(null);
   const [isFiringAssist, setIsFiringAssist] = useState<string | null>(null);
+
+  // Interactive Auth Wizard State
+  const [activeLoginAgent, setActiveLoginAgent] = useState<'anthropic' | 'antigrav' | 'codex' | null>(null);
+  const [loginLogs, setLoginLogs] = useState<string>('');
+  const [loginStatusActive, setLoginStatusActive] = useState<boolean>(false);
+  const [loginInputValue, setLoginInputValue] = useState<string>('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isStartingLogin, setIsStartingLogin] = useState<boolean>(false);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!activeLoginAgent) return;
+
+    let timerId: any = null;
+    let isSubscribed = true;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/system/login-status`);
+        if (!isSubscribed) return;
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
+        const data = await res.json();
+        if (data.active !== undefined) {
+          setLoginStatusActive(data.active);
+          setLoginLogs(data.logs || '');
+          setLoginError(data.error || null);
+          
+          if (!data.active && data.exitCode !== null) {
+            setLoginLogs(prev => {
+              if (prev.endsWith(`\n[Process Exited with code ${data.exitCode}]`)) return prev;
+              return prev + `\n[Process Exited with code ${data.exitCode}]`;
+            });
+          }
+        }
+      } catch (err: any) {
+        if (isSubscribed) {
+          setLoginError(err.message);
+        }
+      }
+    };
+
+    poll();
+    timerId = setInterval(poll, 1000);
+
+    return () => {
+      isSubscribed = false;
+      clearInterval(timerId);
+    };
+  }, [activeLoginAgent]);
+
+  const startAuthWizard = async (agent: 'anthropic' | 'antigrav' | 'codex') => {
+    setActiveLoginAgent(agent);
+    setLoginLogs('Initializing process...');
+    setLoginStatusActive(true);
+    setLoginInputValue('');
+    setLoginError(null);
+    setIsStartingLogin(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/system/login-start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent })
+      });
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
+    } catch (err: any) {
+      setLoginError(err.message);
+      setLoginStatusActive(false);
+    } finally {
+      setIsStartingLogin(false);
+    }
+  };
+
+  const sendAuthInput = async () => {
+    if (!loginInputValue.trim() && loginInputValue !== '\n') return;
+    const inputToSend = loginInputValue;
+    setLoginInputValue('');
+
+    try {
+      const res = await fetch(`${API_BASE}/system/login-input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: inputToSend })
+      });
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
+    } catch (err: any) {
+      setLoginError(err.message);
+    }
+  };
+
+  const killAuthWizard = async () => {
+    try {
+      await fetch(`${API_BASE}/system/login-kill`, { method: 'POST' });
+    } catch (err) {
+      console.error("Failed to kill auth process", err);
+    }
+    setActiveLoginAgent(null);
+    setLoginLogs('');
+    setLoginStatusActive(false);
+    setLoginError(null);
+  };
   // Create Modal State
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newProject, setNewProject] = useState({
     title: '', description: '', type: '', parentId: '', preferredProvider: '',
-    context: { targetWordsPerChapter: 3000, targetChapters: 25, includePrologue: false, includeEpilogue: false, isSeries: false, seriesTotalBooks: 3, seriesCurrentBook: 1, isInfiniteCalibration: false, claudeCollectionEnabled: false, promoteOnComplete: false, penName: '', coverVariants: 1, coverFont: 'Serif (Georgia)', brandColor: '#00d2ff' }
+    context: {}
   });
   const [isCreating, setIsCreating] = useState(false);
 
-  // Style DNA Modal State
-  const [isStyleModalOpen, setIsStyleModalOpen] = useState(false);
-  const [styleDnaContent, setStyleDnaContent] = useState('');
-  const [isSavingStyle, setIsSavingStyle] = useState(false);
-  // Style DNA on/off toggle — scaffolding for un-trained models; flip off
-  // once the LoRA writes acceptable prose without prompt-time rule lists.
-  const [styleDnaEnabled, setStyleDnaEnabled] = useState<boolean>(true);
-  const [styleDnaToggling, setStyleDnaToggling] = useState(false);
   // Step audit verdicts — map of stepId → { audit?, povVerdict? }
   // Loaded once per selected project, refreshed when steps complete.
   const [stepVerdicts, setStepVerdicts] = useState<Record<string, { audit?: any; povVerdict?: any }>>({});
@@ -822,7 +1001,7 @@ export function App() {
   };
 
   // Researcher endpoint swap — toggles which GPU runs the researcher model
-  // for book-planning research-phase steps. Re-initializes the AI router on
+  // for planning research-phase steps. Re-initializes the AI router on
   // the backend so the next research call lands on the new endpoint.
   const handleResearcherEndpointSwap = async (target: 'writer' | 'librarian' | 'workers') => {
     try {
@@ -1113,7 +1292,7 @@ export function App() {
       setIsCreateModalOpen(false);
       setNewProject({
         title: '', description: '', type: templates[0]?.type || '', parentId: '', preferredProvider: '',
-        context: { targetWordsPerChapter: 3000, targetChapters: 25, includePrologue: false, includeEpilogue: false, isSeries: false, seriesTotalBooks: 3, seriesCurrentBook: 1, isInfiniteCalibration: false, claudeCollectionEnabled: false, promoteOnComplete: false, penName: '', coverVariants: 1, coverFont: 'Serif (Georgia)', brandColor: '#00d2ff' }
+        context: {}
       });
       setActiveTab('pipeline');
     } catch (err) {
@@ -1122,32 +1301,6 @@ export function App() {
       setIsCreating(false);
     }
   };
-
-  const openStyleModal = async () => {
-    setIsStyleModalOpen(true);
-    try {
-      const res = await fetch(`${API_BASE}/system/style-dna`);
-      const data = await res.json();
-      setStyleDnaContent(data.content || '');
-    } catch (err) {
-      console.error("Failed to fetch Style DNA", err);
-    }
-  };
-
-  // Fetch the current Style DNA on/off state on mount and on any toggle
-  // success (so other tabs see the change too).
-  const refreshStyleDnaEnabled = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/system/style-dna/enabled`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (typeof data.enabled === 'boolean') setStyleDnaEnabled(data.enabled);
-    } catch (err) {
-      console.error('Failed to fetch Style DNA enabled state', err);
-    }
-  };
-
-  useEffect(() => { refreshStyleDnaEnabled(); }, []);
 
   // Load audit verdicts for the selected project. Refreshes when any step
   // completes (so newly-landed audit results show up promptly).
@@ -1168,48 +1321,6 @@ export function App() {
     const intervalId = setInterval(() => fetchStepVerdicts(selectedProject.id), 15_000);
     return () => clearInterval(intervalId);
   }, [selectedProject, fetchStepVerdicts]);
-
-  const toggleStyleDna = async () => {
-    setStyleDnaToggling(true);
-    const next = !styleDnaEnabled;
-    try {
-      const res = await fetch(`${API_BASE}/system/style-dna/enabled`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: next }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setStyleDnaEnabled(!!data.enabled);
-    } catch (err) {
-      console.error('Failed to toggle Style DNA', err);
-      alert('Failed to toggle Style DNA. Check the API.');
-    } finally {
-      setStyleDnaToggling(false);
-    }
-  };
-
-  const handleSaveStyle = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSavingStyle(true);
-    try {
-      const isJson = styleDnaContent.trim().startsWith('{');
-      await fetch(`${API_BASE}/system/style-dna`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          content: styleDnaContent,
-          format: isJson ? 'json' : 'text'
-        })
-      });
-      setIsStyleModalOpen(false);
-    } catch (err) {
-      console.error("Failed to save Style DNA", err);
-      alert("Failed to save Style DNA. Check format.");
-    } finally {
-      setIsSavingStyle(false);
-    }
-  };
 
   const executeProject = async (id: string) => {
     await fetch(`${API_BASE}/projects/${id}/execute`, { method: 'POST' });
@@ -1506,7 +1617,7 @@ export function App() {
 
                 </div>
 
-                {/* Child Projects (Series Books) */}
+                {/* Child Projects (Sub-projects) */}
                 {(expandedSeries.has(p.id) || selectedProject?.parentId === p.id || selectedProject?.id === p.id) && projects.filter(child => child.parentId === p.id).map(child => (
                   <div
                     key={child.id}
@@ -1553,40 +1664,7 @@ export function App() {
           </div>{/* close right column */}
         </div>{/* close 2-col grid */}
 
-        {/* Panel footer — Style DNA shortcut + on/off scaffold toggle */}
-        <div style={{
-          padding: '14px 24px',
-          borderTop: '1px solid var(--panel-border)',
-          display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', alignItems: 'center',
-        }}>
-          <button
-            onClick={toggleStyleDna}
-            disabled={styleDnaToggling}
-            className="btn btn-outline"
-            style={{
-              display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem',
-              borderColor: styleDnaEnabled ? 'var(--accent)' : 'var(--panel-border)',
-              color: styleDnaEnabled ? 'var(--accent)' : 'var(--text-muted)',
-              opacity: styleDnaToggling ? 0.6 : 1,
-            }}
-            title={styleDnaEnabled
-              ? 'Style DNA is ON — rule lists inject into non-writer prompts and lint flags violations. Click to turn OFF (trained LoRA mode).'
-              : 'Style DNA is OFF — no rule-list injection, no post-write lint. Click to turn ON (scaffolding mode).'}
-          >
-            {styleDnaToggling
-              ? <Loader2 size={16} className="animate-spin" />
-              : (styleDnaEnabled ? <CheckCircle2 size={16} /> : <Circle size={16} />)}
-            Style DNA: {styleDnaEnabled ? 'ON' : 'OFF'}
-          </button>
-          <button
-            onClick={openStyleModal}
-            className="btn btn-outline"
-            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}
-            title="Edit Style DNA Constraints"
-          >
-            <Settings size={16} /> Edit Style DNA
-          </button>
-        </div>
+
       </aside>
       )}
 
@@ -3021,7 +3099,7 @@ export function App() {
                           <div>
                             <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>Researcher</div>
                             <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                              book-planning research phase · currently on <strong style={{ color: '#a855f7' }}>{researcherStatus?.mode === 'workers' ? 'Workers (subscription CLIs)' : (researcherStatus?.gpu || '—')}</strong>
+                              planning research phase · currently on <strong style={{ color: '#a855f7' }}>{researcherStatus?.mode === 'workers' ? 'Workers (subscription CLIs)' : (researcherStatus?.gpu || '—')}</strong>
                               {researcherStatus && researcherStatus.mode !== 'workers' && ` · ${researcherStatus.loadedCount} model${researcherStatus.loadedCount === 1 ? '' : 's'} loaded`}
                               {researcherStatus?.mode === 'workers' && ' · external queue (no local model loaded)'}
                             </div>
@@ -3059,7 +3137,7 @@ export function App() {
                                     onClick={() => handleResearcherEndpointSwap('workers')}
                                     disabled={isSwitchingResearcher || workersActive}
                                     style={btnStyle(workersActive)}
-                                    title="Route book-planning research phase to subscription-CLI workers via task_pool. Bypasses local Ollama; uses your existing worker queue."
+                                    title="Route planning research phase to subscription-CLI workers via task_pool. Bypasses local Ollama; uses your existing worker queue."
                                   >Workers (subscription CLIs)</button>
                                 </>
                               );
@@ -3094,7 +3172,31 @@ export function App() {
 
                 </>)}
                 {activeTab === 'workers' && (<>
-                    {/* Per-agent Assist Worker panels — Anthropic + Anti-Grav + Codex side by side.
+                  <HelpGuide panelName="workers" title="Workers & Login Wizard Guide">
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
+                      <div>
+                        <h4 style={{ color: 'var(--secondary)', marginBottom: 6, fontSize: '0.8rem', fontFamily: 'var(--font-mono)' }}>🤖 What are Workers?</h4>
+                        <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          Workers are background assistants that perform heavy research or code-writing tasks. Instead of paying for expensive AI developer keys, Perry connects to your personal chat subscriptions (like Claude Pro, Gemini Advanced, or ChatGPT Plus) to run tasks for free.
+                        </p>
+                      </div>
+                      <div>
+                        <h4 style={{ color: 'var(--secondary)', marginBottom: 6, fontSize: '0.8rem', fontFamily: 'var(--font-mono)' }}>🔑 Login Wizard (No Terminal Required)</h4>
+                        <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          If a worker is offline or login has expired, click the <strong>🔑 Run Auth Wizard</strong> button on its card. A mini terminal will open. Follow the steps printed there (like clicking a link or copying a code), paste your response into the input box below the logs, and click <strong>SEND</strong>.
+                        </p>
+                      </div>
+                      <div>
+                        <h4 style={{ color: 'var(--secondary)', marginBottom: 6, fontSize: '0.8rem', fontFamily: 'var(--font-mono)' }}>⚙️ Controls: Auto-Loop & YOLO</h4>
+                        <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          <strong>Auto-Loop</strong>: Turning this ON lets the worker start working automatically whenever there are tasks waiting. If OFF, it waits for you to click "Fire Worker Now".<br />
+                          <strong>YOLO Mode</strong>: Allows the AI to automatically run commands or edit files in the background. It is highly recommended so the AI doesn't pause and wait for your manual approval.
+                        </p>
+                      </div>
+                    </div>
+                  </HelpGuide>
+
+                  {/* Per-agent Assist Worker panels — Anthropic + Anti-Grav + Codex side by side.
                         Each panel toggles auto/manual fire decisions; WorkerCoordinator
                         (inside perry) POSTs spawn requests to the perry-worker container
                         which runs the matching subscription CLI. Pending task count is
@@ -3272,6 +3374,318 @@ export function App() {
                               <div style={{ marginTop: '0.3rem', color: 'var(--text-muted)' }}>
                                 {daemonInstall.desc}
                               </div>
+                            </div>
+                          )}
+
+                          {slice?.authenticated ? (
+                            <div style={{
+                              marginTop: '0.75rem',
+                              padding: '0.6rem 0.9rem',
+                              background: 'rgba(16, 185, 129, 0.08)',
+                              border: '1px solid rgba(16, 185, 129, 0.25)',
+                              borderRadius: '6px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '10px',
+                              fontSize: '0.72rem',
+                              color: '#34d399',
+                              boxShadow: '0 2px 8px rgba(16, 185, 129, 0.05)',
+                            }}>
+                              <CheckCircle2 size={16} style={{ color: '#10b981', flexShrink: 0 }} />
+                              <div>
+                                <span style={{ fontWeight: 600, color: '#f3f4f6' }}>Authenticated</span>
+                                <span style={{ color: '#9ca3af', marginLeft: '6px' }}>— CLI is signed in and ready.</span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{
+                              marginTop: '0.75rem',
+                              padding: '0.6rem 0.8rem',
+                              background: 'rgba(255,255,255,0.02)',
+                              border: '1px solid rgba(255,255,255,0.06)',
+                              borderRadius: '6px',
+                              fontSize: '0.68rem',
+                              color: 'var(--text-muted)',
+                            }}>
+                              <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>Interactive Auth Command:</span>
+                              <code style={{ display: 'block', marginTop: '4px', padding: '4px 8px', background: 'rgba(0,0,0,0.3)', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1', overflowX: 'auto', whiteSpace: 'pre' }}>
+                                {agent === 'codex'
+                                  ? 'docker compose run --rm -it --entrypoint codex perry-worker login --device-auth'
+                                  : `docker compose run --rm -it --entrypoint ${agent === 'antigrav' ? 'gemini' : 'claude'} perry-worker login`}
+                              </code>
+
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
+                                <span style={{ fontSize: '0.65rem', opacity: 0.8 }}>Or fire it off automatically from the dashboard:</span>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  style={{
+                                    padding: '4px 12px',
+                                    fontSize: '0.72rem',
+                                    fontWeight: 600,
+                                    borderRadius: '4px',
+                                    background: activeLoginAgent === agent ? 'rgba(239, 68, 68, 0.2)' : `rgba(${accentRgb}, 0.15)`,
+                                    border: `1px solid ${activeLoginAgent === agent ? 'rgb(239, 68, 68)' : `rgb(${accentRgb})`}`,
+                                    color: 'white',
+                                    cursor: isStartingLogin ? 'wait' : 'pointer',
+                                    boxShadow: activeLoginAgent === agent ? '0 0 8px rgba(239, 68, 68, 0.4)' : `0 0 8px rgba(${accentRgb}, 0.3)`,
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                  onClick={() => {
+                                    if (activeLoginAgent === agent) {
+                                      killAuthWizard();
+                                    } else {
+                                      startAuthWizard(agent as any);
+                                    }
+                                  }}
+                                  disabled={isStartingLogin}
+                                >
+                                  {activeLoginAgent === agent ? '🛑 Close Auth Wizard' : '🔑 Run Auth Wizard'}
+                                </button>
+                              </div>
+
+                              {activeLoginAgent === agent && (() => {
+                                const devAuth = parseDeviceAuth(loginLogs);
+                                if (devAuth) {
+                                  return (
+                                    <div style={{
+                                      marginTop: '12px',
+                                      padding: '16px',
+                                      background: '#070a13',
+                                      border: '1px solid rgba(168, 85, 247, 0.4)',
+                                      borderRadius: '8px',
+                                      boxShadow: '0 0 15px rgba(168, 85, 247, 0.1)',
+                                    }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '8px' }}>
+                                        <span style={{ fontSize: '0.78rem', fontWeight: 600, color: '#a855f7', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                          🔑 Device Authentication Required
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={killAuthWizard}
+                                          style={{
+                                            background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '0.72rem',
+                                          }}
+                                        >
+                                          ✕ Close
+                                        </button>
+                                      </div>
+                                      
+                                      <div style={{ fontSize: '0.75rem', color: '#cbd5e1', lineHeight: '1.5', marginBottom: '12px' }}>
+                                        Follow these steps to authorize the worker:
+                                      </div>
+
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '14px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+                                          <span style={{ color: '#a855f7', fontWeight: 'bold' }}>1.</span>
+                                          <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>Copy the verification code below:</span>
+                                        </div>
+
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingLeft: '16px' }}>
+                                          <code style={{
+                                            fontFamily: 'monospace',
+                                            fontSize: '1.1rem',
+                                            background: 'rgba(0,0,0,0.4)',
+                                            padding: '6px 12px',
+                                            borderRadius: '6px',
+                                            border: '1px solid rgba(255,255,255,0.15)',
+                                            color: '#f3f4f6',
+                                            letterSpacing: '2px',
+                                            fontWeight: 'bold',
+                                          }}>
+                                            {devAuth.code}
+                                          </code>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              navigator.clipboard.writeText(devAuth.code);
+                                              setCopiedCode(true);
+                                              setTimeout(() => setCopiedCode(false), 2000);
+                                            }}
+                                            style={{
+                                              background: 'rgba(168,85,247,0.15)',
+                                              color: '#c084fc',
+                                              border: '1px solid rgba(168,85,247,0.3)',
+                                              borderRadius: '4px',
+                                              padding: '4px 10px',
+                                              fontSize: '0.65rem',
+                                              cursor: 'pointer',
+                                              fontFamily: 'monospace',
+                                              fontWeight: 600,
+                                              transition: 'all 0.2s',
+                                            }}
+                                          >
+                                            {copiedCode ? '✓ COPIED' : 'COPY'}
+                                          </button>
+                                        </div>
+
+                                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginTop: '4px' }}>
+                                          <span style={{ color: '#a855f7', fontWeight: 'bold' }}>2.</span>
+                                          <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>Click the link below and paste the code when prompted:</span>
+                                        </div>
+
+                                        <div style={{ paddingLeft: '16px' }}>
+                                          <a
+                                            href={devAuth.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            style={{
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              gap: '6px',
+                                              background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+                                              color: 'white',
+                                              textDecoration: 'none',
+                                              padding: '6px 16px',
+                                              borderRadius: '4px',
+                                              fontSize: '0.72rem',
+                                              fontWeight: 600,
+                                              cursor: 'pointer',
+                                              boxShadow: '0 2px 8px rgba(168, 85, 247, 0.3)',
+                                              transition: 'all 0.2s',
+                                            }}
+                                          >
+                                            Open Activation Page ↗
+                                          </a>
+                                        </div>
+                                      </div>
+
+                                      <details style={{ marginTop: '12px' }}>
+                                        <summary style={{
+                                          fontSize: '0.68rem',
+                                          color: '#9ca3af',
+                                          cursor: 'pointer',
+                                          userSelect: 'none',
+                                          outline: 'none',
+                                          padding: '4px 0',
+                                        }}>
+                                          View terminal logs
+                                        </summary>
+                                        <pre style={{
+                                          marginTop: '8px',
+                                          background: '#02040a',
+                                          padding: '10px',
+                                          borderRadius: '6px',
+                                          maxHeight: '150px',
+                                          overflowY: 'auto',
+                                          whiteSpace: 'pre-wrap',
+                                          wordBreak: 'break-all',
+                                          fontSize: '0.7rem',
+                                          color: `rgb(${accentRgb})`,
+                                          border: '1px solid rgba(255,255,255,0.05)',
+                                          textAlign: 'left',
+                                          lineHeight: 1.4,
+                                        }}>
+                                          {cleanAuthLogs(loginLogs) || 'Initializing auth process...'}
+                                        </pre>
+                                      </details>
+                                    </div>
+                                  );
+                                }
+
+                                return (
+                                  <div style={{
+                                    marginTop: '12px',
+                                    padding: '12px',
+                                    background: '#070a13',
+                                    border: `1px solid rgba(${accentRgb}, 0.3)`,
+                                    borderRadius: '8px',
+                                    fontFamily: 'Consolas, Monaco, "Courier New", Courier, monospace',
+                                    boxShadow: `0 0 15px rgba(${accentRgb}, 0.1)`,
+                                  }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '6px' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <div style={{
+                                          width: 8, height: 8, borderRadius: '50%',
+                                          background: loginStatusActive ? '#10b981' : '#6b7280',
+                                          boxShadow: loginStatusActive ? '0 0 8px #10b981' : 'none',
+                                          animation: loginStatusActive ? 'pulse 2s infinite' : 'none',
+                                        }} />
+                                        <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#f3f4f6' }}>
+                                          Terminal ({loginStatusActive ? 'running' : 'exited'})
+                                        </span>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={killAuthWizard}
+                                        style={{
+                                          background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '0.72rem',
+                                          transition: 'color 0.2s',
+                                        }}
+                                        onMouseEnter={(e) => e.currentTarget.style.color = '#f3f4f6'}
+                                        onMouseLeave={(e) => e.currentTarget.style.color = '#9ca3af'}
+                                      >
+                                        ✕ Close
+                                      </button>
+                                    </div>
+
+                                    {loginError && (
+                                      <div style={{ color: '#ef4444', fontSize: '0.72rem', marginBottom: '8px', background: 'rgba(239, 68, 68, 0.1)', padding: '6px', borderRadius: '4px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
+                                        <strong>Error:</strong> {loginError}
+                                      </div>
+                                    )}
+
+                                    <pre style={{
+                                      background: '#02040a',
+                                      padding: '10px',
+                                      borderRadius: '6px',
+                                      maxHeight: '220px',
+                                      overflowY: 'auto',
+                                      margin: '0 0 10px 0',
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-all',
+                                      fontSize: '0.72rem',
+                                      color: `rgb(${accentRgb})`,
+                                      border: '1px solid rgba(255,255,255,0.05)',
+                                      textAlign: 'left',
+                                      lineHeight: 1.4,
+                                      boxShadow: 'inset 0 0 10px rgba(0,0,0,0.8)',
+                                    }}>
+                                      {cleanAuthLogs(loginLogs) || 'Initializing auth process...'}
+                                    </pre>
+
+                                    {loginStatusActive && (
+                                      <form onSubmit={(e) => { e.preventDefault(); sendAuthInput(); }} style={{ display: 'flex', gap: '8px' }}>
+                                        <input
+                                          type="text"
+                                          value={loginInputValue}
+                                          onChange={(e) => setLoginInputValue(e.target.value)}
+                                          placeholder="Type verification code, email or prompt response..."
+                                          style={{
+                                            flex: 1,
+                                            background: '#0b0f19',
+                                            border: '1px solid rgba(255,255,255,0.1)',
+                                            borderRadius: '4px',
+                                            padding: '6px 10px',
+                                            color: '#f3f4f6',
+                                            fontSize: '0.75rem',
+                                            outline: 'none',
+                                            transition: 'border-color 0.2s',
+                                          }}
+                                          onFocus={(e) => e.currentTarget.style.borderColor = `rgb(${accentRgb})`}
+                                          onBlur={(e) => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)'}
+                                        />
+                                        <button
+                                          type="submit"
+                                          style={{
+                                            background: `rgba(${accentRgb}, 0.2)`,
+                                            border: `1px solid rgb(${accentRgb})`,
+                                            borderRadius: '4px',
+                                            color: 'white',
+                                            padding: '6px 16px',
+                                            fontSize: '0.72rem',
+                                            fontWeight: 600,
+                                            cursor: 'pointer',
+                                            transition: 'all 0.2s',
+                                          }}
+                                        >
+                                          Send
+                                        </button>
+                                      </form>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
                         </div>
@@ -3528,81 +3942,15 @@ export function App() {
                 />
               </div>
               <div>
-                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Pen Name (Author)</label>
-                <input
-                  type="text"
-                  value={newProject.context.penName || ''}
-                  onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, penName: e.target.value } })}
-                  placeholder="Optional: Automatically injected into covers and metadata"
+                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Description</label>
+                <textarea
+                  value={newProject.description}
+                  onChange={e => setNewProject({ ...newProject, description: e.target.value })}
+                  required
+                  rows={4}
                   style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
                 />
               </div>
-
-              {newProject.type === 'book-cover' && (
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem', marginBottom: '1rem' }}>
-                  <div style={{ flex: 1 }}>
-                    <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Variations to Generate</label>
-                    <input
-                      type="number"
-                      min="1" max="10"
-                      value={newProject.context.coverVariants || 1}
-                      onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, coverVariants: parseInt(e.target.value) || 1 } })}
-                      style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                    />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Typography Style</label>
-                    <select
-                      value={newProject.context.coverFont || 'Serif (Georgia)'}
-                      onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, coverFont: e.target.value } })}
-                      style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                    >
-                      <option value="Serif (Georgia)">Classic Serif (Georgia)</option>
-                      <option value="Sans-Serif (Helvetica)">Modern Sans-Serif (Helvetica)</option>
-                    </select>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Brand Accent Color</label>
-                    <select
-                      value={newProject.context.brandColor || '#00d2ff'}
-                      onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, brandColor: e.target.value } })}
-                      style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                    >
-                      <option value="#00d2ff">Sci-Fi (Electric Teal)</option>
-                      <option value="#ff3d3d">Noir (Deep Red)</option>
-                      <option value="#ffc107">Fantasy (Cyber Gold)</option>
-                      <option value="#ffffff">Classic (Pure White)</option>
-                      <option value="#a020f0">Cyberpunk (Neon Purple)</option>
-                    </select>
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Parent Project (Series)</label>
-                <select
-                  value={newProject.parentId}
-                  onChange={e => setNewProject({ ...newProject, parentId: e.target.value })}
-                  style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                >
-                  <option value="">None (Standalone/Series Root)</option>
-                  {projects.filter(p => !p.parentId).map(p => (
-                    <option key={p.id} value={p.id}>{p.title}</option>
-                  ))}
-                </select>
-              </div>
-              {!newProject.parentId && (
-                <div>
-                  <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Description / Premise</label>
-                  <textarea
-                    value={newProject.description}
-                    onChange={e => setNewProject({ ...newProject, description: e.target.value })}
-                    required
-                    rows={4}
-                    style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                  />
-                </div>
-              )}
               <div>
                 <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Template</label>
                 <select
@@ -3638,222 +3986,10 @@ export function App() {
                     : 'Leave as default, or select a fine-tuned LoRA model trained from calibration.'}
                 </p>
               </div>
-              {/* Context fields — hidden when inheriting from a parent project.
-                   Exception: pass-based templates (style-calibration) always show their pass count. */}
-              {(newProject.parentId) ? (
-                <>
-                  <div style={{
-                    padding: '0.75rem 1rem',
-                    borderRadius: '6px',
-                    background: 'rgba(99, 179, 237, 0.08)',
-                    border: '1px solid rgba(99, 179, 237, 0.25)',
-                    fontSize: '0.85rem',
-                    color: 'var(--text-muted)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                  }}>
-                    <span style={{ fontSize: '1rem' }}>🔗</span>
-                    <span>
-                      Chapter count, word target, prologue &amp; epilogue will be <strong style={{ color: 'var(--accent)' }}>inherited automatically</strong> from the selected parent project.
-                    </span>
-                  </div>
-                  {newProject.type === 'style-calibration' && (
-                    <div>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem', marginBottom: '1rem', background: 'rgba(34, 197, 94, 0.1)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
-                        <input
-                          type="checkbox"
-                          checked={newProject.context.isInfiniteCalibration || false}
-                          onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, isInfiniteCalibration: e.target.checked } })}
-                        />
-                        <strong style={{ color: '#22c55e' }}>Infinite Learning Loop (Continuous)</strong>
-                      </label>
-
-                      {!newProject.context.isInfiniteCalibration && (
-                        <>
-                          <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Number of Passes</label>
-                          <input
-                            type="number"
-                            value={newProject.context.targetChapters}
-                            onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, targetChapters: parseInt(e.target.value) || 2 } })}
-                            min="1"
-                            max="100"
-                            style={{ width: '120px', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                          />
-                          <p className="text-xs text-muted mt-1">Each pass = 3 writing samples + 3 POV checks + 1 summary. Recommended: 2–5.</p>
-                        </>
-                      )}
-                      {newProject.context.isInfiniteCalibration && (
-                        <p className="text-xs text-muted mt-1" style={{ color: '#22c55e' }}>
-                          The pipeline will generate 1 pass at a time and automatically append the next pass infinitely until you pause or delete the project.
-                        </p>
-                      )}
-
-                      {/* CLI-assisted pair collection (Phase D / MCP) */}
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem', marginTop: '1rem', marginBottom: '0.5rem', background: 'rgba(99, 102, 241, 0.1)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
-                        <input
-                          type="checkbox"
-                          checked={newProject.context.claudeCollectionEnabled || false}
-                          onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, claudeCollectionEnabled: e.target.checked } })}
-                        />
-                        <strong style={{ color: '#6366f1' }}>CLI-Assisted Pair Collection</strong>
-                      </label>
-                      <p className="text-xs text-muted" style={{ marginLeft: '0.5rem', marginBottom: '1rem' }}>
-                        When on, this project is flagged for synthetic pair contribution via the MCP server. Subscription-CLI workers can see mined / rejected output and inject curated pairs that bypass the gates.
-                      </p>
-
-                      {/* Auto-promote on audit pass (Phase B) */}
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem', marginBottom: '0.5rem', background: 'rgba(245, 158, 11, 0.08)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
-                        <input
-                          type="checkbox"
-                          checked={newProject.context.promoteOnComplete || false}
-                          onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, promoteOnComplete: e.target.checked } })}
-                        />
-                        <strong style={{ color: '#f59e0b' }}>Auto-Promote on Audit Pass</strong>
-                      </label>
-                      <p className="text-xs text-muted" style={{ marginLeft: '0.5rem' }}>
-                        After training, if the audit (Phase B) reports zero anti-pattern hits, auto-promote the LoRA to be this pen's writer model. Off by default — manual promotion stays under your control.
-                      </p>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
-                    <div>
-                      <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Words per Chapter</label>
-                      <input
-                        type="number"
-                        value={newProject.context.targetWordsPerChapter}
-                        onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, targetWordsPerChapter: parseInt(e.target.value) || 3000 } })}
-                        min="100"
-                        style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Target Chapters</label>
-                      <input
-                        type="number"
-                        value={newProject.context.targetChapters}
-                        onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, targetChapters: parseInt(e.target.value) || 25 } })}
-                        min="1"
-                        style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                      />
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', justifyContent: 'center', marginTop: '1.5rem' }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={newProject.context.includePrologue}
-                          onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, includePrologue: e.target.checked } })}
-                        /> Include Prologue
-                      </label>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={newProject.context.includeEpilogue}
-                          onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, includeEpilogue: e.target.checked } })}
-                        /> Include Epilogue
-                      </label>
-                    </div>
-                  </div>
-
-                  {/* Series Configuration */}
-                  <div style={{
-                    padding: '1rem',
-                    borderRadius: '8px',
-                    border: '1px solid',
-                    borderColor: newProject.context.isSeries ? 'rgba(99, 102, 241, 0.3)' : 'var(--panel-border)',
-                    background: newProject.context.isSeries ? 'rgba(99, 102, 241, 0.05)' : 'transparent',
-                    transition: 'all 0.2s ease',
-                  }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.875rem', marginBottom: newProject.context.isSeries ? '0.75rem' : 0 }}>
-                      <input
-                        type="checkbox"
-                        checked={newProject.context.isSeries}
-                        onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, isSeries: e.target.checked } })}
-                      />
-                      <span style={{ fontWeight: 500 }}>This is part of a series</span>
-                    </label>
-
-                    {newProject.context.isSeries && (
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                        <div>
-                          <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Book Number</label>
-                          <input
-                            type="number"
-                            value={newProject.context.seriesCurrentBook}
-                            onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, seriesCurrentBook: Math.max(1, parseInt(e.target.value) || 1) } })}
-                            min="1"
-                            style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Planned Books in Series</label>
-                          <input
-                            type="number"
-                            value={newProject.context.seriesTotalBooks}
-                            onChange={e => setNewProject({ ...newProject, context: { ...newProject.context, seriesTotalBooks: Math.max(1, parseInt(e.target.value) || 3) } })}
-                            min="1"
-                            style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
-                          />
-                        </div>
-                        <div style={{ gridColumn: '1 / -1', fontSize: '0.75rem', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                          <BookOpen size={12} />
-                          Book {newProject.context.seriesCurrentBook} of {newProject.context.seriesTotalBooks} — {newProject.context.seriesCurrentBook === 1 ? 'the AI will plant hooks for future books and avoid resolving the overarching conflict' : newProject.context.seriesCurrentBook === newProject.context.seriesTotalBooks ? 'the AI will resolve the series arc in this final book' : 'the AI will advance the series arc while maintaining its own book-level resolution'}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div className="text-sm text-muted">
-                      Estimated Total: <strong style={{ color: 'var(--accent)' }}>{((newProject.context.targetWordsPerChapter || 3000) * ((newProject.context.targetChapters || 25) + (newProject.context.includePrologue ? 1 : 0) + (newProject.context.includeEpilogue ? 1 : 0))).toLocaleString()}</strong> words
-                    </div>
-                  </div>
-                </>
-              )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
                 <button type="button" className="btn btn-outline" onClick={() => setIsCreateModalOpen(false)}>Cancel</button>
                 <button type="submit" className="btn btn-primary" disabled={isCreating}>
                   {isCreating ? <Loader2 size={16} className="animate-spin" /> : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Style DNA Modal */}
-      {isStyleModalOpen && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100
-        }}>
-          <div className="glass-panel" style={{ width: '100%', maxWidth: '800px', position: 'relative', height: '80vh', display: 'flex', flexDirection: 'column' }}>
-            <button
-              onClick={() => setIsStyleModalOpen(false)}
-              style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
-            >
-              <X size={20} />
-            </button>
-            <h2 className="mb-2">Global Style DNA</h2>
-            <p className="text-sm text-muted mb-4">
-              These rules are injected into every creative writing step to prevent overused AI tropes.
-            </p>
-            <form onSubmit={handleSaveStyle} style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1, overflow: 'hidden' }}>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <textarea
-                  value={styleDnaContent}
-                  onChange={e => setStyleDnaContent(e.target.value)}
-                  style={{ flex: 1, width: '100%', padding: '0.75rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white', fontFamily: 'monospace', fontSize: '0.85rem', resize: 'none' }}
-                />
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
-                <button type="button" className="btn btn-outline" onClick={() => setIsStyleModalOpen(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary" disabled={isSavingStyle}>
-                  {isSavingStyle ? <Loader2 size={16} className="animate-spin" /> : 'Save Rules'}
                 </button>
               </div>
             </form>

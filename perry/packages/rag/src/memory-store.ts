@@ -604,7 +604,7 @@ export class MemoryStore {
     } catch { return 0; }
   }
 
-  /** Cross-project chunk search (e.g., "where have I written about X across all books"). */
+  /** Cross-project chunk search (e.g., "where have I written about X across all projects"). */
   searchChunksGlobal(opts: {
     queryEmbedding: number[];
     kinds?: string[];

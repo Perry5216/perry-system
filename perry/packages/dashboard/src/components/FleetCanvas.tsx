@@ -4,7 +4,7 @@
  * Replaces the GPU monitor + Workers tabs with a single spatial display:
  *
  *   - Perry core at the center
- *   - Domain stations on an outer orbit (books, code, email, hacking, meta)
+ *   - Domain stations on an outer orbit (code, email, hacking, meta)
  *   - Agent satellites orbiting their domain station
  *   - Click an agent → right panel slides in with config + recent invocations
  *   - Bottom strip: live activity log (terminal-monospace style)
@@ -27,7 +27,7 @@ const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env
 
 interface AgentDef {
   id: string;
-  domain: 'books' | 'code' | 'email' | 'hacking' | 'meta';
+  domain: 'code' | 'email' | 'hacking' | 'meta';
   label: string;
   description: string;
   systemPrompt: string;
@@ -45,7 +45,6 @@ interface DomainSummary {
 }
 
 const DOMAIN_COLORS: Record<AgentDef['domain'], string> = {
-  books:   '#FFD166', // warm gold
   code:    '#7CFC00', // phosphor green
   email:   '#4ECDC4', // cyan
   hacking: '#FF6B6B', // red
@@ -93,7 +92,7 @@ interface PlacedDomain {
 function placeDomains(domains: DomainSummary[], agents: AgentDef[]): PlacedDomain[] {
   // Fixed canonical ordering — domains stay in stable positions even as
   // agent count fluctuates. Add new domains here.
-  const canonical: AgentDef['domain'][] = ['books', 'code', 'email', 'hacking', 'meta'];
+  const canonical: AgentDef['domain'][] = ['code', 'email', 'hacking', 'meta'];
   const present = canonical.filter(d => domains.some(dom => dom.id === d));
   return present.map((id, idx) => {
     // Start at top (-π/2), distribute clockwise around the core.

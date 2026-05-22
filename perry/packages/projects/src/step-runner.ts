@@ -38,7 +38,7 @@ import { getGateFor } from './services/quality-gates.js';
 
 /**
  * Variable names that go into URL PATH segments (OpenLibrary subject slugs,
- * Reddit multi-sub joins like `books+printSF+Fantasy`) and therefore must NOT
+ * Reddit multi-sub joins like `sub1+sub2`) and therefore must NOT
  * be URL-encoded — encoding `+` to `%2B` would break Reddit's multi-sub URL,
  * and encoding underscores in subject slugs is unnecessary noise. Everything
  * else (queries, etc.) DOES get URL-encoded because it lands in `?q=…`.
@@ -1383,7 +1383,7 @@ export class StepRunner {
         // readers actually describe what they liked/hated. Three extra fetches
         // per Reddit listing, parallelised via `direct` networkPath (Reddit
         // JSON doesn't need browser stealth + has generous rate limits).
-        if (fr.ok && digest && project.type === 'book-planning' &&
+        if (fr.ok && digest && (project.type as string) === 'book-planning' &&
             /reddit\.com\/r\/.*\/(?:top|search)\.json/i.test(req.url)) {
           const enrichment = await enrichRedditWithComments(fr.text, {
             topN: 3,
@@ -1469,7 +1469,7 @@ export class StepRunner {
       //     against the writer LoRA for substantially better extraction.
       //   - All other network_research → LIBRARIAN (5070 Ti, qwen3:14b).
       //     Smaller, cheaper, no contention with the writer.
-      const isBookPlanningResearch = project.type === 'book-planning';
+      const isBookPlanningResearch = (project.type as string) === 'book-planning';
       const useWorkersForResearch = this.shouldUseWorkersForResearch(project, step);
 
       const researcher = (isBookPlanningResearch && !useWorkersForResearch) ? this.router.getProvider('researcher') : null;
@@ -1491,7 +1491,7 @@ export class StepRunner {
       // render the JSON to markdown server-side. The model can't drift to
       // its "Notable Reader-Curated Lists" defaults if the only legal
       // output is the schema's exact shape.
-      const isLiveCompTitleScout = step.label === 'Live Comp Title Scout' && project.type === 'book-planning';
+      const isLiveCompTitleScout = step.label === 'Live Comp Title Scout' && (project.type as string) === 'book-planning';
 
       let userContent: string;
       let outputFormat: any = undefined;
@@ -1546,7 +1546,7 @@ export class StepRunner {
             messages: [{ role: 'user', content: userContent }],
             maxTokens: this.router.getOutputBudget('research'),
             temperature: 0.2,
-            penSlug: project.context.penNameSlug,
+            penSlug: (project.context as any).penNameSlug,
             format: outputFormat,
           });
 
@@ -1671,7 +1671,7 @@ export class StepRunner {
       ctx.font = 'bold 48px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const spineText = `${project.title}        ${project.context?.penName || 'P.E.R.R.Y.'}`;
+      const spineText = `${project.title}        ${(project.context as any)?.penName || 'P.E.R.R.Y.'}`;
       ctx.fillText(spineText, 0, 0);
       ctx.restore();
 
@@ -1680,7 +1680,7 @@ export class StepRunner {
       const maxWidth = img.width - (margin * 2);
       
       ctx.fillStyle = '#ffffff';
-      const fontSelection = project.context?.coverFont || 'Serif (Georgia)';
+      const fontSelection = (project.context as any)?.coverFont || 'Serif (Georgia)';
       const fontFamily = fontSelection.includes('Sans') ? '"Helvetica Neue", Helvetica, Arial, sans-serif' : '"Georgia", serif';
       ctx.font = `36px ${fontFamily}`;
       ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
@@ -1722,7 +1722,7 @@ export class StepRunner {
         const lctx = logoCanvas.getContext('2d');
         lctx.drawImage(logoImg, 0, 0);
         lctx.globalCompositeOperation = 'source-in';
-        lctx.fillStyle = project.context?.brandColor || '#00d2ff';
+        lctx.fillStyle = (project.context as any)?.brandColor || '#00d2ff';
         lctx.fillRect(0, 0, logoImg.width, logoImg.height);
         
         // Stamp on Spine (Bottom)
@@ -2012,7 +2012,7 @@ export class StepRunner {
       // For calibration compiles (2-segment scenes), detect if POV character
       // switched between Part 1 and Part 2 before the POV check runs.
       // Catches head-hopping BEFORE it wastes a POV check cycle.
-      if (project.type === 'style-calibration' && segments.length === 2) {
+      if ((project.type as string) === 'style-calibration' && segments.length === 2) {
         const part1 = segments[0]?.result || '';
         const part2 = segments[1]?.result || '';
         const povFracture = this.detectPovFracture(part1, part2);
@@ -2040,15 +2040,15 @@ ${result}`;
       //     PASS verdicts even when the prose contains "he stared" / "he felt".
       //     The librarian has no investment in the prose, so it grades honestly.
       const isCastExtraction = step.label === 'Cast Extraction' &&
-        project.type === 'style-calibration' &&
+        (project.type as string) === 'style-calibration' &&
         step.taskType === 'analysis';
       const isCalibrationPovCheck = step.taskType === 'pov_check' &&
-        project.type === 'style-calibration';
+        (project.type as string) === 'style-calibration';
       // Concept Keywords (book-planning preflight) — small JSON-emitting
       // extraction job. Routes to librarian both for deterministic output
       // and to dodge writer-GPU contention during LoRA training.
       const isConceptKeywords = (step.label === 'Concept Keywords' || step.label === 'KDP Concept Keywords') &&
-        (project.type === 'book-planning' || project.type === 'amazon-kdp-launch');
+        ((project.type as string) === 'book-planning' || (project.type as string) === 'amazon-kdp-launch');
 
       // Book-planning RESEARCH phase routes to the Researcher (5090 + qwen3.6:27b
       // by default) instead of the smaller librarian. The bigger model handles
@@ -2067,7 +2067,7 @@ ${result}`;
       // researcher provider's larger model). When workers mode is on,
       // the dispatch happens via shared helper; the predicate below
       // controls only the local-model fallback path.
-      const isBookPlanningResearch = project.type === 'book-planning' &&
+      const isBookPlanningResearch = (project.type as string) === 'book-planning' &&
         (step.taskType === 'network_research' ||
          (step.label === 'Concept Keywords' && step.taskType === 'research') ||
          step.label === 'Market & Genre Analysis');
@@ -2250,18 +2250,18 @@ ${result}`;
           // Cast Extraction needs deterministic extraction, not creative invention.
           // Pair with the librarian routing above so gemma3:12b reads the bible
           // verbatim and emits every Tier 1/2/3 entry without embellishing.
-          if (step.label === 'Cast Extraction' && project.type === 'style-calibration') {
+          if (step.label === 'Cast Extraction' && (project.type as string) === 'style-calibration') {
             temperature = 0.1;
           }
           // Calibration POV check also routes to librarian — use the same low
           // temperature to enforce strict, rule-following grading instead of
           // the writer's tendency to forgive its own prose.
-          if (step.taskType === 'pov_check' && project.type === 'style-calibration') {
+          if (step.taskType === 'pov_check' && (project.type as string) === 'style-calibration') {
             temperature = 0.1;
           }
           // Concept Keywords preflight — JSON output, low temperature for
           // deterministic structured output.
-          if (step.label === 'Concept Keywords' && project.type === 'book-planning') {
+          if (step.label === 'Concept Keywords' && (project.type as string) === 'book-planning') {
             temperature = 0.1;
           }
 
@@ -2291,7 +2291,7 @@ ${result}`;
           // skipping REVISE/REWRITE scenes. Now we parse the verdict in code from
           // the upstream pov_check step's result and stamp it at the top so it's
           // impossible to miss or paraphrase.
-          if (step.label.includes('Negative-Pair Mining') && project.type === 'style-calibration') {
+          if (step.label.includes('Negative-Pair Mining') && (project.type as string) === 'style-calibration') {
             const upstreamPov = project.steps.find(
               ps => ps.taskType === 'pov_check' &&
                     ps.chapterNumber === step.chapterNumber &&
@@ -2319,11 +2319,11 @@ ${result}`;
 
           // ── Dynamic Outline Structure Constraints ──
           if (['Chapter Outline', 'Chapter-by-Chapter Outline', 'Tension Blueprint', 'Scene-Level Breakdown'].includes(step.label)) {
-            const targetChs = project.context.targetChapters || 25;
+            const targetChs = (project.context as any).targetChapters || 25;
             const structureConstraint =
               `\n\nCRITICAL ANTI-HALLUCINATION PROTOCOL:\n` +
               `You MUST strictly follow the exact structure of the project. You are required to generate data for exactly: ` +
-              `${project.context.includePrologue ? 'Prologue, ' : ''}Chapters 1 through ${targetChs}${project.context.includeEpilogue ? ', and an Epilogue' : ''}.\n` +
+              `${(project.context as any).includePrologue ? 'Prologue, ' : ''}Chapters 1 through ${targetChs}${(project.context as any).includeEpilogue ? ', and an Epilogue' : ''}.\n` +
               `Do NOT invent new chapters. Do NOT skip chapters. Do NOT merge the Epilogue into the final chapter.\n\n` +
               `MANDATORY FORMAT — every chapter MUST use this EXACT header (numeric digit, NOT a word):\n` +
               `## Chapter 1: [Title]\n` +
@@ -2383,14 +2383,14 @@ ${result}`;
                 // swap for librarian-bound steps so they actually hit gemma3:12b
                 // and not the pen-aware writer (which doesn't support the tool
                 // schema research-type steps would normally request).
-                penSlug: (routeToLibrarian || routeToResearcher) ? undefined : project.context.penNameSlug,
+                penSlug: (routeToLibrarian || routeToResearcher) ? undefined : (project.context as any).penNameSlug,
                 // Concept Keywords emits a strict JSON schema. Token-level
                 // `format: 'json'` only enforces validity (the model is free
                 // to skip fields); passing a full JSON schema with `required`
                 // forces the model to emit EXACTLY this shape. Two variants:
                 // book-planning has 5 fields, KDP has 6 (adds redditAuthorSubs).
                 format: isConceptKeywords
-                  ? (project.type === 'amazon-kdp-launch'
+                  ? ((project.type as string) === 'amazon-kdp-launch'
                       ? CONCEPT_KEYWORDS_SCHEMA_KDP
                       : CONCEPT_KEYWORDS_SCHEMA_PLANNING)
                   : undefined,
@@ -2631,7 +2631,7 @@ ${result}`;
           if (['Chapter Outline', 'Chapter-by-Chapter Outline', 'Tension Blueprint', 'Scene-Level Breakdown'].includes(step.label)) {
             const missingChapters: number[] = [];
             const thinChapters: number[] = [];
-            const targetCh = project.context.targetChapters || 25;
+            const targetCh = (project.context as any).targetChapters || 25;
 
             // Word-number fallback for models that ignore the format instruction
             const WORD_NUMS: Record<number, string> = {
@@ -2670,7 +2670,7 @@ ${result}`;
               }
             }
             let missingEpi = false;
-            if (project.context.includeEpilogue && !accumulatedText.match(/Epilogue/i)) {
+            if ((project.context as any).includeEpilogue && !accumulatedText.match(/Epilogue/i)) {
               missingEpi = true;
             }
 
@@ -3073,7 +3073,7 @@ ${result}`;
       await this.saveStepToDisk(project, step, result);
       // ── Feature 1: Score Time-Series Tracking ───────────────────────────
       // Extract scores from the POV check and append to scores.csv
-      if (project.type === 'style-calibration') {
+      if ((project.type as string) === 'style-calibration') {
         this.autoLearning.recordPovScores(project.id, step.label, result).catch(err =>
           this.log.warn('Score tracking failed (non-fatal)', { error: (err as Error).message })
         );
@@ -3124,7 +3124,7 @@ ${result}`;
     // Extract style directives from EVERY Calibration Summary pass.
     // This allows the model to self-heal and update its DNA infinitely across
     // multiple passes without waiting for the final pass.
-    if (project.type === 'style-calibration' && step.taskType === 'analysis' && step.label.includes('Summary')) {
+    if ((project.type as string) === 'style-calibration' && step.taskType === 'analysis' && step.label.includes('Summary')) {
       let positive: string[] = [];
       let negative: string[] = [];
       
@@ -3177,7 +3177,7 @@ ${result}`;
       );
 
       // Check if Infinite Calibration is enabled
-      if (project.context.isInfiniteCalibration) {
+      if ((project.context as any).isInfiniteCalibration) {
         // Extract the current pass number
         const match = step.label.match(/^Pass (\d+):/);
         if (match) {
@@ -3195,7 +3195,7 @@ ${result}`;
             positive: this.styleDna.getGlobalRules().positiveDirectives || [],
             negative: this.styleDna.getGlobalRules().tropeWarnings || []
           };
-          const totalChapters = freshProject.context.targetChapters || 25;
+          const totalChapters = (freshProject.context as any).targetChapters || 25;
           // Rebuild the shared context block with anti-patterns — same logic as buildSteps.
           // Do NOT pass freshProject.description here — that is just the user's synopsis, not the
           // calibration anti-pattern block that the writer model needs injected every pass.
@@ -3301,7 +3301,7 @@ ${result}`;
       // flag like any writer-bound step. We carve them out from the
       // librarian-bound set explicitly.
       const trainingFlagPath = path.join(this.config.workspaceDir, 'training', 'TRAINING_IN_PROGRESS.flag');
-      const isResearcherBound = current.type === 'book-planning' &&
+      const isResearcherBound = (current.type as string) === 'book-planning' &&
         (step.taskType === 'network_research' ||
          (step.label === 'Concept Keywords' && step.taskType === 'research') ||
          step.label === 'Market & Genre Analysis');
@@ -3322,9 +3322,9 @@ ${result}`;
       const librarianBound =
         !isResearcherBound && (
           step.taskType === 'network_research' ||
-          (step.label === 'KDP Concept Keywords' && current.type === 'amazon-kdp-launch') ||
-          (step.label === 'Cast Extraction' && current.type === 'style-calibration' && step.taskType === 'analysis') ||
-          (step.taskType === 'pov_check' && current.type === 'style-calibration')
+          (step.label === 'KDP Concept Keywords' && (current.type as string) === 'amazon-kdp-launch') ||
+          (step.label === 'Cast Extraction' && (current.type as string) === 'style-calibration' && step.taskType === 'analysis') ||
+          (step.taskType === 'pov_check' && (current.type as string) === 'style-calibration')
         );
       const stepRunsOnWriterGpu = !librarianBound && !researcherOffWriterGpu;
       let waitingLogged = false;
@@ -3499,9 +3499,9 @@ ${result}`;
       prompt += `Write the COMPLETE chapter. Do not summarize, truncate, or use placeholders.\n\n`;
     }
 
-    if (project.context.isSeries && project.context.seriesTotalBooks && project.context.seriesCurrentBook) {
-      const cur = project.context.seriesCurrentBook;
-      const total = project.context.seriesTotalBooks;
+    if ((project.context as any).isSeries && (project.context as any).seriesTotalBooks && (project.context as any).seriesCurrentBook) {
+      const cur = (project.context as any).seriesCurrentBook;
+      const total = (project.context as any).seriesTotalBooks;
       prompt += `SERIES: Book ${cur}/${total}. `;
       if (cur === 1) {
         prompt += `First book — plant hooks, leave the series conflict unresolved. Wrap only this book's plot.\n\n`;
@@ -3777,7 +3777,7 @@ ${result}`;
    *     two named synthesis steps).
    */
   private shouldUseWorkersForResearch(project: Project, step: ProjectStep): boolean {
-    if (project.type !== 'book-planning') return false;
+    if ((project.type as string) !== 'book-planning') return false;
     const isResearchStep =
       step.taskType === 'network_research' ||
       (step.taskType === 'research' && (step.label === 'Concept Keywords' || step.label === 'Market & Genre Analysis'));
@@ -3813,13 +3813,13 @@ ${result}`;
       step_id: step.id,
       step_label: step.label,
       step_task_type: step.taskType,
-      pen_slug: project.context.penNameSlug || null,
+      pen_slug: (project.context as any).penNameSlug || null,
       system_prompt: systemPrompt,
       user_content: userContent,
       max_tokens: this.router.getOutputBudget('research'),
       temperature: 0.2,
     };
-    const ids = this.stateStore.enqueueTasks('research_assist', [payload], project.context.penNameSlug);
+    const ids = this.stateStore.enqueueTasks('research_assist', [payload], (project.context as any).penNameSlug);
     const taskId = ids[0];
     if (!taskId) throw new Error('research_assist enqueue failed (no task id returned)');
 
@@ -3918,7 +3918,7 @@ ${result}`;
 
     // Format content based on step type for clear visual distinction
     let content: string;
-    const isCalibration = project.type === 'style-calibration';
+    const isCalibration = (project.type as string) === 'style-calibration';
 
     if (step.taskType === 'creative_writing' || step.taskType === 'revision_execution') {
       // ── Prose Output ──

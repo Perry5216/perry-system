@@ -21,6 +21,7 @@ interface GatewayStatus {
   allowedUserCount: number;
   lastMessageAt?: string;
   lastError?: string;
+  wifeModeEnabled?: boolean;
 }
 interface PluginInfo {
   name: string;
@@ -76,6 +77,20 @@ function GatewaysCard() {
     } catch (e: any) { setErr(e.message); }
   }
 
+  async function toggleWifeMode(platform: string, currentEnabled: boolean) {
+    try {
+      const newVal = !currentEnabled ? 'true' : 'false';
+      await fetch(`/api/secrets/whatsapp_wife_mode_enabled`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: newVal }),
+        credentials: 'include',
+      });
+      await fetch(`/api/gateways/${platform}/restart`, { method: 'POST', credentials: 'include' });
+      setTimeout(refresh, 1000);
+    } catch (e: any) { setErr(e.message); }
+  }
+
   return (
     <Card title="Messaging Gateways" eyebrow="3 platforms">
       {err && <Err msg={err} />}
@@ -101,9 +116,22 @@ function GatewaysCard() {
             <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>
               <button onClick={() => restart(g.platform)} style={btnSmall}>↻ Restart</button>
               {g.platform === 'whatsapp' && (
-                <button onClick={() => setShowWaQr(s => !s)} style={btnSmall}>
-                  {showWaQr ? 'Hide' : 'Show'} QR
-                </button>
+                <>
+                  <button onClick={() => setShowWaQr(s => !s)} style={btnSmall}>
+                    {showWaQr ? 'Hide' : 'Show'} QR
+                  </button>
+                  <button 
+                    onClick={() => toggleWifeMode(g.platform, g.wifeModeEnabled !== false)} 
+                    style={{
+                      ...btnSmall,
+                      background: g.wifeModeEnabled !== false ? 'rgba(52, 211, 153, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                      borderColor: g.wifeModeEnabled !== false ? '#34d399' : '#ef4444',
+                      color: g.wifeModeEnabled !== false ? '#34d399' : '#f87171'
+                    }}
+                  >
+                    Wife Mode: {g.wifeModeEnabled !== false ? 'ON' : 'OFF'}
+                  </button>
+                </>
               )}
             </div>
             {g.platform === 'whatsapp' && showWaQr && <WhatsAppQR />}
@@ -113,6 +141,7 @@ function GatewaysCard() {
       <Help>
         Configure tokens / enabling in <strong>Secrets</strong> tab. After changing, click ↻ Restart.
         WhatsApp pairing: enable, restart, click Show QR, scan from WhatsApp → Linked Devices.
+        Wife Responder: add numbers to <code>whatsapp_wife_user_ids</code> to trigger auto-responses and memory distilling.
       </Help>
     </Card>
   );

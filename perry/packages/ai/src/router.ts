@@ -107,6 +107,7 @@ export const STEP_ROUTING_DEFAULTS: Record<string, RoutingTarget> = {
   voice_profile:       'librarian',
   revision_check:      'librarian',
   goal_judge:          'librarian',
+  wife_mode:           'librarian',
 
   // Planning / structure / analysis — off to workers (Claude / Gemini).
   outline:             'workers',
@@ -153,7 +154,7 @@ const TASK_OUTPUT_BUDGET: Record<string, number> = {
 export class AIRouter {
   private providers = new Map<string, BaseProvider>();
   public readonly config: ConfigService;
-  private vault: Vault;
+  public readonly vault: Vault;
   private log: Logger;
   public readonly compressor: ContextCompressor;
   public readonly contextWatcher: ContextWatcher;
@@ -235,8 +236,8 @@ export class AIRouter {
     }
 
     // ── Ollama Secondary = "The Librarian" (5070 Ti) ──
-    const librarianEndpoint    = process.env.OLLAMA_LIBRARIAN_BASE_URL || this.config.get<string>('ai.ollama.librarianEndpoint', 'http://localhost:11435');
-    const librarianModel       = process.env.OLLAMA_LIBRARIAN_MODEL || this.config.get<string>('ai.ollama.librarianModel', 'gemma3:12b');
+    const librarianEndpoint    = this.config.get<string>('ai.ollama.librarianEndpoint') || process.env.OLLAMA_LIBRARIAN_BASE_URL || 'http://localhost:11435';
+    const librarianModel       = this.config.get<string>('ai.ollama.librarianModel') || process.env.OLLAMA_LIBRARIAN_MODEL || 'gemma3:12b';
     const librarianCtx         = this.config.get<number>('ai.ollama.librarianContextWindow', 131072);
     const librarianTemperature = this.config.get<number>('ai.ollama.librarianTemperature', 0.1);
     const librarianTopP        = this.config.get<number>('ai.ollama.librarianTopP', 0.9);
@@ -293,11 +294,12 @@ export class AIRouter {
     //                                       transitions to/from writer
     //   librarian endpoint (5070 Ti)      → no writer-swap cost, runs in parallel
     //                                       with librarian, slower model class
-    const researcherEndpoint    = process.env.OLLAMA_RESEARCHER_BASE_URL
-      || this.config.get<string>('ai.ollama.researcherEndpoint', '')
+    const researcherEndpoint    = this.config.get<string>('ai.ollama.researcherEndpoint')
+      || process.env.OLLAMA_RESEARCHER_BASE_URL
+      || this.config.get<string>('ai.ollama.endpoint')
       || process.env.OLLAMA_BASE_URL
-      || this.config.get<string>('ai.ollama.endpoint', 'http://localhost:11434');
-    const researcherModel       = process.env.OLLAMA_RESEARCHER_MODEL || this.config.get<string>('ai.ollama.researcherModel', 'qwen3.6:27b');
+      || 'http://localhost:11434';
+    const researcherModel       = this.config.get<string>('ai.ollama.researcherModel') || process.env.OLLAMA_RESEARCHER_MODEL || 'qwen3.6:27b';
     const researcherCtx         = this.config.get<number>('ai.ollama.researcherContextWindow', 65_536);
     const researcherTemperature = this.config.get<number>('ai.ollama.researcherTemperature', 0.2);
     const researcherTopP        = this.config.get<number>('ai.ollama.researcherTopP', 0.9);

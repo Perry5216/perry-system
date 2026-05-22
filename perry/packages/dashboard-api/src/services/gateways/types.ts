@@ -13,6 +13,7 @@
 
 import type { AgentRunner } from '@perry/projects';
 import type { Logger, SecretsService } from '@perry/core';
+import type { ChatMemoryService } from '../chat-memory-service.js';
 
 export interface GatewayContext {
   agentRunner: AgentRunner;
@@ -21,6 +22,7 @@ export interface GatewayContext {
   log: Logger;
   /** Which agent to invoke by default for incoming messages. */
   defaultAgentId: string;
+  chatMemory?: ChatMemoryService;
 }
 
 export interface GatewayStatus {
@@ -36,6 +38,8 @@ export interface GatewayStatus {
   lastMessageAt?: string;
   /** Last error if any. */
   lastError?: string;
+  /** Whether Wife Mode is enabled (only applicable to WhatsApp). */
+  wifeModeEnabled?: boolean;
 }
 
 export interface Gateway {

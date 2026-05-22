@@ -436,12 +436,12 @@ async function bootstrap() {
         },
         {
           name: 'fetch_url',
-          description: 'Fetch a URL through one of Perry\'s configured network paths (direct, gluetun-uk, gluetun-us, gluetun-de). Use this when you want live data from the web — e.g. extracting current comp-title rankings, checking a publisher\'s site, pulling RSS. Returns response body (truncated to 100KB), status, content-type, and which exit was used.',
+          description: 'Fetch a URL through one of Perry\'s configured network paths (direct, gluetun-uk, gluetun-us, gluetun-de, browser). Use this when you want live data from the web — e.g. extracting current comp-title rankings, checking a publisher\'s site, pulling RSS. Returns response body (truncated to 100KB), status, content-type, and which exit was used.',
           inputSchema: {
             type: 'object',
             properties: {
               url: { type: 'string', description: 'Absolute http(s) URL to fetch.' },
-              networkPath: { type: 'string', enum: ['direct', 'gluetun-uk', 'gluetun-us', 'gluetun-de'], description: 'Routing path. Defaults to "direct".' },
+              networkPath: { type: 'string', enum: ['direct', 'gluetun-uk', 'gluetun-us', 'gluetun-de', 'browser'], description: 'Routing path. Defaults to "direct".' },
               method: { type: 'string', description: 'HTTP method. Default GET.' },
               timeoutMs: { type: 'number', description: 'Request timeout ms. Default 30000.' },
               stripHtml: { type: 'boolean', description: 'If true, strip HTML tags before returning the body. Default false.' },
@@ -495,7 +495,7 @@ async function bootstrap() {
         },
         {
           name: 'rag_search_global',
-          description: 'Cross-project semantic search. Useful for "what have I written about this character/place across ALL my books". Returns hits with projectId included.',
+          description: 'Cross-project semantic search. Useful for "what have I written about this character/place across ALL my projects". Returns hits with projectId included.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -564,7 +564,7 @@ async function bootstrap() {
             properties: {
               source_ref: { type: 'string', description: 'Stable identifier for the source (e.g. "reddit:r/printSF:thread-1gom7rk", "blog:author-z:post-42"). Idempotency key.' },
               text: { type: 'string', description: 'The captured text — thread body, blog excerpt, etc. Min 200 chars for it to be worth indexing.' },
-              source: { type: 'string', description: 'Source platform: "reddit", "blog", "amazon", "google-books", "x", "rss", etc.' },
+              source: { type: 'string', description: 'Source platform: "reddit", "blog", "amazon", "x", "rss", etc.' },
               subgenre: { type: 'string', description: 'Subgenre tag for the finding — drives coverage slicing. E.g. "cyberpunk", "epic-fantasy", "cozy-mystery".' },
               tone: { type: 'string', description: 'Optional tone descriptor: "literary-thriller", "snarky", "earnest", etc.' },
               query: { type: 'string', description: 'The query that produced this finding — feeds back into propose_skill if the query proves low/high-yield.' },
@@ -1177,20 +1177,22 @@ async function bootstrap() {
           throw new McpError(ErrorCode.InvalidParams, 'task_id required; status must be "done" or "failed"');
         }
         try {
-          const ok = stateStore.reportTask(task_id, status, result, typeof error === 'string' ? error : undefined);
+          // Workers may report `result` as a parsed object OR as a JSON-stringified
+          // string (depends on which CLI / MCP wrapper they're using). Try parsing
+          // strings first so the routing logic gets a uniform shape and to prevent
+          // double-stringifying when storing in the DB.
+          let parsedResult: any = result;
+          if (typeof result === 'string') {
+            try { parsedResult = JSON.parse(result); } catch { /* keep as string */ }
+          }
+
+          const ok = stateStore.reportTask(task_id, status, parsedResult, typeof error === 'string' ? error : undefined);
 
           // Side-effect for pipeline_step_assist tasks: when worker reports
           // success with { project_id, step_id, result } in the payload, inject
           // that result into the named step so the pipeline can resume with
           // the better output. Worker contract = include those three keys.
           //
-          // Workers may report `result` as a parsed object OR as a JSON-stringified
-          // string (depends on which CLI / MCP wrapper they're using). Try parsing
-          // strings first so the routing logic gets a uniform shape.
-          let parsedResult: any = result;
-          if (typeof result === 'string') {
-            try { parsedResult = JSON.parse(result); } catch { /* keep as string */ }
-          }
           // Lookup task type AND payload so we know whether to auto-route.
           // research_assist tasks are polled by step-runner directly (it
           // inserts the result into the project step itself), so MCP should

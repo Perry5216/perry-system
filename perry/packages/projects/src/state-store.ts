@@ -10,8 +10,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs';
-import { join } from 'path';
-import type { Project, ProjectStep, Logger } from '@perry/core';
+import { join, dirname } from 'path';
+import type { Project, ProjectStep, Logger, EventBus } from '@perry/core';
 
 export class StateStore {
   private db: any = null;
@@ -25,6 +25,15 @@ export class StateStore {
   private telemetryCache: any[] = [];
   private nextId = 1;
   private usingSqlite = false;
+  private eventBus: EventBus | null = null;
+
+  setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
+  }
+
+  getWorkspaceDir(): string {
+    return dirname(dirname(this.jsonPath));
+  }
 
   constructor(workspaceDir: string, log: Logger) {
     const configDir = join(workspaceDir, '.config');
@@ -296,7 +305,7 @@ export class StateStore {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS agent_sessions (
           id TEXT PRIMARY KEY,
-          domain TEXT NOT NULL DEFAULT 'books',
+          domain TEXT NOT NULL DEFAULT 'code',
           project_id TEXT,
           pen_slug TEXT,
           created_at TEXT NOT NULL,
@@ -311,7 +320,7 @@ export class StateStore {
           session_id TEXT NOT NULL,
           parent_invocation_id TEXT,
           agent_id TEXT NOT NULL,
-          domain TEXT NOT NULL DEFAULT 'books',
+          domain TEXT NOT NULL DEFAULT 'code',
           status TEXT NOT NULL DEFAULT 'pending',
           worker_class TEXT,
           model TEXT,
@@ -1272,12 +1281,20 @@ export class StateStore {
   reportTask(taskId: string, status: 'done' | 'failed', result?: unknown, error?: string): boolean {
     if (!this.usingSqlite || !this.db) return false;
     const now = new Date().toISOString();
+    let dbResult = result;
+    if (typeof result === 'string') {
+      try {
+        dbResult = JSON.parse(result);
+      } catch {
+        // Keep as original string if it is not valid JSON
+      }
+    }
     const r = this.db.prepare(
       `UPDATE task_pool SET status = ?, result = ?, error = ?, completed_at = ?
        WHERE id = ? AND status = 'claimed'`
     ).run(
       status,
-      result === undefined ? null : JSON.stringify(result),
+      dbResult === undefined ? null : JSON.stringify(dbResult),
       error || null,
       now,
       taskId,
@@ -1610,7 +1627,7 @@ export class StateStore {
     this.db.prepare(
       `INSERT INTO agent_sessions (id, domain, project_id, pen_slug, title, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(id, opts.domain || 'books', opts.projectId || null, opts.penSlug || null, opts.title || null, new Date().toISOString());
+    ).run(id, opts.domain || 'code', opts.projectId || null, opts.penSlug || null, opts.title || null, new Date().toISOString());
     return id;
   }
 
@@ -1832,7 +1849,7 @@ export class StateStore {
     service: string;
     skill_name: string;
     status: 'pending' | 'approved' | 'rejected' | 'executed';
-    action: 'archive' | 'merge';
+    action: 'archive' | 'merge' | 'optimize';
     details: any;
     created_at?: string;
   }): void {
@@ -1922,6 +1939,16 @@ export class StateStore {
       });
       this.persistTelemetryJson();
     }
+
+    if (this.eventBus) {
+      this.eventBus.emit('skill:execution', {
+        service,
+        name,
+        success,
+        durationMs,
+        error: error || null
+      });
+    }
   }
 
   getSkillSuccessRate(service: string, name: string): { total: number; successRate: number; avgDurationMs: number } {
@@ -1966,6 +1993,64 @@ export class StateStore {
       } catch { return []; }
     }
     return this.telemetryCache.slice(-limit).reverse();
+  }
+
+  getTrajectoriesForSkill(service: string, skillName: string): { success: any[]; failure: any[] } {
+    if (!this.usingSqlite || !this.db) {
+      return { success: [], failure: [] };
+    }
+    try {
+      // 1. Search for trajectories containing the skillName in their messages or tool_calls
+      const matches = this.db.prepare(`
+        SELECT * FROM agent_trajectories
+        WHERE messages LIKE ? OR tool_calls LIKE ?
+        ORDER BY created_at DESC
+        LIMIT 50
+      `).all(`%${skillName}%`, `%${skillName}%`) as any[];
+
+      const parseRow = (r: any) => ({
+        ...r,
+        messages: r.messages ? (() => { try { return JSON.parse(r.messages); } catch { return []; } })() : [],
+        tool_calls: r.tool_calls ? (() => { try { return JSON.parse(r.tool_calls); } catch { return null; } })() : null,
+      });
+
+      let success = matches.filter(r => r.outcome === 'success').map(parseRow);
+      let failure = matches.filter(r => r.outcome === 'failed' || r.outcome === 'rejected').map(parseRow);
+
+      // 2. If we don't have enough matches, fallback to querying recent trajectories of the matching service/agent
+      if (success.length < 5 || failure.length < 5) {
+        const fallback = this.db.prepare(`
+          SELECT * FROM agent_trajectories
+          WHERE agent_id = ? OR domain = ? OR worker_class = ?
+          ORDER BY created_at DESC
+          LIMIT 50
+        `).all(service, service, service) as any[];
+
+        const fallbackSuccess = fallback.filter(r => r.outcome === 'success').map(parseRow);
+        const fallbackFailure = fallback.filter(r => r.outcome === 'failed' || r.outcome === 'rejected').map(parseRow);
+
+        for (const item of fallbackSuccess) {
+          if (success.length >= 10) break;
+          if (!success.some(s => s.id === item.id)) {
+            success.push(item);
+          }
+        }
+        for (const item of fallbackFailure) {
+          if (failure.length >= 10) break;
+          if (!failure.some(f => f.id === item.id)) {
+            failure.push(item);
+          }
+        }
+      }
+
+      return {
+        success: success.slice(0, 10),
+        failure: failure.slice(0, 10)
+      };
+    } catch (err: any) {
+      this.log.error('Failed to get trajectories for skill', { skillName, service, error: err.message });
+      return { success: [], failure: [] };
+    }
   }
 }
 

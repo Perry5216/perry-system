@@ -11,15 +11,7 @@
 
 export type ProjectType =
   | 'software-dev'
-  | 'book-planning'
-  | 'novel-pipeline'
-  | 'deep-revision'
-  | 'revision-execution'
-  | 'book-production'
-  | 'short-story'
-  | 'style-calibration'
-  | 'book-cover'
-  | 'amazon-kdp-launch';
+  | 'dynamic-skills';
 
 export type ProjectStatus = 'pending' | 'active' | 'paused' | 'completed' | 'failed';
 export type StepStatus = 'pending' | 'active' | 'completed' | 'failed' | 'skipped';
@@ -79,47 +71,10 @@ export interface ProjectStep {
 }
 
 export interface ProjectContext {
-  targetChapters?: number;
-  targetWordsPerChapter?: number;
-  estimatedTotalWords?: number;
-  includePrologue?: boolean;
-  includeEpilogue?: boolean;
   hasParent?: boolean;
-  /**
-   * When true, chapters are split into per-scene segments (~1200 words each)
-   * driven by the Scene Breakdown in the Story Architecture document.
-   * v7 (and other trained LoRAs) write tighter prose in scene-sized chunks
-   * than in 3000-word monoliths. Default false for backward compatibility.
-   */
-  sceneByScene?: boolean;
-  isSeries?: boolean;
-  seriesTotalBooks?: number;
-  seriesCurrentBook?: number;
-  isInfiniteCalibration?: boolean;
-  /**
-   * When true, this project is flagged for external pair contribution via the
-   * MCP server. The flag is stored verbatim — the MCP tools choose whether to
-   * gate their behaviour on it. Future Phase B audit logic may also key off it.
-   */
-  claudeCollectionEnabled?: boolean;
-  /**
-   * When true, the post-training audit (Phase B) is allowed to auto-promote
-   * a passing LoRA to be the pen's writer. Default false → manual promotion.
-   */
-  promoteOnComplete?: boolean;
   reviewMode?: boolean;
   planning?: string;
   config?: Record<string, unknown>;
-  penName?: string;
-  penNameSlug?: string;
-  coverVariants?: number;
-  coverFont?: string;
-  brandColor?: string;
-  /** 
-   * Maps chapter numbers (0=Prologue, 1=Chapter 1) to their actual word count.
-   * Inherited from parent projects so revision segments can scale dynamically.
-   */
-  chapterWordCounts?: Record<number, number>;
 }
 
 export interface Project {
@@ -323,7 +278,7 @@ export interface EventMap {
   //
   //   source       — which subsystem produced the event ("director",
   //                  "audit", "gc", "prompt-builder", "scout", or a
-  //                  domain like "hacking" / "code" / "books").
+  //                  domain like "hacking" / "code" / "meta").
   //                  Determines the proposed skill's service tag.
   //   kind         — the pattern bucket within the source
   //                  ("rag-miss", "dir-growth", "step-fail",
@@ -339,6 +294,7 @@ export interface EventMap {
   'learning:failure':     { source: string; kind: string; fingerprint: string; error: string; metadata?: Record<string, any> };
   'learning:observation': { source: string; kind: string; fingerprint: string; value?: number; metadata?: Record<string, any> };
   'learning:duration':    { source: string; kind: string; fingerprint: string; durationMs: number; metadata?: Record<string, any> };
+  'skill:execution':      { service: string; name: string; success: boolean; durationMs: number; error: string | null };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -348,10 +304,9 @@ export interface EventMap {
 /**
  * Domains group agents by purpose. Each domain has its own agents,
  * tool ACL, default model bindings, and memory namespace. The
- * `books` domain holds Perry's existing book pipeline; other domains
- * (code, email, hacking, meta) extend the framework.
+ * core domains (code, email, hacking, meta) extend the framework.
  */
-export type AgentDomain = 'books' | 'code' | 'email' | 'hacking' | 'meta';
+export type AgentDomain = 'code' | 'email' | 'hacking' | 'meta';
 
 /**
  * Map a ProjectType to its domain. Every project type belongs to exactly
@@ -361,17 +316,8 @@ export type AgentDomain = 'books' | 'code' | 'email' | 'hacking' | 'meta';
 export function projectTypeDomain(type: ProjectType): AgentDomain {
   switch (type) {
     case 'software-dev':
+    case 'dynamic-skills':
       return 'code';
-    case 'book-planning':
-    case 'novel-pipeline':
-    case 'deep-revision':
-    case 'revision-execution':
-    case 'book-production':
-    case 'short-story':
-    case 'style-calibration':
-    case 'book-cover':
-    case 'amazon-kdp-launch':
-      return 'books';
     // Future domains add their project types above this default.
     default:
       return 'code';
@@ -404,7 +350,7 @@ export type CompressionLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
  * the per-invocation override, not the registry entry.
  */
 export interface AgentDefinition {
-  id: string;                                  // e.g. 'books.critic'
+  id: string;                                  // e.g. 'code.critic'
   domain: AgentDomain;
   label: string;
   description: string;

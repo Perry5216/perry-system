@@ -42,7 +42,7 @@ interface Invocation {
 
 const TRAIN_THRESHOLD = 500;
 const DOMAIN_COLORS: Record<string, string> = {
-  books: '#FFD166', code: '#7CFC00', email: '#4ECDC4', hacking: '#FF6B6B', meta: '#E2E8F0',
+  code: '#7CFC00', email: '#4ECDC4', hacking: '#FF6B6B', meta: '#E2E8F0',
 };
 const PROVIDER_COLORS: Record<string, string> = {
   writer: '#A855F7', librarian: '#22D3EE', researcher: '#7CFC00',

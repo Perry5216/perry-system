@@ -126,10 +126,17 @@ export function createServer(
   // show "the system is actually observing" before the first skill fires.
   app.use('/api/learning', setupLearningRoutes(stateStore, workspaceDir, log.child('learning'), learningCore, skillEvolution));
   // Domain registry — define new task verticals (code-review, security-research,
-  // etc.) and configure which dashboard panels each surfaces. The "books"
-  // built-in is auto-seeded on first boot.
+  // etc.) and configure which dashboard panels each surfaces.
   const domainRegistry = new DomainRegistry({ workspaceDir, log: log.child('domains') });
-  app.use('/api/domains', setupDomainsRoutes(domainRegistry, log.child('domains')));
+  app.use('/api/domains', setupDomainsRoutes({
+    registry: domainRegistry,
+    log: log.child('domains'),
+    aiRouter,
+    projectEngine,
+    mcpClient: projectEngine.getMcpClient(),
+    eventBus,
+    workspaceDir,
+  }));
   // Operator profile (User Modeling) — builds a dialectic model of the human
   // driving Perry across sessions. Updated on every project create / skill
   // curate / chat / step edit event; distillable via librarian.
@@ -143,8 +150,7 @@ export function createServer(
     app.use('/api/cron', setupCronRoutes(cronService, log.child('cron')));
   }
   // Generic web search — env-keyed backends (Tavily / Exa / Firecrawl).
-  // Domain-agnostic; lets any task pull general web context, not just the
-  // book scout's hardcoded sources.
+  // Domain-agnostic; lets any task pull general web context.
   app.use('/api/search', setupSearchRoutes(log.child('search')));
   // OpenAI-compatible API — turn Perry into a model that any external chat
   // app (ChatBox, LibreChat, NextChat, Open WebUI, custom scripts) can call
@@ -174,7 +180,7 @@ export function createServer(
   }));
 
   // Secrets vault management — /api/secrets, /api/secrets-audit.
-  app.use('/api', setupSecretsRoutes(secrets, log.child('secrets')));
+  app.use('/api', setupSecretsRoutes(secrets, log.child('secrets'), aiRouter));
 
   // Model management — /api/models, /api/models/pull, /api/models/show,
   // /api/models/suggestions. Wraps Ollama HTTP API directly.

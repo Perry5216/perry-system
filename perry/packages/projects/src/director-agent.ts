@@ -11,7 +11,7 @@
  *
  * The Director's `canDelegate: true` flag in the registry means
  * AgentRunner automatically adds the `invoke_agent` meta-tool, so the
- * Director can dispatch to other registered agents (books.critic,
+ * Director can dispatch to other registered agents (code.reviewer,
  * code.implementer, etc.) without any special-casing here.
  */
 
@@ -126,7 +126,7 @@ export class DirectorAgent {
     const sessionId = openSession?.id || this.stateStore.createAgentSession({
       domain: 'meta',
       projectId,
-      penSlug: project.context?.penNameSlug,
+      penSlug: (project.context as any)?.penNameSlug,
       title: `Director chat: ${project.title}`,
     });
 
@@ -167,7 +167,7 @@ export class DirectorAgent {
         agent: projectAwareDirector,
         sessionId,
         input: message,
-        penSlug: project.context?.penNameSlug,
+        penSlug: (project.context as any)?.penNameSlug,
         history: seedHistory,
       });
     } catch (e: any) {
@@ -489,7 +489,7 @@ Proceed with the next step now.`;
       const sessionId = openSession?.id || this.stateStore.createAgentSession({
         domain: 'meta',
         projectId,
-        penSlug: project.context?.penNameSlug,
+        penSlug: (project.context as any)?.penNameSlug,
         title: `Goal loop: ${goal.text}`,
       });
 
@@ -507,7 +507,7 @@ Proceed with the next step now.`;
           agent: goalAwareDirector,
           sessionId,
           input: loopPrompt,
-          penSlug: project.context?.penNameSlug,
+          penSlug: (project.context as any)?.penNameSlug,
           history,
         });
       } catch (err: any) {

@@ -22,6 +22,8 @@ import { TelegramGateway } from './gateways/telegram-gateway.js';
 import { DiscordGateway } from './gateways/discord-gateway.js';
 import { WhatsAppGateway } from './gateways/whatsapp-gateway.js';
 
+import type { ChatMemoryService } from './chat-memory-service.js';
+
 export class GatewayManager {
   private gateways: Gateway[] = [];
   private context: GatewayContext;
@@ -33,6 +35,7 @@ export class GatewayManager {
     eventBus: EventBus;
     secrets: SecretsService;
     log: Logger;
+    chatMemory?: ChatMemoryService;
   }) {
     const runner = new AgentRunner(
       opts.aiRouter,
@@ -47,6 +50,7 @@ export class GatewayManager {
       stateStore: opts.stateStore,
       log: opts.log,
       defaultAgentId: 'meta.director',
+      chatMemory: opts.chatMemory,
     };
   }
 

@@ -10,7 +10,12 @@
 import { rmSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { StateStore, DirectorAgent, LibrarianService } from '../projects/src/index.js';
+import { StateStore, DirectorAgent, LibrarianService, AGENT_REGISTRY } from '../projects/src/index.js';
+
+// Force meta.director to use librarian provider during tests instead of workers to run local LLM loop
+if (AGENT_REGISTRY['meta.director']) {
+  AGENT_REGISTRY['meta.director'].modelBinding.provider = 'librarian';
+}
 
 let passed = 0;
 let failed = 0;
@@ -72,6 +77,10 @@ class MockAIRouter {
   public judgeCalls = 0;
   public completeCalls = 0;
   public forceCompletion = false;
+
+  selectProvider(role: string) {
+    return { id: 'mock-provider-id' };
+  }
 
   async complete(req: any) {
     this.completeCalls++;

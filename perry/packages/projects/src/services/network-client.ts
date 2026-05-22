@@ -217,6 +217,14 @@ export class NetworkClient {
    * want exceptions should wrap manually.
    */
   static async fetch(url: string, opts: FetchOptions = {}): Promise<FetchResult> {
+    let networkPath: NetworkPath = opts.networkPath || 'direct';
+    if (!opts.networkPath) {
+      const isSearchEngine = /(?:^|\.)(?:duckduckgo\.com|google\.com|bing\.com)\//i.test(url);
+      if (isSearchEngine) {
+        networkPath = 'browser';
+      }
+    }
+
     // Resolve any `{{secret_name}}` placeholders BEFORE any logging or
     // cache lookup so the encrypted value never appears in either path.
     const resolvedUrl = NetworkClient.resolveSecretsInUrl(url);
@@ -224,7 +232,7 @@ export class NetworkClient {
       return {
         status: 0, ok: false,
         text: '[skipped: required secret placeholder not set]',
-        finalUrl: url, networkPath: opts.networkPath || 'direct',
+        finalUrl: url, networkPath,
         durationMs: 0, contentType: '', byteCount: 0,
       };
     }
@@ -234,7 +242,6 @@ export class NetworkClient {
     // cache by the *placeholder* URL instead.
     const cacheKey = url;
     url = resolvedUrl;
-    const networkPath: NetworkPath = opts.networkPath || 'direct';
 
     // Cache lookup — only for GET-like requests (Reddit/OL/Amazon JSON+HTML
     // is all idempotent). Skip cache for non-GET methods.

@@ -25,4 +25,7 @@ export { DomainRegistry } from './services/domain-registry.js';
 export type { DomainDefinition } from './services/domain-registry.js';
 export { LibrarianService } from './services/librarian-service.js';
 export type { LibrarianPassResult } from './services/librarian-service.js';
+export { SkillOptimizerService } from './services/skill-optimizer.js';
+export type { MutationCandidate } from './services/skill-optimizer.js';
+
 

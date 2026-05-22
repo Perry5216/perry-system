@@ -36,15 +36,11 @@ export const KNOWN_SECRETS = [
   { name: 'perry_webhook_secret',    envFallback: 'PERRY_WEBHOOK_SECRET',   required: false,
     purpose: 'HMAC signature verification on inbound webhooks. Required only if you receive webhooks.' },
 
-  // Reddit OAuth for book research (NOT a worker model)
+  // Reddit OAuth for research (NOT a worker model)
   { name: 'reddit_client_id',        envFallback: 'REDDIT_CLIENT_ID',       required: false,
     purpose: 'Reddit OAuth client ID — research path falls back to proxy pool when absent.' },
   { name: 'reddit_client_secret',    envFallback: 'REDDIT_CLIENT_SECRET',   required: false,
     purpose: 'Reddit OAuth client secret. Paired with reddit_client_id.' },
-
-  // Google Books API (small free quota; not an LLM provider)
-  { name: 'google_books_api_key',    envFallback: 'GOOGLE_BOOKS_API_KEY',   required: false,
-    purpose: 'Google Books API. Powers Source 6 in Live Comp Title Scout.' },
 
   // Messaging gateway bot tokens. Created via Telegram @BotFather / Discord
   // Developer Portal. Both are OPTIONAL — gateways stay dormant when blank.
@@ -60,8 +56,18 @@ export const KNOWN_SECRETS = [
     purpose: 'Comma-separated Telegram user IDs allowed to message the bot.' },
   { name: 'discord_allowed_user_ids',  envFallback: 'DISCORD_ALLOWED_USER_IDS',  required: false,
     purpose: 'Comma-separated Discord user IDs allowed to message the bot.' },
+  { name: 'whatsapp_enabled', envFallback: 'WHATSAPP_ENABLED', required: false,
+    purpose: 'Enable WhatsApp integration: "true" or "false".' },
+  { name: 'whatsapp_allowed_user_ids', envFallback: 'WHATSAPP_ALLOWED_USER_IDS', required: false,
+    purpose: 'Comma-separated WhatsApp phone number JIDs allowed to message the bot.' },
   { name: 'whatsapp_typing_mode', envFallback: 'WHATSAPP_TYPING_MODE', required: false,
     purpose: 'Typing illusion behavior: "edit" (send space, then edit), "delete" (send space, then delete), or "typing_only" (keep typing status active and send normally).' },
+  { name: 'whatsapp_wife_user_ids', envFallback: 'WHATSAPP_WIFE_USER_IDS', required: false,
+    purpose: 'Comma-separated WhatsApp JIDs allowed to trigger Wife Response Mode.' },
+  { name: 'whatsapp_wife_responder_prompt', envFallback: 'WHATSAPP_WIFE_RESPONDER_PROMPT', required: false,
+    purpose: 'Custom system prompt overriding the default texting persona in Wife Response Mode.' },
+  { name: 'whatsapp_wife_mode_enabled', envFallback: 'WHATSAPP_WIFE_MODE_ENABLED', required: false,
+    purpose: 'Enable or disable Wife Response Mode (e.g. "true" or "false"). Defaults to "true".' },
 ] as const;
 
 export type KnownSecretName = (typeof KNOWN_SECRETS)[number]['name'];

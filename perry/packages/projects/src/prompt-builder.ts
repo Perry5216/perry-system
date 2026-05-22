@@ -457,13 +457,13 @@ export class PromptBuilder {
     // them out from parent inheritance and let the description (own or
     // parent-fallback) be the sole anchor.
     const isMetaRoutingStep = (step.label === 'Concept Keywords' || step.label === 'KDP Concept Keywords') &&
-      (project.type === 'book-planning' || project.type === 'amazon-kdp-launch');
+      ((project.type as string) === 'book-planning' || (project.type as string) === 'amazon-kdp-launch');
 
     if (project.parentId && !isMetaRoutingStep) {
       const parent = this.stateStore.get(project.parentId);
       if (parent) {
         let planningPhases: string[] = ['bible', 'outline', 'premise'];
-        if (project.type === 'style-calibration') {
+        if ((project.type as string) === 'style-calibration') {
           // Pull voice / character / world / faction bibles + premise +
           // research. Research includes Market & Genre Analysis (target
           // audience, comp titles, reader-praise themes, anti-patterns,
@@ -479,7 +479,7 @@ export class PromptBuilder {
           planningPhases = ['bible', 'premise']; // Exclude outline to prevent spoilers
         } else if (step.phase === 'writing') {
           planningPhases = []; // Handled specifically by getWritingContextSlots
-        } else if (project.type === 'amazon-kdp-launch') {
+        } else if ((project.type as string) === 'amazon-kdp-launch') {
           // KDP Launch consumes the planning project's MARKET RESEARCH (comp
           // titles, blurb hook patterns, BSR ladder, cover trends, working
           // keyword set) as its primary input. Without `research` phase
@@ -499,7 +499,7 @@ export class PromptBuilder {
         // names, after which the model invariably re-ranks characters wrong
         // (e.g. demoting 6 of 7 Tier 1 POVs into Tier 2/3). For this one step
         // we inject the parent's Character Bible UNCOMPRESSED with high priority.
-        const isCastExtraction = step.label === 'Cast Extraction' && project.type === 'style-calibration';
+        const isCastExtraction = step.label === 'Cast Extraction' && (project.type as string) === 'style-calibration';
 
         const parentPlanningSteps = parent.steps.filter(
           s => s.status === 'completed' && s.result && planningPhases.includes(s.phase),
@@ -557,7 +557,7 @@ export class PromptBuilder {
     // the Book Bible is the dominant indexed document, so it always wins the
     // similarity search and gets injected into POV checks and Summary steps,
     // causing the LLM to summarise the Bible instead of grading the prose.
-    const isCalibrationAnalysis = project.type === 'style-calibration' &&
+    const isCalibrationAnalysis = (project.type as string) === 'style-calibration' &&
       (step.taskType === 'pov_check' || step.taskType === 'analysis');
 
     // ── BUG FIX #3: Skip RAG for network_research + Concept Keywords ──
@@ -570,7 +570,7 @@ export class PromptBuilder {
     // unrelated military-fiction project's keyword scout.
     const isNetworkResearch = step.taskType === 'network_research';
     const isConceptKeywords = (step.label === 'Concept Keywords' || step.label === 'KDP Concept Keywords') &&
-      (project.type === 'book-planning' || project.type === 'amazon-kdp-launch');
+      ((project.type as string) === 'book-planning' || (project.type as string) === 'amazon-kdp-launch');
     const skipContextEngine = isCalibrationAnalysis || isNetworkResearch || isConceptKeywords;
 
     // ── P2-P4: Context from ContextEngine ──
@@ -610,14 +610,14 @@ export class PromptBuilder {
       // ── P2: Revision execution — inject action plan + original chapter + all audit findings ──
       const execSlots = await this.getRevisionExecutionSlots(project, step);
       slots.push(...execSlots);
-    } else if (project.type === 'style-calibration' && step.taskType === 'analysis' && step.label.includes('Summary')) {
+    } else if ((project.type as string) === 'style-calibration' && step.taskType === 'analysis' && step.label.includes('Summary')) {
       // ── BUG FIX #2: Explicit routing for Calibration Summary steps ──
       // The Summary step has taskType='analysis' and phase='analysis', which
       // previously fell through to the generic else-branch and only got 1 POV
       // report (the immediately preceding step). Now it gets all 3 with P1 priority.
       const calSlots = await this.getCalibrationSummarySlots(project, step);
       slots.push(...calSlots);
-    } else if (project.type === 'revision-execution' && step.label === 'Revision Action Plan') {
+    } else if ((project.type as string) === 'revision-execution' && step.label === 'Revision Action Plan') {
       // ── BUG FIX (templates audit): Revision Action Plan ──
       // Step 1 of Revision Execution synthesises Deep Revision findings, but as
       // an `analysis` task it fell through to the default else-branch and only
@@ -626,7 +626,7 @@ export class PromptBuilder {
       // parent Deep Revision project so the synthesis has its source material.
       const planSlots = await this.getRevisionPlanSlots(project, step);
       slots.push(...planSlots);
-    } else if (project.type === 'deep-revision' && step.taskType === 'analysis' &&
+    } else if ((project.type as string) === 'deep-revision' && step.taskType === 'analysis' &&
                (step.label === 'Structural Arc Audit' || step.label === 'Character Arc Tracker' ||
                 step.label === 'Thematic Cohesion Report' || step.label === 'Full Revision Summary Report')) {
       // ── BUG FIX (templates audit): Manuscript-level Deep Revision audits ──
@@ -636,7 +636,7 @@ export class PromptBuilder {
       // pulls planning phases. Pull all chapter texts from the parent project.
       const manuscriptSlots = await this.getManuscriptAuditSlots(project, step);
       slots.push(...manuscriptSlots);
-    } else if (project.type === 'book-production' && step.taskType === 'final_edit') {
+    } else if ((project.type as string) === 'book-production' && step.taskType === 'final_edit') {
       // ── BUG FIX: Book Production's Final Prose Polish needs the manuscript ──
       // The Final Prose Polish step previously had no parent-chapter inheritance —
       // it would receive a "polish the manuscript" instruction with no manuscript
@@ -865,8 +865,8 @@ export class PromptBuilder {
    * (for child projects) the parent's penNameSlug, defaulting to 'default'.
    */
   private async addPenContextSlots(slots: ContextSlot[], project: Project, currentStep: ProjectStep): Promise<void> {
-    const penSlug = (project.context.penNameSlug
-      || (project.parentId ? this.stateStore.get(project.parentId)?.context?.penNameSlug : undefined)
+    const penSlug = ((project.context as any).penNameSlug
+      || (project.parentId ? (this.stateStore.get(project.parentId)?.context as any)?.penNameSlug : undefined)
       || 'default') as string;
 
     // 1. Voice anchors — gold-tier curated prose samples in meta['voice_anchors_{slug}'].
@@ -1424,7 +1424,7 @@ export class PromptBuilder {
     // receive malformed context ("Chapter 101: [not found]") and wastes Librarian calls.
     // Calibration writing steps only need: prior-pass directives + segment continuity.
     // Calibration pov_check steps only need: the chapter text to grade (injected separately).
-    if (project.type === 'style-calibration') {
+    if ((project.type as string) === 'style-calibration') {
       // ── BUG FIX #4: inject prior-pass directives for BOTH writing AND pov_check ──
       // Previously only writing steps (isWriting) got the directives. POV checks for
       // Pass 2+ also need to know what was supposed to be fixed so they grade accordingly.
@@ -1689,8 +1689,8 @@ export class PromptBuilder {
       // book — the writer has nothing prose-shaped to anchor against.
       if (!injected) {
         try {
-          const penSlug = (project.context?.penNameSlug
-            || (project.parentId ? this.stateStore.get(project.parentId)?.context?.penNameSlug : undefined)
+          const penSlug = ((project.context as any)?.penNameSlug
+            || (project.parentId ? (this.stateStore.get(project.parentId)?.context as any)?.penNameSlug : undefined)
             || 'default') as string;
           const raw = this.stateStore.getMeta(`voice_anchors_${penSlug}`);
           if (raw) {
@@ -2204,7 +2204,7 @@ export class PromptBuilder {
     const slots: ContextSlot[] = [];
     const chapterNum = currentStep.chapterNumber;
     const isPrologue = chapterNum === 0;
-    const isEpilogue = chapterNum !== undefined && project.context.targetChapters !== undefined && chapterNum > project.context.targetChapters;
+    const isEpilogue = chapterNum !== undefined && (project.context as any).targetChapters !== undefined && chapterNum > (project.context as any).targetChapters;
     const chName = isPrologue ? 'Prologue' : isEpilogue ? 'Epilogue' : `Chapter ${chapterNum}`;
     const familyCompleted = this.getFamilyCompletedSteps(project.id);
 
@@ -2489,7 +2489,7 @@ export class PromptBuilder {
     for (const ch of chapters) {
       const chapterNum = ch.chapterNumber ?? 0;
       const chName = chapterNum === 0 ? 'Prologue'
-        : (project.context.targetChapters !== undefined && chapterNum > project.context.targetChapters)
+        : ((project.context as any).targetChapters !== undefined && chapterNum > (project.context as any).targetChapters)
           ? 'Epilogue'
           : `Chapter ${chapterNum}`;
       const compressed = await this.tryCompress(

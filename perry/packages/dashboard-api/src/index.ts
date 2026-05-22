@@ -35,6 +35,7 @@ async function bootstrap() {
   //    can be resolved from pen_name_records (Phase 0 pen-aware writer swap).
   const stateStore = new StateStore(WORKSPACE, log.child('state'));
   await stateStore.initialize();
+  stateStore.setEventBus(eventBus);
 
   // Attach DB to SecretsService so audit log writes work.
   secrets.setDb((stateStore as any).db);
@@ -311,7 +312,7 @@ async function bootstrap() {
   // agent loads at the start of every new chat. Closes the cross-session
   // learning loop for the dashboard chat.
   const { ChatMemoryService } = await import('./services/chat-memory-service.js');
-  const chatMemory = new ChatMemoryService(WORKSPACE, stateStore, aiRouter, log.child('chat-memory'));
+  const chatMemory = new ChatMemoryService(WORKSPACE, stateStore, aiRouter, log.child('chat-memory'), secrets);
 
   // ── Framework-wide self-learning core ─────────────────────────────────
   // LearningCore is the single brain that subscribes to all learning:*
@@ -330,7 +331,7 @@ async function bootstrap() {
   const { LearningCore } = await import('./services/learning-core.js');
   const learningCore = new LearningCore(eventBus, stateStore, learningSkillProposer, log.child('learning-core'), WORKSPACE, trajectoryWriter);
   const { SkillEvolution } = await import('./services/skill-evolution.js');
-  const skillEvolution = new SkillEvolution(WORKSPACE, log.child('skill-evolution'), eventBus);
+  const skillEvolution = new SkillEvolution(WORKSPACE, log.child('skill-evolution'), eventBus, stateStore, aiRouter);
   const { OperatorProfileService } = await import('./services/operator-profile-service.js');
   const operatorProfile = new OperatorProfileService(WORKSPACE, log.child('operator-profile'), eventBus);
   const { CronService } = await import('./services/cron-service.js');
@@ -355,6 +356,7 @@ async function bootstrap() {
     mcpClient: projectEngine.getMcpClient(),
     eventBus,
     secrets,
+    chatMemory,
     log: log.child('gateway'),
   });
 

@@ -18,8 +18,9 @@
 
 import { Router } from 'express';
 import type { Logger, SecretsService } from '@perry/core';
+import type { AIRouter } from '@perry/ai';
 
-export function setupSecretsRoutes(secrets: SecretsService, log: Logger) {
+export function setupSecretsRoutes(secrets: SecretsService, log: Logger, aiRouter?: AIRouter) {
   const router = Router();
 
   router.get('/secrets', (_req, res) => {
@@ -35,6 +36,22 @@ export function setupSecretsRoutes(secrets: SecretsService, log: Logger) {
     }
     try {
       await secrets.set(name, value, 'dashboard');
+
+      if (name === 'whatsapp_wife_mode_enabled' && value === 'false' && aiRouter) {
+        const librarianEndpointOrig = () => process.env.OLLAMA_LIBRARIAN_BASE_URL
+          || aiRouter.config.get<string>('ai.ollama.librarianEndpoint', 'http://localhost:11435');
+        const libEndpoint = librarianEndpointOrig();
+        const modelName = 'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest';
+        log.info('Wife Mode disabled, unloading model from VRAM', { model: modelName, endpoint: libEndpoint });
+        fetch(`${libEndpoint}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelName, prompt: '', keep_alive: 0, stream: false }),
+        }).catch(err => {
+          log.warn('Failed to unload Wife Mode model', { error: err.message });
+        });
+      }
+
       res.json({ ok: true, name });
     } catch (e: any) {
       log.error('secret set failed', { name, error: e.message });
@@ -63,6 +80,22 @@ export function setupSecretsRoutes(secrets: SecretsService, log: Logger) {
     if (!name) return res.status(400).json({ error: 'invalid secret name' });
     try {
       const existed = await secrets.delete(name, 'dashboard');
+
+      if (name === 'whatsapp_wife_mode_enabled' && aiRouter) {
+        const librarianEndpointOrig = () => process.env.OLLAMA_LIBRARIAN_BASE_URL
+          || aiRouter.config.get<string>('ai.ollama.librarianEndpoint', 'http://localhost:11435');
+        const libEndpoint = librarianEndpointOrig();
+        const modelName = 'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest';
+        log.info('Wife Mode secret deleted, unloading model from VRAM', { model: modelName, endpoint: libEndpoint });
+        fetch(`${libEndpoint}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelName, prompt: '', keep_alive: 0, stream: false }),
+        }).catch(err => {
+          log.warn('Failed to unload Wife Mode model', { error: err.message });
+        });
+      }
+
       res.json({ ok: true, name, existed });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e.message });

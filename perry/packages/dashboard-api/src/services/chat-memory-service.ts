@@ -34,7 +34,7 @@
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync, statSync } from 'fs';
 import { join } from 'path';
-import type { Logger } from '@perry/core';
+import type { Logger, SecretsService } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
 import type { StateStore } from '@perry/projects';
 
@@ -68,6 +68,7 @@ export class ChatMemoryService {
     private stateStore: StateStore,
     private aiRouter: AIRouter,
     private log: Logger,
+    private secrets: SecretsService,
   ) {
     this.memoryDir = join(workspaceDir, CHAT_MEMORY_DIR_NAME);
     this.globalPath = join(this.memoryDir, GLOBAL_MEMORY_FILENAME);
@@ -81,6 +82,29 @@ export class ChatMemoryService {
     } catch { return null; }
   }
 
+  /** Returns the wife/partner memory file as a string (or null if it doesn't exist). */
+  loadMemoryForJid(jid: string): string | null {
+    try {
+      const path = join(this.memoryDir, `wife-${jid}.md`);
+      if (!existsSync(path)) return null;
+      return readFileSync(path, 'utf-8');
+    } catch { return null; }
+  }
+
+  private wifeFileHeader(jid: string): string {
+    return [
+      `# WhatsApp Chat Memory - ${jid}`,
+      '',
+      'Auto-distilled summaries of past WhatsApp chat sessions with wife/partner. ',
+      'The wife-responder agent loads this file at the start of every new chat so it ',
+      'remembers what was discussed. Newest entries appear first.',
+      '',
+      'Edit by hand if a summary captured something wrong — your edits ',
+      'survive future distillations (only new sessions are appended).',
+      '',
+    ].join('\n');
+  }
+
   /**
    * Distill one session if it's ready (idle + has new content). Idempotent —
    * if there's nothing new since the last distill, returns `distilled: false`
@@ -91,10 +115,28 @@ export class ChatMemoryService {
     if (!session) return { sessionId, distilled: false, reason: 'session-not-found' };
 
     // We only care about meta-domain sessions for the LandingChat path. Other
-    // domains (books.*, code.*) have their own conversations that don't share
+    // domains (code.*) have their own conversations that don't share
     // the global Perry-chat memory.
     if (session.domain !== 'meta') {
       return { sessionId, distilled: false, reason: `domain=${session.domain} (skipped)` };
+    }
+
+    let memoryPath = this.globalPath;
+    let isWifeSession = false;
+    let wifeJid = '';
+    if (session.title && session.title.startsWith('whatsapp:')) {
+      const parts = session.title.split(':');
+      const jid = parts[1];
+      const wifeEnabled = this.secrets.getSync('whatsapp_wife_mode_enabled') !== 'false';
+      if (wifeEnabled) {
+        const wifeRaw = this.secrets.getSync('whatsapp_wife_user_ids') || '';
+        const wifeIds = new Set(wifeRaw.split(',').map((s: string) => s.trim()).filter(Boolean));
+        if (wifeIds.has(jid)) {
+          isWifeSession = true;
+          wifeJid = jid;
+          memoryPath = join(this.memoryDir, `wife-${wifeJid}.md`);
+        }
+      }
     }
 
     const invocations = this.stateStore.listAgentInvocations({ sessionId, limit: 500 });
@@ -135,14 +177,20 @@ export class ChatMemoryService {
 
     let summaryText: string;
     try {
-      const result = await this.aiRouter.compressor.compress({
-        rawContext: transcript,
-        taskDescription:
-          'Summarise a chat conversation between the user and Perry (an AI assistant). ' +
+      const taskDescription = isWifeSession
+        ? 'Summarise a chat conversation between the user (acting as the husband/partner) and their wife. ' +
+          'Capture: (1) main TOPICS discussed, (2) DECISIONS or preferences expressed, ' +
+          '(3) OPEN questions or things they said they\'d return to. ' +
+          'Bullet form. Lead each bullet with a noun ("topic:", "decision:", "open:").'
+        : 'Summarise a chat conversation between the user and Perry (an AI assistant). ' +
           'Capture: (1) main TOPICS discussed, (2) DECISIONS or preferences the user expressed, ' +
           '(3) OPEN questions or things the user said they\'d return to. ' +
           'Bullet form. Lead each bullet with a noun ("topic:", "decision:", "open:"). ' +
-          'Stay concrete — name files, projects, pens by their actual names if mentioned.',
+          'Stay concrete — name files, projects, pens by their actual names if mentioned.';
+
+      const result = await this.aiRouter.compressor.compress({
+        rawContext: transcript,
+        taskDescription,
         targetTokens: SUMMARY_TARGET_TOKENS,
         mode: 'context_briefing',
       });
@@ -168,7 +216,9 @@ export class ChatMemoryService {
         '---',
         '',
       ].join('\n');
-      const existing = this.loadGlobal() || this.fileHeader();
+      const existing = isWifeSession
+        ? (this.loadMemoryForJid(wifeJid) || this.wifeFileHeader(wifeJid))
+        : (this.loadGlobal() || this.fileHeader());
       // Insert the new entry just after the file header, before any older
       // entries. Newest-first ordering matches how SOUL.md surfaces recent
       // updates and lets the director see fresh context first if we ever
@@ -182,7 +232,7 @@ export class ChatMemoryService {
       }
       // Cap entries: keep MAX_ENTRIES most-recent ## sections. Drop older.
       updated = this.capEntries(updated, MAX_ENTRIES);
-      writeFileSync(this.globalPath, updated, 'utf-8');
+      writeFileSync(memoryPath, updated, 'utf-8');
       this.stateStore.setMeta(`chat_memory_last_distilled_${sessionId}`, new Date().toISOString());
       this.log.info('chat-memory distilled', {
         sessionId, summaryChars: summaryText.length, invocations: invocations.length,

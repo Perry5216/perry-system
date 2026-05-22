@@ -43,6 +43,7 @@ export class WhatsAppGateway implements Gateway {
   private currentQRDataUrl: string | null = null;
   private botName?: string;
   private allowedIds: Set<string> = new Set();
+  private wifeIds: Set<string> = new Set();
   private lastMessageAt?: string;
   private lastError?: string;
   private workspaceDir: string;
@@ -144,7 +145,8 @@ export class WhatsAppGateway implements Gateway {
   }
 
   status(): GatewayStatus {
-    const enabled = (this.ctx.secrets.getSync('whatsapp_enabled') || '').toLowerCase() === 'true';
+    const enabled = this.ctx.secrets.getSync('whatsapp_enabled') === 'true';
+    const wifeModeEnabled = this.ctx.secrets.getSync('whatsapp_wife_mode_enabled') !== 'false';
     return {
       platform: this.platform,
       enabled,
@@ -153,6 +155,7 @@ export class WhatsAppGateway implements Gateway {
       allowedUserCount: this.allowedIds.size,
       lastMessageAt: this.lastMessageAt,
       lastError: this.connectionState === 'qr-needed' ? 'pairing required — scan QR via /api/gateways/whatsapp/qr' : this.lastError,
+      wifeModeEnabled,
     };
   }
 
@@ -177,6 +180,13 @@ export class WhatsAppGateway implements Gateway {
   private refreshAllowList(): void {
     const raw = this.ctx.secrets.getSync('whatsapp_allowed_user_ids') || '';
     this.allowedIds = new Set(raw.split(',').map(s => s.trim()).filter(Boolean));
+    const wifeEnabled = this.ctx.secrets.getSync('whatsapp_wife_mode_enabled') !== 'false';
+    if (wifeEnabled) {
+      const wifeRaw = this.ctx.secrets.getSync('whatsapp_wife_user_ids') || '';
+      this.wifeIds = new Set(wifeRaw.split(',').map(s => s.trim()).filter(Boolean));
+    } else {
+      this.wifeIds = new Set();
+    }
   }
 
   private async handleMessageUpsert(m: any): Promise<void> {
@@ -194,22 +204,60 @@ export class WhatsAppGateway implements Gateway {
       this.lastMessageAt = new Date().toISOString();
       this.refreshAllowList(); // pick up any allowlist updates without restart
 
-      if (this.allowedIds.size === 0) {
-        this.ctx.log.warn('whatsapp: rejecting message — empty allowlist', { senderJid });
-        await this.sendMessage(senderJid, '⛔ This Perry instance has no authorised users yet. Owner: set whatsapp_allowed_user_ids in the Secrets panel (comma-separated JIDs).');
-        continue;
+      const isWife = this.wifeIds.has(senderJid);
+
+      if (!isWife) {
+        if (this.allowedIds.size === 0) {
+          this.ctx.log.warn('whatsapp: rejecting message — empty allowlist', { senderJid });
+          continue;
+        }
+        if (!this.allowedIds.has(senderJid)) {
+          this.ctx.log.warn('whatsapp: rejecting message — sender not in allowlist', { senderJid });
+          continue;
+        }
       }
-      if (!this.allowedIds.has(senderJid)) {
-        this.ctx.log.warn('whatsapp: rejecting message — sender not in allowlist', { senderJid });
-        await this.sendMessage(senderJid, `⛔ ${senderJid} is not authorised to use this Perry instance.`);
+
+      const agentId = isWife ? 'meta.wife-responder' : this.ctx.defaultAgentId;
+      const baseAgent = getAgent(agentId);
+      if (!baseAgent) {
+        this.ctx.log.error('whatsapp: agent not registered', { agentId });
+        await this.sendMessage(senderJid, `⚠️ Agent ${agentId} not found.`);
         continue;
       }
 
-      const agent = getAgent(this.ctx.defaultAgentId);
-      if (!agent) {
-        this.ctx.log.error('whatsapp: default agent not registered', { defaultAgentId: this.ctx.defaultAgentId });
-        await this.sendMessage(senderJid, `⚠️ Default agent ${this.ctx.defaultAgentId} not found.`);
-        continue;
+      let agent = baseAgent;
+      if (isWife) {
+        const customPrompt = this.ctx.secrets.getSync('whatsapp_wife_responder_prompt');
+        if (customPrompt) {
+          agent = {
+            ...baseAgent,
+            systemPrompt: customPrompt,
+          };
+        }
+
+        if (this.ctx.chatMemory) {
+          try {
+            const memory = this.ctx.chatMemory.loadMemoryForJid(senderJid);
+            if (memory && memory.trim().length > 50) {
+              const prefix = [
+                '## Persistent memory across past chat sessions with wife/partner',
+                '',
+                'Below is an auto-distilled summary of prior conversations with this user (your wife/partner).',
+                'Use it for continuity — recall topics, decisions, and open questions when ',
+                'relevant. Do NOT echo it back verbatim; treat it the way a person would ',
+                'treat their own memory of past talks.',
+                '',
+                memory.trim(),
+                '',
+                '## Current conversation',
+                '',
+              ].join('\n');
+              agent = { ...agent, systemPrompt: prefix + agent.systemPrompt };
+            }
+          } catch (err: any) {
+            this.ctx.log.warn('whatsapp: wife chat-memory injection failed (continuing without)', { error: err.message });
+          }
+        }
       }
 
       // Reuse a session per (platform, jid) pair.

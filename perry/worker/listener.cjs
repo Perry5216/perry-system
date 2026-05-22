@@ -173,6 +173,7 @@ function buildFinalCommand(signal) {
       // Claude `--dangerously-skip-permissions` / Gemini `--yolo` analogue.
       if (cfg.yolo !== false) flags.push('--yolo');
       if (cfg.model && cfg.model !== 'auto') flags.push('-m', cfg.model);
+      flags.push('--skip-git-repo-check');
       flags.push('-C', '/app');
       // Trailing `-` tells `codex exec` to read the prompt body from stdin.
       flags.push('-');

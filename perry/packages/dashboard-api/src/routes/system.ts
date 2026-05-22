@@ -5,7 +5,7 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, exec } from 'child_process';
 import { AIRouter } from '@perry/ai';
 import { ProjectEngine, scanLeaks } from '@perry/projects';
 import { Logger, SecretsService } from '@perry/core';
@@ -273,6 +273,47 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
       checks,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  router.get('/wife-mode/enabled', async (_req, res) => {
+    try {
+      const value = await secrets.reveal('whatsapp_wife_mode_enabled', 'dashboard');
+      const enabled = value !== 'false';
+      res.json({ enabled });
+    } catch (e: any) {
+      log.error('GET /wife-mode/enabled failed', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  router.put('/wife-mode/enabled', async (req, res) => {
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'body.enabled must be a boolean' });
+    }
+    try {
+      const strValue = enabled ? 'true' : 'false';
+      await secrets.set('whatsapp_wife_mode_enabled', strValue, 'dashboard');
+
+      if (!enabled) {
+        const librarianProvider = aiRouter.getProvider('librarian');
+        const libEndpoint = librarianProvider?.providerConfig?.endpoint || 'http://localhost:11435';
+        const modelName = 'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest';
+        log.info('Wife Mode disabled via system route, unloading model from VRAM', { model: modelName, endpoint: libEndpoint });
+        fetch(`${libEndpoint}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelName, prompt: '', keep_alive: 0, stream: false }),
+        }).catch(err => {
+          log.warn('Failed to unload Wife Mode model', { error: err.message });
+        });
+      }
+
+      res.json({ ok: true, enabled });
+    } catch (e: any) {
+      log.error('PUT /wife-mode/enabled failed', { error: e.message });
+      res.status(500).json({ ok: false, error: e.message });
+    }
   });
 
   // Worker target — declares "stop when we've gathered N clean pairs for
@@ -1266,6 +1307,72 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
   const heartKey  = (a: AssistAgent) => `assist_daemon_hb_${a}`;
   const configKey = (a: AssistAgent) => `assist_worker_config_${a}`;
 
+  // Cache for assist worker auth states
+  let lastCheckedAuth = 0;
+  let cachedAuthStatus: Record<AssistAgent, boolean> = {
+    anthropic: false,
+    antigrav: false,
+    codex: false
+  };
+  let isCheckingAuth = false;
+
+  const checkAuthStatusInBackground = () => {
+    if (isCheckingAuth) return;
+    isCheckingAuth = true;
+
+    const checkAnthropic = new Promise<boolean>((resolve) => {
+      exec('docker exec perry-worker claude auth status', (err, stdout, stderr) => {
+        if (err) {
+          resolve(false);
+          return;
+        }
+        try {
+          const data = JSON.parse(stdout);
+          resolve(data && data.loggedIn === true);
+        } catch {
+          resolve(stdout.includes('"loggedIn": true') || stderr.includes('"loggedIn": true'));
+        }
+      });
+    });
+
+    const checkAntigrav = new Promise<boolean>((resolve) => {
+      exec('docker exec perry-worker gemini -p "ping" --skip-trust', (err, stdout, stderr) => {
+        if (err) {
+          resolve(false);
+          return;
+        }
+        resolve(stdout.toLowerCase().includes('pong') || stderr.toLowerCase().includes('pong'));
+      });
+    });
+
+    const checkCodex = new Promise<boolean>((resolve) => {
+      exec('docker exec perry-worker codex login status', (err, stdout, stderr) => {
+        if (err) {
+          resolve(false);
+          return;
+        }
+        resolve(stdout.toLowerCase().includes('logged in') || stderr.toLowerCase().includes('logged in'));
+      });
+    });
+
+    Promise.all([checkAnthropic, checkAntigrav, checkCodex]).then(([anthropicOk, antigravOk, codexOk]) => {
+      cachedAuthStatus = {
+        anthropic: anthropicOk,
+        antigrav: antigravOk,
+        codex: codexOk
+      };
+      lastCheckedAuth = Date.now();
+      isCheckingAuth = false;
+      log.info('Assist workers auth status updated:', cachedAuthStatus);
+    }).catch((e) => {
+      isCheckingAuth = false;
+      log.error('Failed to update assist workers auth status', { error: e.message });
+    });
+  };
+
+  // Kick off first check immediately on startup
+  checkAuthStatusInBackground();
+
   // Per-agent CLI flags configured from the dashboard. Coordinator includes
   // these in each spawn payload; perry-worker's listener builds the actual
   // command line from them. Defaults match the prior hardcoded values.
@@ -1292,11 +1399,15 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     const daemonAgeSec = hb ? (Date.now() - new Date(hb).getTime()) / 1000 : null;
     const daemonAlive = daemonAgeSec != null && daemonAgeSec < 60;
     const config = readConfig(store, a);
-    return { mode, fireRequestedAt, lastFiredAt, daemonHeartbeatAt: hb, daemonAgeSec, daemonAlive, config };
+    const authenticated = cachedAuthStatus[a];
+    return { mode, fireRequestedAt, lastFiredAt, daemonHeartbeatAt: hb, daemonAgeSec, daemonAlive, config, authenticated };
   };
 
   // GET — returns shared task counts + per-agent panel state in one shot.
   router.get('/assist-status', (req, res) => {
+    if (!isCheckingAuth && Date.now() - lastCheckedAuth > 15000) {
+      checkAuthStatusInBackground();
+    }
     const store: any = projectEngine.getStateStore();
     try {
       // Count ALL worker-claimable open tasks, not just pipeline_step_assist.
@@ -1311,6 +1422,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
         pending, claimed,
         anthropic: agentSlice(store, 'anthropic'),
         antigrav: agentSlice(store, 'antigrav'),
+        codex: agentSlice(store, 'codex'),
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -1370,6 +1482,141 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     const { agent } = req.body || {};
     if (!isAgent(agent)) return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
     projectEngine.getStateStore().setMeta(heartKey(agent), new Date().toISOString());
+    res.json({ ok: true });
+  });
+
+  // ── Interactive Auth Wizard endpoints ──────────────────────────────────
+  interface LoginProcess {
+    child: any;
+    agent: AssistAgent;
+    logs: string;
+    exitCode: number | null;
+    error: string | null;
+    startedAt: string;
+  }
+
+  let activeLoginProcess: LoginProcess | null = null;
+
+  const killActiveLogin = () => {
+    if (activeLoginProcess && activeLoginProcess.child) {
+      try {
+        activeLoginProcess.child.kill();
+      } catch (e: any) {
+        log.warn('Failed to kill active login process', { error: e.message });
+      }
+      activeLoginProcess = null;
+      lastCheckedAuth = 0;
+      checkAuthStatusInBackground();
+    }
+  };
+
+  router.post('/login-start', (req, res) => {
+    const { agent } = req.body || {};
+    if (!isAgent(agent)) {
+      return res.status(400).json({ error: "agent must be one of: anthropic, antigrav, codex" });
+    }
+
+    // Kill any existing login process first
+    killActiveLogin();
+
+    let cmd = '';
+    let args: string[] = [];
+
+    if (agent === 'codex') {
+      cmd = 'codex';
+      args = ['login', '--device-auth'];
+    } else if (agent === 'antigrav') {
+      cmd = 'gemini';
+      args = ['login'];
+    } else {
+      cmd = 'claude';
+      args = ['login'];
+    }
+
+    const dockerArgs = ['exec', '-i', 'perry-worker', cmd, ...args];
+    log.info('Spawning auth login process', { cmd: 'docker', args: dockerArgs });
+
+    try {
+      const child = spawn('docker', dockerArgs);
+      
+      activeLoginProcess = {
+        child,
+        agent,
+        logs: '',
+        exitCode: null,
+        error: null,
+        startedAt: new Date().toISOString()
+      };
+
+      child.stdout.on('data', (data) => {
+        if (activeLoginProcess) {
+          activeLoginProcess.logs += data.toString();
+        }
+      });
+
+      child.stderr.on('data', (data) => {
+        if (activeLoginProcess) {
+          activeLoginProcess.logs += data.toString();
+        }
+      });
+
+      child.on('error', (err) => {
+        log.error('Auth login process error', { agent, error: err.message });
+        if (activeLoginProcess) {
+          activeLoginProcess.error = err.message;
+        }
+      });
+
+      child.on('close', (code) => {
+        log.info('Auth login process closed', { agent, code });
+        if (activeLoginProcess) {
+          activeLoginProcess.exitCode = code;
+        }
+        lastCheckedAuth = 0;
+        checkAuthStatusInBackground();
+      });
+
+      res.json({ ok: true, agent });
+    } catch (err: any) {
+      log.error('Failed to spawn auth login process', { agent, error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.get('/login-status', (req, res) => {
+    if (!activeLoginProcess) {
+      return res.json({ active: false });
+    }
+
+    res.json({
+      active: activeLoginProcess.exitCode === null && activeLoginProcess.error === null,
+      agent: activeLoginProcess.agent,
+      logs: activeLoginProcess.logs,
+      exitCode: activeLoginProcess.exitCode,
+      error: activeLoginProcess.error,
+      startedAt: activeLoginProcess.startedAt
+    });
+  });
+
+  router.post('/login-input', (req, res) => {
+    const { input } = req.body || {};
+    if (!activeLoginProcess || !activeLoginProcess.child) {
+      return res.status(400).json({ error: "No active login process running" });
+    }
+
+    try {
+      // Append the user's response followed by newline to stdin
+      activeLoginProcess.child.stdin.write(input + '\n');
+      // Also echo it in the logs for UX clarity
+      activeLoginProcess.logs += `> ${input}\n`;
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/login-kill', (req, res) => {
+    killActiveLogin();
     res.json({ ok: true });
   });
 

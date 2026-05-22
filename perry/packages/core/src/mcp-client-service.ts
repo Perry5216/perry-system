@@ -40,7 +40,7 @@ export class McpClientService {
         } else if (srvConfig.type === 'stdio' && srvConfig.command) {
           // Forward parent env to the child MCP server. The SDK's default is a
           // sanitized minimal env (PATH only) which strips PERRY_VAULT_KEY,
-          // PERRY_API_KEY, GOOGLE_BOOKS_API_KEY etc. — every secret the child
+          // PERRY_API_KEY, etc. — every secret the child
           // needs disappears, and Vault falls back to the hostname-derived
           // key in the child only, which is why the warning fired despite
           // the parent having the key set correctly.
@@ -70,9 +70,36 @@ export class McpClientService {
     }
   }
 
-  getTools(): Tool[] {
-    return Array.from(this.availableTools.values()).map(t => t.tool);
+  getTools(allowedMcpServers?: string[]): Tool[] {
+    const list = Array.from(this.availableTools.values());
+    if (allowedMcpServers !== undefined) {
+      return list
+        .filter(t => allowedMcpServers.includes(t.serverId))
+        .map(t => t.tool);
+    }
+    return list.map(t => t.tool);
   }
+
+  getToolServer(name: string): string | null {
+    const registration = this.availableTools.get(name);
+    return registration ? registration.serverId : null;
+  }
+
+  getConnectedServers(): { id: string; status: 'connected' | 'disconnected'; tools: Tool[] }[] {
+    const serversConfig = this.config.get<Record<string, McpServerConfig>>('ai.mcpServers', {});
+    return Object.keys(serversConfig).map(id => {
+      const isConnected = this.clients.has(id);
+      const serverTools = Array.from(this.availableTools.values())
+        .filter(t => t.serverId === id)
+        .map(t => t.tool);
+      return {
+        id,
+        status: isConnected ? 'connected' : 'disconnected',
+        tools: serverTools,
+      };
+    });
+  }
+
 
   async executeTool(name: string, args: Record<string, unknown>): Promise<any> {
     const registration = this.availableTools.get(name);

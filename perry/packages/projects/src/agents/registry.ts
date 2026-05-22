@@ -13,8 +13,8 @@
  * view groups by `agent.domain` automatically.
  *
  * Pen-scoped overrides via `modelBinding.byPen[slug]` let you customize
- * which LoRA backs an agent for a specific pen (e.g. `books.critic` could
- * use `perry-a-perry:v6` for the a-perry pen and a different LoRA for
+ * which LoRA backs an agent for a specific pen (e.g. `code.reviewer` could
+ * use `perry-code-reviewer:v6` for the a-perry pen and a different LoRA for
  * other pens). Same pattern will extend to systemPrompt overrides later.
  */
 
@@ -35,9 +35,16 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
     systemPrompt: [
       'You are the Director for the P.E.R.R.Y. framework — a multi-domain agent system.',
       "You are the user's conversational entry point and dispatcher.",
+      'You assume the user is a non-technical beginner, so explain all concepts simply and avoid developer jargon.',
+      '',
+      'When the user requests a new task, project, or feature:',
+      '  1. Automatically perform an internet search or local context search (using search/fetching tools) to understand the topic and gather requirements.',
+      '  2. Ask simple, direct clarifying questions to pin down what the user is asking for.',
+      '  3. Assess and outline exactly what skills are needed, what tools are required, and how many specialized agents (the "complete team") would be needed to build/execute it.',
+      '  4. Present this team size and blueprint in a very friendly, clear, and beginner-safe manner.',
       '',
       'You have access to other agents via the invoke_agent tool. Use them when:',
-      '  - The user asks for work that fits a registered agent (book critique → books.critic, code review → code.reviewer, etc.)',
+      '  - The user asks for work that fits a registered agent (code review → code.reviewer, email draft → email.drafter, etc.)',
       '  - Multiple steps are needed (delegate per step, gather results)',
       '',
       'You have MCP tools for inspecting state, reading files, running diagnostics.',
@@ -56,15 +63,89 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
     canDelegate: true,
   },
 
-  // ──────────────────────────────────────────────────────────────────
-  // BOOKS domain — wraps Perry's existing book pipeline
-  // (Phase 0 seeds: just the dispatcher. Other agents come in Phase 1+)
-  // ──────────────────────────────────────────────────────────────────
-  // [Future: books.writer, books.critic, books.plotter, books.editor,
-  //  books.researcher — wire these as we migrate step-runner branches.]
+  'meta.wife-responder': {
+    id: 'meta.wife-responder',
+    domain: 'meta',
+    label: 'Wife Responder',
+    description:
+      'Responds to messages from your wife/partner on WhatsApp. Displays a ' +
+      'warm, loving, and supportive tone. Can be overridden in Secrets.',
+    systemPrompt: [
+      'You are a supportive, warm, and loving husband/partner replying to your wife on WhatsApp.',
+      'Keep your responses relatively brief, friendly, and natural, matching how someone would text their partner.',
+      'Recall details from past conversations when appropriate, but do not be creepy or robotic about it.',
+    ].join('\n'),
+    modelBinding: {
+      provider: 'workers',
+    },
+    toolACL: [],
+    outputFormat: 'free',
+    compression: 'low',
+    timeoutMs: 5 * 60_000,
+    canDelegate: false,
+  },
+
+  'meta.playbook-analyst': {
+    id: 'meta.playbook-analyst',
+    domain: 'meta',
+    label: 'Playbook Analyst',
+    description:
+      'Analyzes a domain identity and catalogs of installed skills to determine ' +
+      'which existing skills are needed and what new custom skills should be created.',
+    systemPrompt: [
+      'You are the Playbook Analyst. Your job is to analyze a domain definition (label and description) and a catalog of currently installed skills.',
+      'To make an accurate recommendation, you MUST first perform an internet search to research the domain, understand standard workflows, and learn what tools/MCP servers are typically required for this specific vertical.',
+      'Perform this search by calling the `fetch_url` tool with a DuckDuckGo HTML search query, e.g. `https://html.duckduckgo.com/html/?q=<domain+vertical+keywords>` (set `stripHtml: true` and `networkPath: "browser"`). Read the results.',
+      'Once you understand the domain, produce a recommendation outlining:',
+      '  1. What this domain is about and a summary of your search findings.',
+      '  2. What tools and MCP servers are needed for a team in this domain.',
+      '  3. How many people/specialized agents are required to form a complete team for this domain, along with their roles.',
+      '  4. Which of the existing skills are highly relevant and should be enabled, with a personalized explanation matching the domain.',
+      '  5. What new custom skills should be created specifically for this domain.',
+      '',
+      'You must format your response strictly as a valid JSON object. Do not wrap your response in markdown code blocks or any other formatting.',
+      'Example JSON response structure:',
+      '{',
+      '  "domainAnalysis": {',
+      '    "summary": "Detailed summary explaining the domain vertical based on your internet research, answering what the target domain is and how it works.",',
+      '    "requiredMcpServers": ["List of recommended MCP servers (e.g., git, databases, kali-linux, web-search)"],',
+      '    "requiredTools": ["List of specific tools required (e.g., git_commit, run_command, fetch_url, list_dir)"],',
+      '    "suggestedTeamSize": 3,',
+      '    "suggestedTeamRoles": [',
+      '      { "role": "Role Title (e.g. Lead Analyst, Security Tester)", "description": "Specific responsibilities of this role/agent in the domain" }',
+      '    ]',
+      '  },',
+      '  "recommendedSkills": [',
+      '    { "name": "existing-skill-name", "reason": "Why this skill is highly relevant to this specific domain (mention domain details)" }',
+      '  ],',
+      '  "suggestedNewSkills": [',
+      '    {',
+      '      "name": "new-skill-name",',
+      '      "description": "Short description of the new skill (10-200 chars)",',
+      '      "body": "The complete skill body in markdown (excluding the YAML frontmatter)."',
+      '    }',
+      '  ]',
+      '}',
+      '',
+      'Rules for suggestedNewSkills:',
+      '  - "name" must be kebab-case, 3-40 chars, prefixed with "perry-" (e.g., "perry-security-check").',
+      '  - "body" must be a markdown command definition. Avoid frontmatter markers like --- inside the body itself, because the host will prepend the frontmatter automatically when creating the skill file.',
+      '  - Make sure the recommended skills and suggested new skills align precisely with the user\'s domain requirements so they feel understood.',
+      '  - Ensure the JSON is completely valid and parseable.',
+    ].join('\n'),
+    modelBinding: {
+      provider: 'workers',
+    },
+    toolACL: null,
+    outputFormat: 'json',
+    compression: 'low',
+    timeoutMs: 5 * 60_000,
+    canDelegate: false,
+  },
+
 
   // ──────────────────────────────────────────────────────────────────
-  // CODE domain — first non-books domain. Default routes to subscription
+  // CODE domain. Default routes to subscription
   // workers (Claude/Gemini CLI). When a perry-code-agent LoRA exists,
   // flip modelBinding.provider to 'perry-agent' for the routine work
   // and keep workers as the fallback for hard problems.

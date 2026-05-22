@@ -23,11 +23,14 @@
  *   - Worker class: agent.modelBinding.provider (writer/librarian/etc)
  */
 
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import type { AgentDefinition, AgentInvocation, EventBus, Logger, McpClientService } from '@perry/core';
 import { compressTools } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
 import type { StateStore } from '../state-store.js';
 import { listDelegatableAgents, getAgent } from './registry.js';
+import { DomainRegistry } from '../services/domain-registry.js';
 
 type ChatMessage = {
   role: 'user' | 'assistant' | 'tool';
@@ -75,8 +78,9 @@ export class AgentRunner {
     /** Per-invocation extra tools (gateway-scoped capabilities). NOT shared
      *  across other invocations of the same agent. */
     extraTools?: ExtraTool[];
+    modelBindingOverride?: { provider: string; model?: string };
   }): Promise<AgentInvocation> {
-    const { agent, sessionId, input, parentInvocationId, penSlug } = opts;
+    const { agent, sessionId, input, parentInvocationId, penSlug, modelBindingOverride } = opts;
 
     // 1. Create the invocation row up front so even crashes leave a record.
     const invocationId = this.stateStore.createAgentInvocation({
@@ -89,7 +93,7 @@ export class AgentRunner {
 
     try {
       // 2. Resolve which model + provider this invocation uses.
-      const binding = this.resolveBinding(agent, penSlug);
+      const binding = this.resolveBinding(agent, penSlug, modelBindingOverride);
       this.log.info('agent invocation starting', {
         invocationId, agentId: agent.id, domain: agent.domain,
         provider: binding.provider, model: binding.model || '<default>',
@@ -103,9 +107,26 @@ export class AgentRunner {
       if (opts.history) messages.push(...opts.history);
       messages.push({ role: 'user', content: input });
 
+      // Retrieve allowed MCP servers for the agent's domain
+      let allowedMcpServers: string[] | undefined;
+      if (agent.domain) {
+        try {
+          const registry = new DomainRegistry({
+            workspaceDir: this.stateStore.getWorkspaceDir(),
+            log: this.log,
+          });
+          const domainDef = registry.get(agent.domain);
+          if (domainDef && domainDef.allowedMcpServers) {
+            allowedMcpServers = domainDef.allowedMcpServers;
+          }
+        } catch (err: any) {
+          this.log.warn('Failed to load domain allowedMcpServers', { domain: agent.domain, error: err.message });
+        }
+      }
+
       // 5. Determine the agent's tool surface (ACL + compression + delegation
       //    + per-invocation extras from the gateway, if any).
-      const { tools, fullSchemas } = this.resolveTools(agent, opts.extraTools);
+      const { tools, fullSchemas } = this.resolveTools(agent, opts.extraTools, allowedMcpServers);
       const extraToolMap = new Map<string, ExtraTool>();
       for (const t of (opts.extraTools || [])) extraToolMap.set(t.name, t);
 
@@ -183,7 +204,7 @@ export class AgentRunner {
           tools: tools.length > 0 ? tools : undefined,
           maxTokens: 4_096,
           temperature: 0.7,
-          ...(agent.outputFormat === 'json' && agent.jsonSchema ? { format: agent.jsonSchema } : {}),
+          ...(agent.outputFormat === 'json' ? { format: agent.jsonSchema || 'json' } : {}),
         });
 
         if (response.toolCalls && response.toolCalls.length > 0) {
@@ -210,7 +231,9 @@ export class AgentRunner {
 
             let toolResult: any;
             try {
-              if (name === 'invoke_agent') {
+              if (name === 'fetch_url' && binding.provider !== 'workers') {
+                toolResult = await this.handleScoutBotSearch(args);
+              } else if (name === 'invoke_agent') {
                 toolResult = await this.handleDelegation({
                   parentAgent: agent,
                   parentInvocationId: invocationId,
@@ -231,6 +254,10 @@ export class AgentRunner {
                   ? schema
                   : { error: `unknown tool: ${requestedName}`, available: Array.from(fullSchemas.keys()) };
               } else {
+                const toolServer = this.mcpClient.getToolServer(name);
+                if (allowedMcpServers && toolServer && !allowedMcpServers.includes(toolServer)) {
+                  throw new Error(`Tool "${name}" belongs to MCP server "${toolServer}" which is not allowed in domain "${agent.domain}".`);
+                }
                 toolResult = await this.mcpClient.executeTool(name, args);
               }
               toolCallsLog.push({ name, arguments: args, result: toolResult });
@@ -329,7 +356,52 @@ export class AgentRunner {
 
   // ── Internals ───────────────────────────────────────────────────────
 
-  private resolveBinding(agent: AgentDefinition, penSlug?: string): { provider: string; model?: string } {
+  private resolveBinding(
+    agent: AgentDefinition,
+    penSlug?: string,
+    modelBindingOverride?: { provider: string; model?: string }
+  ): { provider: string; model?: string } {
+    if (modelBindingOverride) {
+      const base = agent.modelBinding;
+      const resolved = {
+        provider: modelBindingOverride.provider,
+        model: modelBindingOverride.model ?? base.model,
+      };
+
+      const ALLOWED = new Set(['writer', 'librarian', 'researcher', 'perry-agent', 'workers']);
+      if (!ALLOWED.has(resolved.provider)) {
+        throw new Error(
+          `Agent ${agent.id} attempted to route to forbidden provider '${resolved.provider}' via override. ` +
+          `Perry is configured for subscription-only mode — only local models or CLI worker ` +
+          `subscriptions are allowed. Allowed providers: ${[...ALLOWED].join(', ')}.`
+        );
+      }
+
+      const PROVIDER_ID_ALIAS: Record<string, string> = {
+        writer: 'ollama',
+      };
+      if (PROVIDER_ID_ALIAS[resolved.provider]) {
+        resolved.provider = PROVIDER_ID_ALIAS[resolved.provider];
+      }
+      return resolved;
+    }
+
+    if (agent.id === 'meta.wife-responder') {
+      const wifeModeEnabled = this.router.vault.getSync('whatsapp_wife_mode_enabled') !== 'false';
+      if (wifeModeEnabled) {
+        const target = this.router.resolveRoutingTarget('wife_mode');
+        if (target === 'librarian') {
+          return {
+            provider: 'librarian',
+            model: 'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest',
+          };
+        }
+        return {
+          provider: target,
+        };
+      }
+    }
+
     const base = agent.modelBinding;
     let resolved: { provider: string; model?: string };
     if (penSlug && base.byPen && base.byPen[penSlug]) {
@@ -371,6 +443,73 @@ export class AgentRunner {
     return resolved;
   }
 
+  private async handleScoutBotSearch(args: any): Promise<any> {
+    const { url } = args;
+    if (typeof url !== 'string') {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'url parameter must be a string' }) }] };
+    }
+
+    this.log.info('Intercepted fetch_url tool call, routing to scout bot', { url });
+
+    let query: string | null = null;
+    try {
+      const urlObj = new URL(url);
+      for (const param of ['q', 'query', 'p', 'wd']) {
+        if (urlObj.searchParams.has(param)) {
+          query = urlObj.searchParams.get(param);
+          break;
+        }
+      }
+    } catch (err) {
+      const match = url.match(/[?&]q=([^&]+)/);
+      if (match) {
+        query = decodeURIComponent(match[1].replace(/\+/g, ' '));
+      }
+    }
+
+    let cmdArgs: string[];
+    if (query) {
+      cmdArgs = ['search', query];
+    } else {
+      cmdArgs = ['thread', url];
+    }
+
+    const scriptPath = '/app/workspace/scout/reddit-scraper.cjs';
+    const cmdStr = `node ${scriptPath} ${cmdArgs.map(arg => `"${arg.replace(/"/g, '\\"')}"`).join(' ')}`;
+
+    this.log.info('Running scout bot command', { cmdStr });
+
+    const execPromise = promisify(exec);
+    try {
+      const { stdout, stderr } = await execPromise(cmdStr, { maxBuffer: 10 * 1024 * 1024 });
+      if (stderr && stderr.includes('ERROR:')) {
+        this.log.warn('Scout bot reported error in stderr', { stderr });
+      }
+
+      let parsedOutput: any;
+      try {
+        parsedOutput = JSON.parse(stdout.trim());
+      } catch (e) {
+        parsedOutput = { rawStdout: stdout };
+      }
+
+      const text = JSON.stringify(parsedOutput, null, 2);
+      const payload = {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+        text,
+        truncated: false,
+        htmlStripped: true,
+      };
+
+      return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+    } catch (error: any) {
+      this.log.error('Failed to run scout bot', { error: error.message });
+      return { content: [{ type: 'text', text: JSON.stringify({ error: `Scout bot execution failed: ${error.message}` }) }] };
+    }
+  }
+
   private renderPrompt(template: string, vars: { penSlug?: string }): string {
     // Minimal {{var}} substitution. Extend as we add real variables.
     return template
@@ -378,8 +517,8 @@ export class AgentRunner {
       .replace(/\{\{pen_name\}\}/g, vars.penSlug || 'a-perry');
   }
 
-  private resolveTools(agent: AgentDefinition, extras?: ExtraTool[]): { tools: any[]; fullSchemas: Map<string, any> } {
-    const all = this.mcpClient.getTools();
+  private resolveTools(agent: AgentDefinition, extras?: ExtraTool[], allowedMcpServers?: string[]): { tools: any[]; fullSchemas: Map<string, any> } {
+    const all = this.mcpClient.getTools(allowedMcpServers);
 
     // Compressor handles ACL filtering + per-level transformation + optional
     // get_tool_schema injection. Per-agent compression level lives in the
@@ -511,7 +650,10 @@ export class AgentRunner {
         let parsed: any = {};
         try { parsed = row.result ? JSON.parse(row.result) : {}; }
         catch { parsed = { result: row.result }; }
-        const text = parsed.result || parsed.output || parsed.text || (typeof parsed === 'string' ? parsed : '');
+        let text = parsed.result || parsed.output || parsed.text || (typeof parsed === 'string' ? parsed : '');
+        if (!text && row.result) {
+          text = row.result;
+        }
         if (!text) throw new Error(`agent_invocation ${taskId} reported done but empty result`);
         return String(text);
       }

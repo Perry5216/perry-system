@@ -155,53 +155,92 @@ export interface LoadedSkill {
  * hot-reload. Cheap (single dir read, small files).
  */
 export function loadInstalledSkills(workspaceDir: string, service: string): LoadedSkill[] {
-  const dir = join(workspaceDir, 'skills-installed', service);
-  if (!existsSync(dir)) return [];
   const out: LoadedSkill[] = [];
-  let files: string[] = [];
-  try { files = readdirSync(dir).filter(f => f.endsWith('.md')); } catch { return []; }
-  for (const f of files) {
-    try {
-      const fs = require('fs');
-      const raw: string = fs.readFileSync(join(dir, f), 'utf-8');
-      const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-      if (!m) continue;
-      const block = m[1];
-      const body = m[2];
-      const frontmatter: Record<string, any> = {};
-      const appliesWhen: Record<string, string | number | boolean> = {};
-      let inApplies = false;
-      for (const line of block.split('\n')) {
-        if (/^applies_when:\s*$/.test(line)) { inApplies = true; continue; }
-        if (inApplies) {
-          const sub = line.match(/^\s{2}([a-z_][a-z0-9_]*):\s*(.*)$/i);
-          if (sub) {
-            let v: any = sub[2].trim();
-            try { v = JSON.parse(v); } catch {}
-            appliesWhen[sub[1]] = v;
-            continue;
-          } else {
-            inApplies = false;
+  const loadedPaths = new Set<string>();
+
+  const loadFromDir = (dir: string, svc: string) => {
+    if (!existsSync(dir)) return;
+    let files: string[] = [];
+    try { files = readdirSync(dir).filter(f => f.endsWith('.md')); } catch { return; }
+    for (const f of files) {
+      const fullPath = join(dir, f);
+      if (loadedPaths.has(fullPath)) continue;
+      try {
+        const fs = require('fs');
+        const raw: string = fs.readFileSync(fullPath, 'utf-8');
+        const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+        if (!m) continue;
+        const block = m[1];
+        const body = m[2];
+        const frontmatter: Record<string, any> = {};
+        const appliesWhen: Record<string, string | number | boolean> = {};
+        let inApplies = false;
+        for (const line of block.split('\n')) {
+          if (/^applies_when:\s*$/.test(line)) { inApplies = true; continue; }
+          if (inApplies) {
+            const sub = line.match(/^\s{2}([a-z_][a-z0-9_]*):\s*(.*)$/i);
+            if (sub) {
+              let v: any = sub[2].trim();
+              try { v = JSON.parse(v); } catch {}
+              appliesWhen[sub[1]] = v;
+              continue;
+            } else {
+              inApplies = false;
+            }
+          }
+          const kv = line.match(/^([a-z_]+):\s*(.*)$/i);
+          if (kv) {
+            let val = kv[2].trim();
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+              val = val.slice(1, -1);
+            }
+            frontmatter[kv[1]] = val;
           }
         }
-        const kv = line.match(/^([a-z_]+):\s*(.*)$/i);
-        if (kv) {
-          let val = kv[2].trim();
-          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-            val = val.slice(1, -1);
-          }
-          frontmatter[kv[1]] = val;
+        loadedPaths.add(fullPath);
+        out.push({
+          name: frontmatter.name || f.replace(/\.md$/, ''),
+          description: frontmatter.description || '',
+          service: frontmatter.service || svc,
+          appliesWhen,
+          body,
+          path: fullPath,
+        });
+      } catch { /* skip */ }
+    }
+  };
+
+  // 1. Primary: load from the requested service folder
+  const primaryDir = join(workspaceDir, 'skills-installed', service);
+  loadFromDir(primaryDir, service);
+
+  // 2. Load from global service folder (if not already loaded)
+  if (service !== 'global') {
+    const globalDir = join(workspaceDir, 'skills-installed', 'global');
+    loadFromDir(globalDir, 'global');
+  }
+
+  // 3. Fallback: Load from ALL subdirectories in skills-installed
+  try {
+    const root = join(workspaceDir, 'skills-installed');
+    if (existsSync(root)) {
+      const entries = readdirSync(root, { withFileTypes: true });
+      for (const ent of entries) {
+        if (ent.isDirectory() && ent.name !== service && ent.name !== 'global') {
+          loadFromDir(join(root, ent.name), ent.name);
         }
       }
-      out.push({
-        name: frontmatter.name || f.replace(/\.md$/, ''),
-        description: frontmatter.description || '',
-        service: frontmatter.service || service,
-        appliesWhen,
-        body,
-        path: join(dir, f),
-      });
-    } catch { /* skip unreadable */ }
+    }
+  } catch {}
+
+  // 4. Fallback: Load from .claude/commands (both under workspace and in system/worker)
+  const claudePaths = [
+    join(workspaceDir, '.claude', 'commands'),
+    '/app/.claude/commands',
+  ];
+  for (const cp of claudePaths) {
+    loadFromDir(cp, 'worker');
   }
+
   return out;
 }
