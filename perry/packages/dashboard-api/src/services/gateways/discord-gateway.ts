@@ -176,8 +176,9 @@ export class DiscordGateway implements Gateway {
       title: sessionTitle,
     });
 
-    // Discord "typing" indicator while we work.
-    try { await message.channel.sendTyping(); } catch { /* ignore */ }
+    const typingMode = (this.ctx.secrets.getSync('whatsapp_typing_mode') || 'typing_only').toLowerCase();
+    let sent: any;
+    let typingInterval: NodeJS.Timeout | undefined;
 
     // Inject Discord mod tools as gateway-scoped extras. The Director (and
     // ONLY the Director, since other agents don't have toolACL: null) gets
@@ -194,22 +195,133 @@ export class DiscordGateway implements Gateway {
       : undefined;
 
     try {
-      const inv = await this.ctx.agentRunner.invoke({
-        agent,
-        sessionId,
-        input: this.enrichInputWithContext(text, message),
-        extraTools,
-      });
-      const output = inv.output || '(empty response)';
-      const chunks = chunkText(output, DISCORD_MAX_MESSAGE_LENGTH);
-      for (const c of chunks) {
-        await message.reply(c);
+      if (typingMode === 'delete' || typingMode === 'edit') {
+        try {
+          sent = await message.reply(' ');
+        } catch (sendErr: any) {
+          this.ctx.log.error('discord: failed to send space placeholder', { error: sendErr.message });
+          throw sendErr;
+        }
       }
-    } catch (e: any) {
-      this.ctx.log.error('discord: invocation failed', { error: e.message });
-      try { await message.reply(`⚠️ ${e.message}`); } catch { /* ignore */ }
+
+      // Trigger typing presence immediately
+      try {
+        await message.channel.sendTyping();
+      } catch (presenceErr: any) {
+        this.ctx.log.warn('discord: failed to send typing status', { error: presenceErr.message });
+      }
+
+      // Discord typing status expires after ~10 seconds, so refresh it every 9 seconds.
+      typingInterval = setInterval(async () => {
+        try {
+          await message.channel.sendTyping();
+        } catch (presenceErr: any) {
+          this.ctx.log.warn('discord: failed to refresh typing status', { error: presenceErr.message });
+        }
+      }, 9000);
+
+      try {
+        const inv = await this.ctx.agentRunner.invoke({
+          agent,
+          sessionId,
+          input: this.enrichInputWithContext(text, message),
+          extraTools,
+        });
+        const rawOutput = inv.output || '(empty response)';
+        const output = cleanOutputText(rawOutput);
+        const chunks = chunkText(output, DISCORD_MAX_MESSAGE_LENGTH);
+
+        if (typingMode === 'typing_only') {
+          for (const chunk of chunks) {
+            await message.reply(chunk);
+          }
+        } else if (typingMode === 'delete') {
+          if (sent) {
+            try {
+              await sent.delete();
+            } catch (delErr: any) {
+              this.ctx.log.warn('discord: failed to delete space placeholder', { error: delErr.message });
+            }
+          }
+          for (const chunk of chunks) {
+            await message.reply(chunk);
+          }
+        } else {
+          // edit mode
+          if (sent) {
+            try {
+              await sent.edit(chunks[0]);
+            } catch {
+              await message.reply(chunks[0]);
+            }
+            for (const c of chunks.slice(1)) {
+              await message.reply(c);
+            }
+          } else {
+            for (const chunk of chunks) {
+              await message.reply(chunk);
+            }
+          }
+        }
+      } catch (e: any) {
+        this.ctx.log.error('discord: invocation failed', { error: e.message });
+        if (typingMode === 'typing_only') {
+          await message.reply(`⚠️ ${e.message}`);
+        } else if (typingMode === 'delete') {
+          if (sent) {
+            try {
+              await sent.delete();
+            } catch {}
+          }
+          await message.reply(`⚠️ ${e.message}`);
+        } else {
+          if (sent) {
+            try {
+              await sent.edit(`⚠️ ${e.message}`);
+            } catch {
+              await message.reply(`⚠️ ${e.message}`);
+            }
+          } else {
+            await message.reply(`⚠️ ${e.message}`);
+          }
+        }
+      }
+    } finally {
+      if (typingInterval) {
+        clearInterval(typingInterval);
+      }
     }
   }
+}
+
+function cleanOutputText(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object') {
+        if ('result' in parsed && typeof parsed.result === 'string') {
+          return parsed.result;
+        }
+        if ('output' in parsed && typeof parsed.output === 'string') {
+          return parsed.output;
+        }
+        if ('text' in parsed && typeof parsed.text === 'string') {
+          return parsed.text;
+        }
+        if ('message' in parsed && typeof parsed.message === 'string') {
+          return parsed.message;
+        }
+        const keys = Object.keys(parsed);
+        if (keys.length === 1 && typeof parsed[keys[0]] === 'string') {
+          return parsed[keys[0]];
+        }
+      }
+    } catch {
+      // Ignore JSON parse error, fall back to raw text
+    }
+  }
+  return text;
 }
 
 function chunkText(text: string, max: number): string[] {
