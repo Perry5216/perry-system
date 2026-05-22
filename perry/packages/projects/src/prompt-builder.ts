@@ -20,8 +20,27 @@ import type { ContextEngine } from '@perry/rag';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { StateStore } from './state-store.js';
-import type { StyleDnaService } from './services/style-dna-service.js';
-import { HeuristicsService } from './services/heuristics-service.js';
+
+const DEFAULT_STOP_WORDS = new Set([
+  'The', 'His', 'Her', 'She', 'This', 'That', 'But', 'And', 'For',
+  'Not', 'Just', 'What', 'Who', 'How', 'Why', 'When', 'Where', 'Then', 'Now',
+  'One', 'Two', 'Three', 'Four', 'Five', 'Move', 'Wait', 'Stop', 'Nothing',
+  'Behind', 'Below', 'Above', 'Between', 'Another', 'Every', 'Each', 'Either',
+  'Neither', 'Beside', 'Pass', 'Part', 'Setting', 'Scenario', 'Scene'
+]);
+
+const DEFAULT_PROP_WORDS = [
+  'wrench', 'pipe', 'blade', 'knife', 'gun', 'weapon', 'baton', 'rod', 'cable',
+  'hatch', 'door', 'crate', 'console', 'panel', 'bulkhead', 'floor', 'wall', 'grate', 'lock',
+  'cylinder', 'drive', 'keycard', 'flashlight', 'torch', 'coin', 'syringe', 'helmet', 'suit',
+  'sword', 'wand', 'staff', 'shield', 'bow', 'arrow', 'potion', 'scroll', 'amulet', 'ring',
+  'torch', 'lantern', 'map', 'key', 'coin', 'purse', 'cloak', 'dagger', 'book', 'tome'
+];
+
+const DEFAULT_INJURY_WORDS = [
+  'bleed', 'blood', 'fracture', 'crack', 'throb', 'ache', 'numb', 'limp', 'broke', 'split', 'cut', 'bruise',
+  'burn', 'scorch', 'gash', 'wound', 'slash', 'pierce', 'sting', 'swel', 'scar'
+];
 
 import { LibrarianAgent } from './librarian-agent.js';
 
@@ -32,8 +51,6 @@ export class PromptBuilder {
   private stateStore: StateStore;
   private log: Logger;
   private workspaceDir: string;
-  private styleDna: StyleDnaService | null;
-  private heuristics: HeuristicsService;
   private config: ConfigService;
   private librarianAgent: LibrarianAgent | null = null;
   /** Optional RAG service for bible-aware retrieval. Injected post-construction
@@ -67,7 +84,6 @@ export class PromptBuilder {
     compressor: ContextCompressor | null,
     config: ConfigService,
     log: Logger,
-    styleDna?: StyleDnaService,
   ) {
     this.workspaceDir = workspaceDir;
     this.budgetManager = new ContextBudgetManager();
@@ -76,8 +92,6 @@ export class PromptBuilder {
     this.stateStore = stateStore;
     this.config = config;
     this.log = log;
-    this.heuristics = new HeuristicsService(workspaceDir, log.child('heuristics'));
-    this.styleDna = styleDna || null;
     if (this.compressor) {
       this.librarianAgent = new LibrarianAgent(this.compressor, this.contextEngine, this.log);
     }
@@ -2560,7 +2574,7 @@ export class PromptBuilder {
     // Also scan for dialogue attribution to extract speaker names.
     const nameRe = /\b([A-Z][a-z]{2,})\b/g;
     const nameCounts = new Map<string, number>();
-    const stopWords = this.heuristics.getStopWords();
+    const stopWords = DEFAULT_STOP_WORDS;
     let nm: RegExpExecArray | null;
     while ((nm = nameRe.exec(part1Text)) !== null) {
       const name = nm[1];
@@ -2608,7 +2622,7 @@ export class PromptBuilder {
     }
 
     // ── Props in play ──────────────────────────────────────────────────────
-    const propWords = this.heuristics.getPropWords();
+    const propWords = DEFAULT_PROP_WORDS;
     const foundProps = new Set<string>();
     for (const prop of propWords) {
       if (lowerText.includes(prop)) foundProps.add(prop);
@@ -2625,7 +2639,7 @@ export class PromptBuilder {
     }
 
     // ── Physical/injury state ──────────────────────────────────────────────
-    const injuryWords = this.heuristics.getInjuryWords();
+    const injuryWords = DEFAULT_INJURY_WORDS;
     const injuryMentions: string[] = [];
     for (const word of injuryWords) {
       if (lowerText.includes(word)) injuryMentions.push(word);

@@ -9,7 +9,6 @@
     "@perry/ai": "*",
     "@perry/rag": "*",
     "@perry/projects": "*",
-    "@perry/export": "*",
     "express": "^4.19.2",
     "cors": "^2.8.5",
     "multer": "^1.4.5-lts.1",

@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { ConfigService, EventBus, Logger, Vault } from '@perry/core';
 import { AIRouter } from '@perry/ai';
 import { MemoryStore, ContextEngine, RagService } from '@perry/rag';
-import { ProjectEngine, StateStore, resolvePenAwareWriterModel, StyleDnaService, LibrarianService } from '@perry/projects';
+import { ProjectEngine, StateStore, LibrarianService } from '@perry/projects';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync, mkdirSync } from 'fs';
@@ -107,11 +107,6 @@ async function bootstrap() {
   await stateStore.initialize();
 
   const aiRouter = new AIRouter(config, vault, log.child('ai'));
-  const penAwareModel = resolvePenAwareWriterModel(stateStore, { log: log.child('ai') });
-  if (penAwareModel) aiRouter.setWriterModelOverride(penAwareModel);
-  aiRouter.setPenModelResolver((slug) =>
-    resolvePenAwareWriterModel(stateStore, { preferredSlug: slug }),
-  );
   await aiRouter.initialize();
 
   const memoryStore = new MemoryStore(WORKSPACE, log.child('memory'));
@@ -133,8 +128,6 @@ async function bootstrap() {
       config: config 
     }
   );
-  
-  const styleDnaService = new StyleDnaService(stateStore, log.child('dna'), WORKSPACE);
 
   // ── Tool-surface profiles ────────────────────────────────────────────
   // Workers calling /perry-worker only need a small subset of MCP tools.
@@ -936,8 +929,8 @@ async function bootstrap() {
     }
     const projectId = match[1];
     
-    // Using compileSeed to give the MCP client the actual rules the LLM follows
-    const dnaSeed = styleDnaService.compileSeed(projectId, 1);
+    // No custom style DNA generated for this project on main branch
+    const dnaSeed = '';
     
     return {
       contents: [
@@ -2037,7 +2030,7 @@ async function bootstrap() {
               contextEngine,
               ragService,
               projectEngine,
-              styleDnaService,
+              styleDnaService: null,
             };
             const result = await tool.run(request.params.arguments || {}, context);
             return result;

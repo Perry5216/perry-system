@@ -25,7 +25,7 @@ const STORAGE_KEY = 'perry-active-domain';
 export function DomainSwitcher() {
   const [domains, setDomains] = useState<Domain[]>([]);
   const [active, setActive] = useState<string>(() => {
-    try { return localStorage.getItem(STORAGE_KEY) || 'books'; } catch { return 'books'; }
+    try { return localStorage.getItem(STORAGE_KEY) || 'code'; } catch { return 'code'; }
   });
   const [open, setOpen] = useState(false);
 

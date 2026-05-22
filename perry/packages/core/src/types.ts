@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════
 
 export type ProjectType =
+  | 'software-dev'
   | 'book-planning'
   | 'novel-pipeline'
   | 'deep-revision'
@@ -359,6 +360,8 @@ export type AgentDomain = 'books' | 'code' | 'email' | 'hacking' | 'meta';
  */
 export function projectTypeDomain(type: ProjectType): AgentDomain {
   switch (type) {
+    case 'software-dev':
+      return 'code';
     case 'book-planning':
     case 'novel-pipeline':
     case 'deep-revision':
@@ -371,7 +374,7 @@ export function projectTypeDomain(type: ProjectType): AgentDomain {
       return 'books';
     // Future domains add their project types above this default.
     default:
-      return 'books';
+      return 'code';
   }
 }
 

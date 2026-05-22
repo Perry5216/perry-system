@@ -11,7 +11,6 @@ COPY packages/core/package.json ./packages/core/
 COPY packages/ai/package.json ./packages/ai/
 COPY packages/rag/package.json ./packages/rag/
 COPY packages/projects/package.json ./packages/projects/
-COPY packages/export/package.json ./packages/export/
 COPY packages/dashboard/package.json ./packages/dashboard/
 COPY packages/dashboard-api/package.json ./packages/dashboard-api/
 COPY packages/mcp-server/package.json ./packages/mcp-server/

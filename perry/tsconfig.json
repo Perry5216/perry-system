@@ -21,7 +21,6 @@
     { "path": "packages/ai" },
     { "path": "packages/rag" },
     { "path": "packages/projects" },
-    { "path": "packages/export" },
     { "path": "packages/dashboard-api" },
     { "path": "packages/mcp-server" }
   ],

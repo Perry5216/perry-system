@@ -218,16 +218,52 @@ export class WhatsAppGateway implements Gateway {
       const sessionId = existing?.id || this.ctx.stateStore.createAgentSession({ domain: agent.domain, title: sessionTitle });
 
       try {
-        await this.sendMessage(senderJid, '⌛ thinking...');
-        const inv = await this.ctx.agentRunner.invoke({ agent, sessionId, input: text });
-        const output = inv.output || '(empty response)';
-        const chunks = chunkText(output, WHATSAPP_MAX_MESSAGE_LENGTH);
-        for (const c of chunks) {
-          await this.sendMessage(senderJid, c);
+        // Trigger composing/typing presence
+        try {
+          await this.sock.sendPresenceUpdate('composing', senderJid);
+        } catch (presenceErr: any) {
+          this.ctx.log.warn('whatsapp: failed to send composing presence', { error: presenceErr.message });
         }
-      } catch (e: any) {
-        this.ctx.log.error('whatsapp: invocation failed', { error: e.message });
-        await this.sendMessage(senderJid, `⚠️ ${e.message}`);
+
+        // Send space placeholder message
+        let sent: any;
+        try {
+          sent = await this.sock.sendMessage(senderJid, { text: ' ' });
+        } catch (sendErr: any) {
+          this.ctx.log.error('whatsapp: failed to send space placeholder', { error: sendErr.message });
+          throw sendErr;
+        }
+
+        try {
+          const inv = await this.ctx.agentRunner.invoke({ agent, sessionId, input: text });
+          const output = inv.output || '(empty response)';
+          const chunks = chunkText(output, WHATSAPP_MAX_MESSAGE_LENGTH);
+          
+          if (chunks.length > 0) {
+            // Edit the space placeholder with the first chunk
+            await this.sock.sendMessage(senderJid, { edit: sent.key, text: chunks[0] });
+            // Send remaining chunks normally
+            for (let i = 1; i < chunks.length; i++) {
+              await this.sendMessage(senderJid, chunks[i]);
+            }
+          } else {
+            await this.sock.sendMessage(senderJid, { edit: sent.key, text: '(empty response)' });
+          }
+        } catch (e: any) {
+          this.ctx.log.error('whatsapp: invocation failed', { error: e.message });
+          try {
+            await this.sock.sendMessage(senderJid, { edit: sent.key, text: `⚠️ ${e.message}` });
+          } catch {
+            await this.sendMessage(senderJid, `⚠️ ${e.message}`);
+          }
+        }
+      } finally {
+        // Turn off composing presence
+        try {
+          await this.sock.sendPresenceUpdate('paused', senderJid);
+        } catch (presenceErr: any) {
+          this.ctx.log.warn('whatsapp: failed to send paused presence', { error: presenceErr.message });
+        }
       }
     }
   }

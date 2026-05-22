@@ -5,7 +5,7 @@
 import { ConfigService, EventBus, Logger, Vault, SecretsService } from '@perry/core';
 import { AIRouter } from '@perry/ai';
 import { MemoryStore, ContextEngine, EntityIndexer, RagService } from '@perry/rag';
-import { ProjectEngine, StateStore, resolvePenAwareWriterModel, NetworkClient, scanLeaks } from '@perry/projects';
+import { ProjectEngine, StateStore, NetworkClient, scanLeaks } from '@perry/projects';
 import { createServer } from './server.js';
 import { join } from 'path';
 
@@ -52,15 +52,7 @@ async function bootstrap() {
   // process.env (legacy behavior) — works but defeats the point.
   NetworkClient.setSecrets(secrets);
 
-  // 3. AI Router (with pen-aware writer model resolved from state-store)
   const aiRouter = new AIRouter(config, vault, log.child('ai'));
-  const penAwareModel = resolvePenAwareWriterModel(stateStore, { log: log.child('ai') });
-  if (penAwareModel) aiRouter.setWriterModelOverride(penAwareModel);
-  // Phase 3: per-request pen-aware resolver. CompletionRequest.penSlug, when
-  // present, swaps the writer model for the ollama provider on that request.
-  aiRouter.setPenModelResolver((slug) =>
-    resolvePenAwareWriterModel(stateStore, { preferredSlug: slug }),
-  );
   await aiRouter.initialize();
 
   // 4. RAG

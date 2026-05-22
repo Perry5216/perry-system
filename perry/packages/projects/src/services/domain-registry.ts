@@ -47,12 +47,12 @@ export interface DomainDefinition {
   updatedAt: string;
 }
 
-const BUILTIN_BOOKS: DomainDefinition = {
-  id: 'books',
-  label: 'Books',
-  description: 'Novel-writing pipeline with per-pen-name fine-tuning, scout, audit, and revision.',
-  color: '#22d3ee',
-  icon: 'book-open',
+const BUILTIN_CODE: DomainDefinition = {
+  id: 'code',
+  label: 'Code',
+  description: 'Software development pipeline with code review, architecting, and implementation.',
+  color: '#3b82f6',
+  icon: 'code',
   dashboardPanels: ['projects', 'self-learning', 'trajectories', 'analytics', 'models'],
   defaultSkills: [],
   builtin: true,
@@ -72,13 +72,13 @@ export class DomainRegistry {
   }
 
   private ensureBuiltins(): void {
-    const booksPath = join(this.dir, 'books.json');
-    if (!existsSync(booksPath)) {
+    const codePath = join(this.dir, 'code.json');
+    if (!existsSync(codePath)) {
       try {
-        writeFileSync(booksPath, JSON.stringify(BUILTIN_BOOKS, null, 2), 'utf-8');
-        this.log.info('DomainRegistry seeded built-in domain', { id: 'books' });
+        writeFileSync(codePath, JSON.stringify(BUILTIN_CODE, null, 2), 'utf-8');
+        this.log.info('DomainRegistry seeded built-in domain', { id: 'code' });
       } catch (err: any) {
-        this.log.warn('Failed to seed builtin books domain', { error: err.message });
+        this.log.warn('Failed to seed builtin code domain', { error: err.message });
       }
     }
   }

@@ -236,7 +236,7 @@ export class AIRouter {
 
     // ── Ollama Secondary = "The Librarian" (5070 Ti) ──
     const librarianEndpoint    = process.env.OLLAMA_LIBRARIAN_BASE_URL || this.config.get<string>('ai.ollama.librarianEndpoint', 'http://localhost:11435');
-    const librarianModel       = process.env.OLLAMA_LIBRARIAN_MODEL || this.config.get<string>('ai.ollama.librarianModel', 'qwen3:14b');
+    const librarianModel       = process.env.OLLAMA_LIBRARIAN_MODEL || this.config.get<string>('ai.ollama.librarianModel', 'gemma3:12b');
     const librarianCtx         = this.config.get<number>('ai.ollama.librarianContextWindow', 131072);
     const librarianTemperature = this.config.get<number>('ai.ollama.librarianTemperature', 0.1);
     const librarianTopP        = this.config.get<number>('ai.ollama.librarianTopP', 0.9);
@@ -601,17 +601,74 @@ export class AIRouter {
     // etc.) ignore pen-slug because they don't run pen-specific LoRAs.
     const effectiveRequest = this.applyPenAwareModel(request);
 
+    // Build the ordered list of fallback providers to try
+    const triedIds = new Set<string>([effectiveRequest.provider]);
+    const fallbacks: BaseProvider[] = [];
+
+    // 1. Role-aware local preferences
+    const preference: Record<string, string[]> = {
+      researcher: ['librarian', 'ollama'],
+      librarian:  ['researcher', 'ollama'],
+      ollama:     ['librarian', 'researcher'],
+    };
+    const preferred = preference[effectiveRequest.provider];
+    if (preferred) {
+      for (const id of preferred) {
+        if (!triedIds.has(id)) {
+          const p = this.providers.get(id);
+          if (p) {
+            fallbacks.push(p);
+            triedIds.add(id);
+          }
+        }
+      }
+    }
+
+    // 2. Add Gemini, Claude, DeepSeek, OpenAI, OpenRouter if they are initialized/available
+    const apiOrder = ['gemini', 'claude', 'deepseek', 'openai', 'openrouter'];
+    for (const id of apiOrder) {
+      if (!triedIds.has(id)) {
+        const p = this.providers.get(id);
+        if (p) {
+          fallbacks.push(p);
+          triedIds.add(id);
+        }
+      }
+    }
+
+    // 3. Add any remaining active providers
+    for (const [id, p] of this.providers) {
+      if (!triedIds.has(id)) {
+        fallbacks.push(p);
+        triedIds.add(id);
+      }
+    }
+
     try {
       return await provider.complete(effectiveRequest);
     } catch (err: any) {
-      this.log.warn(`Primary provider failed`, { provider: effectiveRequest.provider, error: err.message });
+      this.log.warn(`Primary provider failed, attempting fallbacks`, {
+        provider: effectiveRequest.provider,
+        error: err.message,
+        availableFallbacks: fallbacks.map(f => f.id)
+      });
 
-      const fallback = this.getFallbackProvider(effectiveRequest.provider);
-      if (fallback) {
-        this.log.info(`Falling back to ${fallback.id}`);
-        return await fallback.complete({ ...effectiveRequest, provider: fallback.id });
+      let lastError = err;
+      for (const fallback of fallbacks) {
+        try {
+          this.log.info(`Attempting fallback to ${fallback.id}`, { model: fallback.model });
+          // Ensure we update the provider and model for the fallback
+          return await fallback.complete({
+            ...effectiveRequest,
+            provider: fallback.id,
+            model: fallback.model
+          });
+        } catch (fallbackErr: any) {
+          this.log.warn(`Fallback to ${fallback.id} failed`, { error: fallbackErr.message });
+          lastError = fallbackErr;
+        }
       }
-      throw err;
+      throw lastError;
     }
   }
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { Play, Pause, AlertCircle, CheckCircle2, Circle, Loader2, Plus, X, BookOpen, Settings, Trash2, ChevronDown, ChevronRight, RotateCcw, Radio, Eye, EyeOff, ArrowDownToLine, ArrowUpFromLine, FileText, ClipboardCheck, BarChart3, GitBranch, Cpu, Users } from 'lucide-react';
+import { Play, Pause, AlertCircle, CheckCircle2, Circle, Loader2, Plus, X, BookOpen, Settings, Trash2, ChevronDown, ChevronRight, RotateCcw, Radio, Eye, EyeOff, ArrowDownToLine, ArrowUpFromLine, BarChart3, GitBranch, Cpu, Users } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { Project, ProjectStep } from '@perry/core';
 import { FleetCanvas } from './components/FleetCanvas';
@@ -113,61 +113,7 @@ const API_BASE = import.meta.env.DEV ? 'http://localhost:4000/api' : '/api';
   };
 })();
 
-function EditableMarkdown({ content, stepId, projectId, onSave }: { content: string, stepId: string, projectId: string, onSave: (newContent: string) => void }) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [editValue, setEditValue] = useState(content);
-  const [isSaving, setIsSaving] = useState(false);
 
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      const res = await fetch(`${API_BASE}/projects/${projectId}/steps/${stepId}/result`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ result: editValue })
-      });
-      if (res.ok) {
-        onSave(editValue);
-        setIsEditing(false);
-      } else {
-        alert('Failed to save step result');
-      }
-    } catch (e) {
-      alert('Error saving step result');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  if (isEditing) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
-        <textarea
-          value={editValue}
-          onChange={e => setEditValue(e.target.value)}
-          style={{ width: '100%', minHeight: '300px', background: 'var(--bg-main)', color: 'var(--text-main)', border: '1px solid var(--panel-border)', padding: '1rem', fontFamily: 'monospace', borderRadius: '4px', resize: 'vertical' }}
-        />
-        <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-          <button className="btn btn-secondary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }} onClick={() => setIsEditing(false)} disabled={isSaving}>Cancel</button>
-          <button className="btn btn-primary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }} onClick={handleSave} disabled={isSaving}>{isSaving ? 'Saving...' : 'Save Changes'}</button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ position: 'relative' }}>
-      <button
-        className="btn btn-secondary"
-        style={{ position: 'absolute', top: '-1rem', right: '0', zIndex: 10, padding: '0.1rem 0.5rem', fontSize: '0.7rem', opacity: 0.7 }}
-        onClick={() => { setEditValue(content); setIsEditing(true); }}
-      >
-        Edit Output
-      </button>
-      <ReactMarkdown>{content}</ReactMarkdown>
-    </div>
-  );
-}
 
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -209,7 +155,7 @@ export function App() {
   }, []);
 
   // UI State
-  type TabId = 'pipeline' | 'bible' | 'chapters' | 'revision' | 'stats' | 'gpu' | 'workers' | 'fleet' | 'director' | 'pens' | 'secrets' | 'trajectories' | 'analytics' | 'models' | 'projects' | 'system' | 'self-learning' | 'domains' | 'operator' | 'cron' | 'integrations' | 'goals';
+  type TabId = 'pipeline' | 'gpu' | 'workers' | 'fleet' | 'director' | 'secrets' | 'trajectories' | 'analytics' | 'models' | 'projects' | 'system' | 'self-learning' | 'domains' | 'operator' | 'cron' | 'integrations' | 'goals';
   // Fleet is the landing tab — the system's "home view" showing the
   // entire agent constellation. Projects, secrets, models, etc. are
   // all navigated to from Fleet rather than around it.
@@ -222,25 +168,23 @@ export function App() {
   // activeTab === 'projects'. No compatibility shim needed.
 
   // Work-type filter on the Projects panel. 'all' shows everything; the
-  // others (books / code / email / hacking / meta) match the agent domains.
-  type WorkType = 'all' | 'books' | 'code' | 'email' | 'hacking' | 'meta';
+  // others (code / email / hacking / meta) match the agent domains.
+  type WorkType = 'all' | 'code' | 'email' | 'hacking' | 'meta';
   const [projectWorkType, setProjectWorkType] = useState<WorkType>('all');
 
   /** Derive a project's work type from whatever signal we can find: an
    *  explicit `metadata.workType` field if set, otherwise inferred from the
-   *  step types in the project. Falls back to 'books' since the system was
-   *  built for novel-writing first. */
+   *  step types in the project. Falls back to 'code'. */
   const inferProjectWorkType = (p: Project): Exclude<WorkType, 'all'> => {
     const meta = (p as any).metadata || {};
-    if (meta.workType && ['books','code','email','hacking','meta'].includes(meta.workType)) {
+    if (meta.workType && ['code','email','hacking','meta'].includes(meta.workType)) {
       return meta.workType;
     }
     const stepTypes = new Set((p.steps || []).map(s => s.taskType));
-    if (stepTypes.has('book_bible') || stepTypes.has('creative_writing') || stepTypes.has('revision_check')) return 'books';
     if ([...stepTypes].some(t => t.startsWith('code'))) return 'code';
     if ([...stepTypes].some(t => t.startsWith('email'))) return 'email';
     if ([...stepTypes].some(t => t.startsWith('hack') || t.includes('recon') || t.includes('vuln'))) return 'hacking';
-    return 'books';
+    return 'code';
   };
   const [chatMode, setChatMode] = useState<'docked' | 'floating'>('docked');
   // Docked column width — user-resizable via the drag handle on the chat
@@ -441,91 +385,7 @@ export function App() {
   const [stepVerdicts, setStepVerdicts] = useState<Record<string, { audit?: any; povVerdict?: any }>>({});
 
   // Pens & LoRAs state — used by the Pens tab and the Promote-to-Production flow
-  const [pensData, setPensData] = useState<any[]>([]);
-  const [pensLoading, setPensLoading] = useState(false);
-  const [promoting, setPromoting] = useState<string | null>(null); // `${slug}:${version}` while in-flight
-  // Cold-start calibration: per-pen target count input + last summary returned
-  // by POST /api/system/start-calibration. Keyed by pen slug so two pens can
-  // calibrate independently without clobbering each other's status.
-  const [calibrating, setCalibrating] = useState<string | null>(null);
-  const [calibrationTargets, setCalibrationTargets] = useState<Record<string, string>>({});
-  const [calibrationResults, setCalibrationResults] = useState<Record<string, { enqueued: number; perCell: number; runAt: string }>>({});
-
-  const fetchPens = async () => {
-    setPensLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/pens`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      setPensData(Array.isArray(json.pens) ? json.pens : []);
-    } catch (err) {
-      console.error('fetchPens failed', err);
-    } finally {
-      setPensLoading(false);
-    }
-  };
-
-  const startCalibration = async (slug: string) => {
-    const raw = calibrationTargets[slug];
-    const target = raw && raw.trim() ? parseInt(raw, 10) : 600;
-    if (!Number.isFinite(target) || target < 1) {
-      alert('Target pairs must be a positive integer.');
-      return;
-    }
-    if (!confirm(
-      `Enqueue a balanced cold-start calibration for "${slug}"?\n\n` +
-      `~${target} synthesize_pair tasks across all scene types × stat bands × anti-patterns.\n\n` +
-      'Workers (headless or /perry-worker sessions) will drain the queue. Results flow into ' +
-      'claude_injected.jsonl, then training_data.jsonl on the next export.'
-    )) return;
-    setCalibrating(slug);
-    try {
-      const res = await fetch(`${API_BASE}/system/start-calibration`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slug, targetPairs: target }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      setCalibrationResults(prev => ({
-        ...prev,
-        [slug]: { enqueued: data.enqueued, perCell: data.perCell, runAt: new Date().toISOString() },
-      }));
-    } catch (err) {
-      console.error('startCalibration failed', err);
-      alert(`Calibration failed: ${(err as Error).message}`);
-    } finally {
-      setCalibrating(null);
-    }
-  };
-
-  const promoteLora = async (slug: string, version: number) => {
-    const key = `${slug}:${version}`;
-    setPromoting(key);
-    try {
-      const res = await fetch(`${API_BASE}/pens/${slug}/promote/${version}`, { method: 'POST' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      await fetchPens();
-    } catch (err) {
-      console.error('promoteLora failed', err);
-      alert(`Promotion failed: ${(err as Error).message}`);
-    } finally {
-      setPromoting(null);
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab === 'pens') {
-      fetchPens();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
+  const [pensData] = useState<any[]>([]);
 
   // Batch Reroll State
   const [selectedStepIds, setSelectedStepIds] = useState<Set<string>>(new Set());
@@ -697,18 +557,6 @@ export function App() {
     return projects.filter(p => p.id === rootId || findRoot(p.id, projects) === rootId);
   }, [selectedProject, projects, findRoot]);
 
-  /** Get completed steps of a specific taskType from across the family */
-  const getFamilySteps = useCallback((taskType: string): { project: Project; step: ProjectStep }[] => {
-    const results: { project: Project; step: ProjectStep }[] = [];
-    for (const p of projectFamily) {
-      for (const s of p.steps) {
-        if (s.taskType === taskType && s.status === 'completed' && s.result) {
-          results.push({ project: p, step: s });
-        }
-      }
-    }
-    return results;
-  }, [projectFamily]);
 
   /** Tabs that work as truly global views (no project context required).
    *  These appear in the LeftNav. Other tabs (GPU, Workers,
@@ -742,69 +590,14 @@ export function App() {
       { id: 'gpu', label: 'GPU Monitor', icon: <Cpu size={14} /> },
       { id: 'workers', label: 'Workers', icon: <Users size={14} />,
         count: (assistStatus?.pending ?? 0) + (workersInfo?.active ?? 0) || undefined },
-      { id: 'pens', label: 'Pens & LoRAs', icon: <GitBranch size={14} /> },
       { id: 'trajectories', label: 'Trajectories', icon: <BarChart3 size={14} />, global: true },
       { id: 'models', label: 'Models', icon: <ArrowDownToLine size={14} />, global: true },
       { id: 'secrets', label: 'Secrets', icon: <Settings size={14} />, global: true },
       { id: 'system', label: 'System', icon: <GitBranch size={14} />, global: true },
     ];
 
-    // Book Bible — from current project OR ancestors
-    const bibleSteps = getFamilySteps('book_bible');
-    if (bibleSteps.length > 0) {
-      tabs.push({ id: 'bible', label: 'Book Bible', icon: <BookOpen size={14} />, count: bibleSteps.length });
-    }
-
-    // Chapters — creative_writing steps from ancestors
-    const chapterSteps = getFamilySteps('creative_writing');
-    if (chapterSteps.length > 0) {
-      tabs.push({ id: 'chapters', label: 'Chapters', icon: <FileText size={14} />, count: chapterSteps.length });
-    }
-
-    // Revision Notes — revision_check steps from deep-revision ancestors
-    const revisionSteps = getFamilySteps('revision_check');
-    if (revisionSteps.length > 0) {
-      tabs.push({ id: 'revision', label: 'Revision Notes', icon: <ClipboardCheck size={14} />, count: revisionSteps.length });
-    }
-
-    // Stats — stat_update steps from ancestors
-    const statSteps = getFamilySteps('stat_update');
-    if (statSteps.length > 0) {
-      tabs.push({ id: 'stats', label: 'Live Stats', icon: <BarChart3 size={14} />, count: statSteps.length });
-    }
-
-    // GPU Monitor moved to second position
-
     return tabs;
-  }, [getFamilySteps]);
-
-  // Automatically fetch I/O data from disk for steps shown in the active tab
-  // if they have been offloaded to disk.
-  useEffect(() => {
-    if (!selectedProject) return;
-
-    const fetchIfOffloaded = (items: { project: Project; step: ProjectStep }[]) => {
-      items.forEach(({ project, step }) => {
-        if (step.result && step.result.includes('[Content written to disk')) {
-          // Read via refs to avoid re-subscribing the effect to every
-          // ioData/ioLoading mutation (which would re-run on every fetch).
-          if (!ioDataRef.current[step.id] && !ioLoadingRef.current[step.id]) {
-            fetchStepIO(project.id, step.id);
-          }
-        }
-      });
-    };
-
-    if (activeTab === 'bible') {
-      fetchIfOffloaded(getFamilySteps('book_bible'));
-    } else if (activeTab === 'chapters') {
-      fetchIfOffloaded(getFamilySteps('creative_writing'));
-    } else if (activeTab === 'revision') {
-      fetchIfOffloaded(getFamilySteps('revision_check'));
-    } else if (activeTab === 'stats') {
-      fetchIfOffloaded(getFamilySteps('stat_update'));
-    }
-  }, [activeTab, selectedProject, getFamilySteps, fetchStepIO]);
+  }, [assistStatus, workersInfo]);
 
   /** Count words for display */
   const countWords = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
@@ -1597,7 +1390,6 @@ export function App() {
             <div className="eyebrow" style={{ marginBottom: 8, paddingLeft: 6 }}>Work types</div>
             {([
               { id: 'all',     label: 'All projects', icon: '✦', color: 'var(--accent)' },
-              { id: 'books',   label: 'Book making',  icon: '📖', color: '#FFD166' },
               { id: 'code',    label: 'Code',         icon: '⌬',  color: '#7CFC00' },
               { id: 'email',   label: 'Email',        icon: '✉',  color: '#22D3EE' },
               { id: 'hacking', label: 'Hacking',      icon: '⌖',  color: '#FF6B6B' },
@@ -1711,15 +1503,7 @@ export function App() {
                     <div style={{ height: '100%', background: selectedProject?.id === p.id ? 'white' : 'var(--accent)', width: `${p.progress}%` }} />
                   </div>
 
-                  {/* Quick Access Book Bible Link */}
-                  {p.steps.some(s => s.taskType === 'book_bible' && s.status === 'completed') && (
-                    <div
-                      onClick={(e) => { e.stopPropagation(); setSelectedProject(p); setActiveTab('bible'); }}
-                      style={{ marginTop: '0.5rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.25rem', color: selectedProject?.id === p.id && (activeTab as string) === 'bible' ? 'white' : 'var(--text-muted)', fontWeight: (activeTab as string) === 'bible' && selectedProject?.id === p.id ? 600 : 400, marginLeft: projects.some(c => c.parentId === p.id) ? '1.25rem' : '0' }}
-                    >
-                      <BookOpen size={12} /> View Book Bible
-                    </div>
-                  )}
+
                 </div>
 
                 {/* Child Projects (Series Books) */}
@@ -2487,273 +2271,7 @@ export function App() {
               </div>
             )}
 
-            {activeTab === 'bible' && (() => {
-              // Collect bible steps from family (which now includes current project)
-              const allBible = getFamilySteps('book_bible');
 
-              return (
-                <div className="glass-panel" style={{ background: 'var(--panel-bg)' }}>
-                  <h3 className="mb-4">Project Book Bible</h3>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-                    {allBible.length === 0 ? (
-                      <div className="text-muted text-center" style={{ padding: '2rem' }}>
-                        No Book Bible content generated yet. Run the Pipeline to create it.
-                      </div>
-                    ) : (
-                      allBible.map(({ project: srcProject, step }) => {
-                        const content = ioData[step.id]?.output || step.result || '';
-                        const isLoading = ioLoading[step.id];
-                        return (
-                          <details key={`${srcProject.id}-${step.id}`} open style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid var(--panel-border)', marginBottom: '1rem' }}>
-                            <summary style={{ cursor: 'pointer', padding: '0.75rem 1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', userSelect: 'none', fontSize: '1rem', fontWeight: 600, color: 'var(--accent)', borderBottom: '1px solid var(--panel-border)' }}>
-                              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                {step.label}
-                                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 400, textTransform: 'none', opacity: 0.8 }}>(click to toggle)</span>
-                              </span>
-                              {srcProject.id !== selectedProject?.id && (
-                                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 400, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                                  <GitBranch size={10} /> {srcProject.title.slice(0, 40)}
-                                </span>
-                              )}
-                            </summary>
-                            <div style={{ padding: '1rem' }}>
-                              <div className="markdown-body" style={{ color: 'var(--text-main)', fontSize: '0.9rem', lineHeight: 1.6 }}>
-                                {isLoading ? <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)' }}><Loader2 size={14} className="animate-spin" /> Loading from disk...</span> : <EditableMarkdown content={content} stepId={step.id} projectId={srcProject.id} onSave={(newContent) => { setIoData(prev => ({ ...prev, [step.id]: { ...prev[step.id], output: newContent } })); }} />}
-                              </div>
-                            </div>
-                          </details>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {activeTab === 'chapters' && (() => {
-              // Hide calibration scenes from the main manuscript chapters view
-              const chapterSteps = getFamilySteps('creative_writing')
-                .filter(item => item.project.type !== 'style-calibration');
-
-              // Group by chapter number
-              const grouped = new Map<number, { project: Project; step: ProjectStep }[]>();
-              for (const item of chapterSteps) {
-                const ch = item.step.chapterNumber ?? -1;
-                if (!grouped.has(ch)) grouped.set(ch, []);
-                grouped.get(ch)!.push(item);
-              }
-              const sortedChapters = [...grouped.entries()].sort((a, b) => a[0] - b[0]);
-
-              return (
-                <div className="glass-panel" style={{ background: 'var(--panel-bg)' }}>
-                  {/* Manuscript Summary Bar */}
-                  {(() => {
-                    const totalWords = sortedChapters.reduce((sum, [, items]) => {
-                      const text = items.map(i => ioData[i.step.id]?.output || i.step.result || '').join(' ');
-                      return sum + text.trim().split(/\s+/).filter(Boolean).length;
-                    }, 0);
-                    const chapterCount = sortedChapters.length;
-                    const avgPerChapter = chapterCount > 0 ? Math.round(totalWords / chapterCount) : 0;
-                    const targetPerChapter = selectedProject?.context?.targetWordsPerChapter || 3000;
-                    const targetChapters = selectedProject?.context?.targetChapters || 25;
-                    const manuscriptTarget = targetPerChapter * targetChapters;
-                    const progressPercent = Math.min(100, Math.round((totalWords / manuscriptTarget) * 100));
-
-                    return (
-                      <div style={{ marginBottom: '1.5rem' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '0.75rem' }}>
-                          <h3 style={{ margin: 0 }}>Chapters from Production Pipeline</h3>
-                          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums' }}>
-                                {totalWords.toLocaleString()}
-                              </div>
-                              <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Words</div>
-                            </div>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums' }}>
-                                {chapterCount}
-                              </div>
-                              <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Chapters</div>
-                            </div>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: avgPerChapter >= targetPerChapter * 0.8 ? '#22c55e' : '#f59e0b', fontVariantNumeric: 'tabular-nums' }}>
-                                {avgPerChapter.toLocaleString()}
-                              </div>
-                              <div style={{ fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Avg/Chapter</div>
-                            </div>
-                          </div>
-                        </div>
-                        {/* Progress bar towards manuscript target */}
-                        <div style={{ height: '6px', background: 'rgba(255,255,255,0.06)', borderRadius: '3px', overflow: 'hidden' }}>
-                          <div style={{
-                            height: '100%',
-                            width: `${progressPercent}%`,
-                            background: progressPercent >= 100 ? '#22c55e' : 'var(--accent)',
-                            borderRadius: '3px',
-                            transition: 'width 0.5s ease',
-                          }} />
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.25rem', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                          <span>{progressPercent}% of target</span>
-                          <span>Target: {manuscriptTarget.toLocaleString()} words ({targetChapters} ch × {targetPerChapter.toLocaleString()} w/ch)</span>
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  {chapterSteps.length === 0 ? (
-                    <div className="text-muted text-center" style={{ padding: '2rem' }}>
-                      No chapters generated yet in any related project.
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                      {sortedChapters.map(([chNum, items]) => {
-                        const chName = chNum === 0 ? 'Prologue' : chNum === -1 ? 'Unknown' : `Chapter ${chNum}`;
-                        // Combine all segment results for this chapter
-                        const fullText = items.map(i => ioData[i.step.id]?.output || i.step.result || '').join('\n\n');
-                        const anyLoading = items.some(i => ioLoading[i.step.id]);
-                        const wordCount = fullText.trim().split(/\s+/).filter(Boolean).length;
-                        const srcProject = items[0].project;
-                        return (
-                          <details key={chNum} style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
-                            <summary style={{
-                              cursor: 'pointer', padding: '0.75rem 1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                              userSelect: 'none', fontSize: '0.95rem', fontWeight: 500
-                            }}>
-                              <span>{chName} <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 400 }}>({items.length} segment{items.length > 1 ? 's' : ''})</span></span>
-                              <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                <span style={{
-                                  fontSize: '0.75rem',
-                                  color: wordCount >= (selectedProject?.context?.targetWordsPerChapter || 3000) * 0.8 ? '#22c55e' : wordCount >= (selectedProject?.context?.targetWordsPerChapter || 3000) * 0.5 ? '#f59e0b' : '#ef4444',
-                                  fontVariantNumeric: 'tabular-nums',
-                                }}>{wordCount.toLocaleString()} words</span>
-                                <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-                                  <GitBranch size={10} /> {srcProject.title.slice(0, 30)}
-                                </span>
-                              </span>
-                            </summary>
-                            <div style={{ padding: '1rem', borderTop: '1px solid var(--panel-border)', maxHeight: '60vh', overflowY: 'auto' }}>
-                              <div className="markdown-body" style={{ color: 'var(--text-main)', fontSize: '0.9rem', lineHeight: 1.7 }}>
-                                {anyLoading ? <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)' }}><Loader2 size={14} className="animate-spin" /> Loading parts from disk...</span> : items.map((item, idx) => (
-                                  <div key={item.step.id} style={{ marginBottom: idx < items.length - 1 ? '2rem' : 0 }}>
-                                    {items.length > 1 && <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem', borderBottom: '1px solid var(--panel-border)', paddingBottom: '0.25rem' }}>Segment {idx + 1} ({item.step.label})</div>}
-                                    <EditableMarkdown content={ioData[item.step.id]?.output || item.step.result || ''} stepId={item.step.id} projectId={item.project.id} onSave={(newContent) => { setIoData(prev => ({ ...prev, [item.step.id]: { ...prev[item.step.id], output: newContent } })); }} />
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </details>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {activeTab === 'revision' && (() => {
-              const revisionSteps = getFamilySteps('revision_check');
-              // Group by chapter number
-              const grouped = new Map<number, { project: Project; step: ProjectStep }[]>();
-              for (const item of revisionSteps) {
-                const ch = item.step.chapterNumber ?? -1;
-                if (!grouped.has(ch)) grouped.set(ch, []);
-                grouped.get(ch)!.push(item);
-              }
-              const sortedChapters = [...grouped.entries()].sort((a, b) => a[0] - b[0]);
-
-              return (
-                <div className="glass-panel" style={{ background: 'var(--panel-bg)' }}>
-                  <h3 className="mb-4">Revision Audit Notes</h3>
-                  {revisionSteps.length === 0 ? (
-                    <div className="text-muted text-center" style={{ padding: '2rem' }}>
-                      No revision audit data found in any related project.
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                      {sortedChapters.map(([chNum, items]) => {
-                        const srcProject = items[0].project;
-                        const chName = chNum === 0 ? 'Prologue' : chNum === -1 ? 'Manuscript-Wide' : chNum > (srcProject.context.targetChapters || 25) ? 'Epilogue' : `Chapter ${chNum}`;
-                        return (
-                          <details key={chNum} style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
-                            <summary style={{
-                              cursor: 'pointer', padding: '0.75rem 1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                              userSelect: 'none', fontSize: '0.95rem', fontWeight: 500
-                            }}>
-                              <span>{chName} <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 400 }}>({items.length} audit pass{items.length > 1 ? 'es' : ''})</span></span>
-                              <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-                                <GitBranch size={10} /> {srcProject.title.slice(0, 30)}
-                              </span>
-                            </summary>
-                            <div style={{ padding: '1rem', borderTop: '1px solid var(--panel-border)', maxHeight: '60vh', overflowY: 'auto' }}>
-                              {items.map(({ step }) => {
-                                const content = ioData[step.id]?.output || step.result || '';
-                                const isLoading = ioLoading[step.id];
-                                return (
-                                  <div key={step.id} style={{ marginBottom: '1.5rem' }}>
-                                    <h5 style={{ color: 'var(--accent)', fontSize: '0.85rem', marginBottom: '0.5rem', borderBottom: '1px solid var(--panel-border)', paddingBottom: '0.25rem' }}>
-                                      {step.label}
-                                    </h5>
-                                    <div className="markdown-body" style={{ color: 'var(--text-main)', fontSize: '0.85rem', lineHeight: 1.6 }}>
-                                      {isLoading ? <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)' }}><Loader2 size={12} className="animate-spin" /> Loading...</span> : <ReactMarkdown>{content}</ReactMarkdown>}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </details>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {activeTab === 'stats' && (() => {
-              const statSteps = getFamilySteps('stat_update');
-              // Sort by chapter number
-              const sorted = [...statSteps].sort((a, b) => (a.step.chapterNumber ?? 0) - (b.step.chapterNumber ?? 0));
-
-              return (
-                <div className="glass-panel" style={{ background: 'var(--panel-bg)' }}>
-                  <h3 className="mb-4">Live Character Stats</h3>
-                  {statSteps.length === 0 ? (
-                    <div className="text-muted text-center" style={{ padding: '2rem' }}>
-                      No stat updates found in any related project.
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                      {sorted.map(({ project: srcProject, step }) => {
-                        const chNum = step.chapterNumber ?? 0;
-                        const chName = chNum === 0 ? 'Prologue' : `Chapter ${chNum}`;
-                        const content = ioData[step.id]?.output || step.result || '';
-                        const isLoading = ioLoading[step.id];
-                        return (
-                          <details key={`${srcProject.id}-${step.id}`} style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
-                            <summary style={{
-                              cursor: 'pointer', padding: '0.75rem 1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                              userSelect: 'none', fontSize: '0.95rem', fontWeight: 500
-                            }}>
-                              <span>{chName} — Stat Update</span>
-                              <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-                                <GitBranch size={10} /> {srcProject.title.slice(0, 30)}
-                              </span>
-                            </summary>
-                            <div style={{ padding: '1rem', borderTop: '1px solid var(--panel-border)' }}>
-                              <div className="markdown-body" style={{ color: 'var(--text-main)', fontSize: '0.85rem', lineHeight: 1.6 }}>
-                                {isLoading ? <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-muted)' }}><Loader2 size={12} className="animate-spin" /> Loading...</span> : <ReactMarkdown>{content}</ReactMarkdown>}
-                              </div>
-                            </div>
-                          </details>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
 
             {activeTab === 'fleet' && (
               <div className="glass-panel" style={{ background: 'transparent', padding: 0, border: 'none' }}>
@@ -3978,170 +3496,7 @@ export function App() {
               </div>
             )}
 
-            {activeTab === 'pens' && (
-              <div className="glass-panel" style={{ background: 'var(--panel-bg)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                  <div>
-                    <h3 style={{ margin: 0 }}>Pen Names & LoRAs</h3>
-                    <p style={{ margin: '0.25rem 0 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                      Promote a trained LoRA to make it the active writer for that pen.
-                    </p>
-                  </div>
-                  <button
-                    onClick={fetchPens}
-                    disabled={pensLoading}
-                    style={{ padding: '0.4rem 0.85rem', borderRadius: '6px', border: '1px solid var(--panel-border)', background: 'transparent', color: 'var(--text)', cursor: pensLoading ? 'wait' : 'pointer', fontSize: '0.75rem' }}
-                  >
-                    {pensLoading ? 'Refreshing…' : 'Refresh'}
-                  </button>
-                </div>
 
-                {pensData.length === 0 && !pensLoading && (
-                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                    No pen names registered. Create one via the Director / project setup flow.
-                  </p>
-                )}
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                  {pensData.map((pen: any) => (
-                    <div key={pen.slug} style={{ border: '1px solid var(--panel-border)', borderRadius: '8px', padding: '1rem' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.75rem' }}>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: '1rem' }}>{pen.displayName} <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>({pen.slug})</span></div>
-                          {pen.genreOrSeries && (
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{pen.genreOrSeries}</div>
-                          )}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                          {pen.currentLoraVersion !== null
-                            ? <>Active: <strong style={{ color: '#22c55e' }}>v{pen.currentLoraVersion}</strong></>
-                            : <span style={{ color: '#f59e0b' }}>No LoRA promoted</span>}
-                        </div>
-                      </div>
-
-                      {/* Cold-start calibration — enqueues a balanced cartesian
-                          of synthesize_pair tasks for the swarm to drain. Most
-                          useful right after creating a new pen, before any
-                          LoRA exists, to bootstrap a training pool fast. */}
-                      <div style={{
-                        marginBottom: '0.75rem',
-                        padding: '0.5rem 0.75rem',
-                        background: 'rgba(99,102,241,0.06)',
-                        border: '1px solid rgba(99,102,241,0.2)',
-                        borderRadius: '6px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.5rem',
-                        flexWrap: 'wrap',
-                      }}>
-                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                          Cold-start calibration · target
-                        </span>
-                        <input
-                          type="number"
-                          min={1}
-                          step={50}
-                          placeholder="600"
-                          value={calibrationTargets[pen.slug] || ''}
-                          onChange={(e) => setCalibrationTargets(prev => ({ ...prev, [pen.slug]: e.target.value }))}
-                          disabled={calibrating === pen.slug}
-                          style={{
-                            width: '70px',
-                            padding: '0.2rem 0.4rem',
-                            fontSize: '0.72rem',
-                            background: 'rgba(0,0,0,0.3)',
-                            border: '1px solid rgba(255,255,255,0.15)',
-                            color: 'white',
-                            borderRadius: '4px',
-                            fontFamily: 'monospace',
-                            fontVariantNumeric: 'tabular-nums',
-                          }}
-                        />
-                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>pairs</span>
-                        <button
-                          onClick={() => startCalibration(pen.slug)}
-                          disabled={calibrating === pen.slug}
-                          title="Enqueue a balanced batch of synthesize_pair tasks across scene types × stat bands × anti-patterns. The swarm drains them."
-                          style={{
-                            padding: '0.25rem 0.7rem',
-                            fontSize: '0.72rem',
-                            background: 'rgba(99,102,241,0.18)',
-                            border: '1px solid rgba(99,102,241,0.4)',
-                            color: '#a5b4fc',
-                            borderRadius: '4px',
-                            cursor: calibrating === pen.slug ? 'wait' : 'pointer',
-                          }}
-                        >{calibrating === pen.slug ? 'Enqueuing…' : 'Start calibration'}</button>
-                        {calibrationResults[pen.slug] && (
-                          <span style={{ fontSize: '0.7rem', color: '#22c55e' }}>
-                            Enqueued <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{calibrationResults[pen.slug].enqueued}</strong>
-                            <span style={{ color: 'var(--text-muted)' }}> ({calibrationResults[pen.slug].perCell}/cell · {new Date(calibrationResults[pen.slug].runAt).toLocaleTimeString()})</span>
-                          </span>
-                        )}
-                      </div>
-
-                      {pen.loraVersions.length === 0 ? (
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No trained LoRAs yet.</div>
-                      ) : (
-                        <table style={{ width: '100%', fontSize: '0.78rem', borderCollapse: 'collapse' }}>
-                          <thead>
-                            <tr style={{ textAlign: 'left', color: 'var(--text-muted)' }}>
-                              <th style={{ padding: '0.4rem 0.5rem' }}>Version</th>
-                              <th style={{ padding: '0.4rem 0.5rem' }}>Ollama Tag</th>
-                              <th style={{ padding: '0.4rem 0.5rem' }}>Pairs</th>
-                              <th style={{ padding: '0.4rem 0.5rem' }}>Final Loss</th>
-                              <th style={{ padding: '0.4rem 0.5rem' }}>Trained</th>
-                              <th style={{ padding: '0.4rem 0.5rem' }}>Status</th>
-                              <th style={{ padding: '0.4rem 0.5rem' }}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {pen.loraVersions.map((v: any) => {
-                              const key = `${pen.slug}:${v.version}`;
-                              const isPromoting = promoting === key;
-                              return (
-                                <tr key={v.version} style={{ borderTop: '1px solid var(--panel-border)' }}>
-                                  <td style={{ padding: '0.4rem 0.5rem', fontVariantNumeric: 'tabular-nums' }}>v{v.version}</td>
-                                  <td style={{ padding: '0.4rem 0.5rem', fontFamily: 'monospace', fontSize: '0.72rem' }}>{v.ollamaTag || '—'}</td>
-                                  <td style={{ padding: '0.4rem 0.5rem', fontVariantNumeric: 'tabular-nums' }}>{v.trainingPairs ?? '—'}</td>
-                                  <td style={{ padding: '0.4rem 0.5rem', fontVariantNumeric: 'tabular-nums' }}>{typeof v.finalLoss === 'number' ? v.finalLoss.toFixed(4) : '—'}</td>
-                                  <td style={{ padding: '0.4rem 0.5rem', fontSize: '0.72rem' }}>{v.trainedAt ? new Date(v.trainedAt).toLocaleDateString() : '—'}</td>
-                                  <td style={{ padding: '0.4rem 0.5rem' }}>
-                                    {v.isCurrent ? (
-                                      <span style={{ color: '#22c55e', fontWeight: 600 }}>● Active</span>
-                                    ) : v.promoted ? (
-                                      <span style={{ color: 'var(--text-muted)' }}>Promoted (history)</span>
-                                    ) : (
-                                      <span style={{ color: 'var(--text-muted)' }}>—</span>
-                                    )}
-                                  </td>
-                                  <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>
-                                    {!v.isCurrent && (
-                                      <button
-                                        onClick={() => promoteLora(pen.slug, v.version)}
-                                        disabled={isPromoting}
-                                        style={{
-                                          padding: '0.3rem 0.7rem', borderRadius: '5px', fontSize: '0.72rem',
-                                          border: '1px solid rgba(34,197,94,0.4)',
-                                          background: 'rgba(34,197,94,0.1)', color: '#22c55e',
-                                          cursor: isPromoting ? 'wait' : 'pointer',
-                                        }}
-                                      >
-                                        {isPromoting ? 'Promoting…' : 'Promote to Production'}
-                                      </button>
-                                    )}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
       </main>

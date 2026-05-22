@@ -61,5 +61,5 @@ const GATES: Record<string, QualityGate> = {
 };
 
 export function getGateFor(step: ProjectStep): QualityGate | null {
-  return GATES[step.id] || null;
+  return null;
 }

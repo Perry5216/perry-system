@@ -5,16 +5,13 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import { ProjectEngine, StateStore, AuditService, PenProfileService, DomainRegistry } from '@perry/projects';
+import { ProjectEngine, StateStore, DomainRegistry } from '@perry/projects';
 import { AIRouter } from '@perry/ai';
 import { EventBus, Logger, SecretsService } from '@perry/core';
 import type { RagService, MemoryStore } from '@perry/rag';
 import { setupProjectRoutes } from './routes/projects.js';
 import { setupSystemRoutes } from './routes/system.js';
-import { setupExportRoutes } from './routes/export.js';
-import { setupCoverRoutes } from './routes/cover.js';
 import { setupIntegrationRoutes } from './routes/integration.js';
-import { setupPensRoutes } from './routes/pens.js';
 import { setupAgentRoutes } from './routes/agents.js';
 import { setupSecretsRoutes } from './routes/secrets.js';
 import { setupModelsRoutes } from './routes/models.js';
@@ -117,17 +114,7 @@ export function createServer(
 
   app.use('/api/projects', setupProjectRoutes(projectEngine, log));
   app.use('/api/system', setupSystemRoutes(aiRouter, projectEngine, log, gc, secrets, ragService));
-  app.use('/api/export', setupExportRoutes(log));
-  app.use('/api/cover', setupCoverRoutes(workspaceDir, log.child('cover'), ragService));
   app.use('/api/integration', setupIntegrationRoutes(projectEngine, log.child('integration')));
-  // PenProfileService writes per-pen SOUL.md + LESSONS.md after audits and
-  // on GC sweeps. PromptBuilder reads those files via late-binding so it can
-  // skip re-rendering pen anti-patterns from raw data on every chapter call.
-  const penProfileService = new PenProfileService(stateStore, workspaceDir, log.child('pen-profile'));
-  try { projectEngine.getPromptBuilder().setPenProfileService(penProfileService); }
-  catch (e: any) { log.warn('failed to inject PenProfileService into PromptBuilder', { error: e.message }); }
-  const auditService = new AuditService(stateStore, workspaceDir, log.child('audit'), ragService, penProfileService, eventBus);
-  app.use('/api/pens', setupPensRoutes(stateStore, log.child('pens'), workspaceDir, projectEngine.getAutoLearning(), auditService, penProfileService));
   // Sessions browser — FTS5 keyword search over completed step outputs.
   app.use('/api/sessions', setupSessionsRoutes(stateStore, log.child('sessions')));
   // Skills librarian — list installed + pending, promote, reject.

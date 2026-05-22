@@ -4,7 +4,6 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
-    mem_limit: 8g
     pids_limit: 200
     environment:
       - OLLAMA_LLM_LIBRARY=cuda_v13
@@ -32,7 +31,6 @@ services:
   ollama-embeddings:
     image: ollama/ollama:latest
     container_name: ollama-embeddings
-    mem_limit: 6g
     pids_limit: 200
     environment:
       - OLLAMA_LLM_LIBRARY=cuda_v13
@@ -130,7 +128,7 @@ services:
       - PERRY_WEBHOOK_SECRET=${PERRY_WEBHOOK_SECRET:-}
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
       - PERRY_BROWSER_URL=http://perry-browser:3848
-      - OLLAMA_LIBRARIAN_MODEL=qwen3:14b
+      - OLLAMA_LIBRARIAN_MODEL=gemma3:12b
       - OLLAMA_RESEARCHER_MODEL=qwen3.6:27b
       # Reddit OAuth (register a "script" app at https://www.reddit.com/prefs/apps).
       # When set, NetworkClient auto-routes Reddit fetches through oauth.reddit.com.

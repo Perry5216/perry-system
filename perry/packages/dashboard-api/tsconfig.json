@@ -10,7 +10,6 @@
     { "path": "../core" },
     { "path": "../ai" },
     { "path": "../rag" },
-    { "path": "../projects" },
-    { "path": "../export" }
+    { "path": "../projects" }
   ]
 }

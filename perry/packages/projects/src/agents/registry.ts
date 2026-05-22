@@ -45,18 +45,9 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
       'Respond concisely. Surface decisions, not chatter.',
     ].join('\n'),
     modelBinding: {
-      // Director uses LIBRARIAN (qwen3:14b on 5070 Ti) — fast, generalist,
-      // chat-friendly. Two earlier options were considered and rejected:
-      //   - 'writer' (Magnum-32b LoRA): pen-aware literary model. Wrong
-      //     register for chat dispatch — talks like a novelist.
-      //   - 'workers' (Claude/Gemini CLI race): higher quality but CLI
-      //     spawn adds 10-30s latency per Telegram message. Unacceptable
-      //     for chat UX.
-      //
-      // Once a custom Director LoRA exists (trained on Director trajectories),
-      // flip provider to 'perry-agent'. Until then, librarian punches above
-      // its weight for short conversational dispatch.
-      provider: 'librarian',
+      // Director uses WORKERS (Claude/Gemini CLI subscription) to coordinate
+      // tasks reliably and avoid local RAM limits.
+      provider: 'workers',
     },
     toolACL: null,         // Director can use any tool
     outputFormat: 'free',

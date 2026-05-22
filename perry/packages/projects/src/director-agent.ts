@@ -378,7 +378,7 @@ Do not output any reasoning outside the JSON block.`;
 
     try {
       const response = await this.router.complete({
-        provider: 'librarian',
+        provider: this.router.selectProvider('planning').id,
         system,
         messages: [{ role: 'user', content: userMessage }],
         maxTokens: 1024,
@@ -642,7 +642,7 @@ Analyze the latest actions. Is the goal accomplished? Please update the status o
     };
 
     const response = await this.router.complete({
-      provider: 'librarian',
+      provider: this.router.selectProvider('goal_judge').id,
       system,
       messages: [{ role: 'user', content: userMessage }],
       maxTokens: 1024,
