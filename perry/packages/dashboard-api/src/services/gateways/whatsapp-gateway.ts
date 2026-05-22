@@ -218,14 +218,7 @@ export class WhatsAppGateway implements Gateway {
       const sessionId = existing?.id || this.ctx.stateStore.createAgentSession({ domain: agent.domain, title: sessionTitle });
 
       try {
-        // Trigger composing/typing presence
-        try {
-          await this.sock.sendPresenceUpdate('composing', senderJid);
-        } catch (presenceErr: any) {
-          this.ctx.log.warn('whatsapp: failed to send composing presence', { error: presenceErr.message });
-        }
-
-        // Send space placeholder message
+        // Send space placeholder message first
         let sent: any;
         try {
           sent = await this.sock.sendMessage(senderJid, { text: ' ' });
@@ -234,9 +227,17 @@ export class WhatsAppGateway implements Gateway {
           throw sendErr;
         }
 
+        // Trigger composing/typing presence AFTER sending the placeholder so it stays active
+        try {
+          await this.sock.sendPresenceUpdate('composing', senderJid);
+        } catch (presenceErr: any) {
+          this.ctx.log.warn('whatsapp: failed to send composing presence', { error: presenceErr.message });
+        }
+
         try {
           const inv = await this.ctx.agentRunner.invoke({ agent, sessionId, input: text });
-          const output = inv.output || '(empty response)';
+          const rawOutput = inv.output || '(empty response)';
+          const output = cleanOutputText(rawOutput);
           const chunks = chunkText(output, WHATSAPP_MAX_MESSAGE_LENGTH);
           
           if (chunks.length > 0) {
@@ -267,6 +268,36 @@ export class WhatsAppGateway implements Gateway {
       }
     }
   }
+}
+
+function cleanOutputText(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object') {
+        if ('result' in parsed && typeof parsed.result === 'string') {
+          return parsed.result;
+        }
+        if ('output' in parsed && typeof parsed.output === 'string') {
+          return parsed.output;
+        }
+        if ('text' in parsed && typeof parsed.text === 'string') {
+          return parsed.text;
+        }
+        if ('message' in parsed && typeof parsed.message === 'string') {
+          return parsed.message;
+        }
+        const keys = Object.keys(parsed);
+        if (keys.length === 1 && typeof parsed[keys[0]] === 'string') {
+          return parsed[keys[0]];
+        }
+      }
+    } catch {
+      // Ignore JSON parse error, fall back to raw text
+    }
+  }
+  return text;
 }
 
 function chunkText(text: string, max: number): string[] {
