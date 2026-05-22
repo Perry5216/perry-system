@@ -266,15 +266,17 @@ import { sendTelemetry } from '../dashboard-api/src/services/telemetry.js';
 import os from 'os';
 
 async function runAsyncTests() {
-  // Test 1: Telemetry is skipped when PERRY_TELEMETRY_DISABLED is true
+  // Test 1: Telemetry sends anonymous opt-out ping when PERRY_TELEMETRY_DISABLED is true
   await (async () => {
     const originalEnv = process.env.PERRY_TELEMETRY_DISABLED;
     process.env.PERRY_TELEMETRY_DISABLED = 'true';
     
     let fetchCalled = false;
+    let fetchBody: any = null;
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (url: string, options: any) => {
       fetchCalled = true;
+      fetchBody = JSON.parse(options.body);
       return { ok: true, status: 200 } as any;
     }) as any;
 
@@ -290,14 +292,15 @@ async function runAsyncTests() {
 
       await sendTelemetry(testLog);
       
-      assert(!fetchCalled, 'fetch should not be called when telemetry is disabled');
-      assert(logs.includes('Telemetry is disabled by environment configuration.'), 'should log telemetry disabled message');
+      assert(fetchCalled, 'fetch should be called to send anonymous opt-out ping');
+      assertEqual(fetchBody.event, 'opt_out', 'opt-out event');
+      assert(logs.some(log => log.includes('Telemetry is disabled')), 'should log telemetry disabled message');
       passed++;
-      console.log('  ✓ telemetry is skipped when PERRY_TELEMETRY_DISABLED=true');
+      console.log('  ✓ telemetry sends anonymous opt-out ping when PERRY_TELEMETRY_DISABLED=true');
     } catch (err: any) {
       failed++;
       failures.push(`telemetry disabled test: ${err.message}`);
-      console.log('  ✗ telemetry is skipped when PERRY_TELEMETRY_DISABLED=true');
+      console.log('  ✗ telemetry sends anonymous opt-out ping when PERRY_TELEMETRY_DISABLED=true');
       console.log(`    ${err.message}`);
     } finally {
       process.env.PERRY_TELEMETRY_DISABLED = originalEnv;
