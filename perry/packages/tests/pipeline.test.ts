@@ -257,17 +257,165 @@ test('budget scaling with multiplier 1.0 is unchanged', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// Results
+// Test Suite 6: Telemetry Service
 // ═══════════════════════════════════════════════════════════
 
-console.log('\n═══════════════════════════════════════════');
-console.log(`Results: ${passed} passed, ${failed} failed, ${passed + failed} total`);
+console.log('\n─── Telemetry Service ───');
 
-if (failures.length > 0) {
-  console.log('\nFailures:');
-  failures.forEach(f => console.log(`  ✗ ${f}`));
-  process.exit(1);
-} else {
-  console.log('\n✓ All tests passed!');
-  process.exit(0);
+import { sendTelemetry } from '../dashboard-api/src/services/telemetry.js';
+import os from 'os';
+
+async function runAsyncTests() {
+  // Test 1: Telemetry is skipped when PERRY_TELEMETRY_DISABLED is true
+  await (async () => {
+    const originalEnv = process.env.PERRY_TELEMETRY_DISABLED;
+    process.env.PERRY_TELEMETRY_DISABLED = 'true';
+    
+    let fetchCalled = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return { ok: true, status: 200 } as any;
+    }) as any;
+
+    try {
+      const logs: string[] = [];
+      const testLog = {
+        info: (msg: string) => logs.push(msg),
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+        child: () => testLog,
+      } as any;
+
+      await sendTelemetry(testLog);
+      
+      assert(!fetchCalled, 'fetch should not be called when telemetry is disabled');
+      assert(logs.includes('Telemetry is disabled by environment configuration.'), 'should log telemetry disabled message');
+      passed++;
+      console.log('  ✓ telemetry is skipped when PERRY_TELEMETRY_DISABLED=true');
+    } catch (err: any) {
+      failed++;
+      failures.push(`telemetry disabled test: ${err.message}`);
+      console.log('  ✗ telemetry is skipped when PERRY_TELEMETRY_DISABLED=true');
+      console.log(`    ${err.message}`);
+    } finally {
+      process.env.PERRY_TELEMETRY_DISABLED = originalEnv;
+      globalThis.fetch = originalFetch;
+    }
+  })();
+
+  // Test 2: Telemetry is sent when enabled
+  await (async () => {
+    const originalEnvDisabled = process.env.PERRY_TELEMETRY_DISABLED;
+    const originalEnvUrl = process.env.PERRY_TELEMETRY_URL;
+    process.env.PERRY_TELEMETRY_DISABLED = 'false';
+    process.env.PERRY_TELEMETRY_URL = 'https://mock-telemetry.example.com/ping';
+
+    let fetchUrl = '';
+    let fetchOptions: any = null;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, options: any) => {
+      fetchUrl = url;
+      fetchOptions = options;
+      return { ok: true, status: 200 } as any;
+    }) as any;
+
+    try {
+      const logs: string[] = [];
+      const testLog = {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        debug: (msg: string) => logs.push(msg),
+        child: () => testLog,
+      } as any;
+
+      await sendTelemetry(testLog);
+
+      assertEqual(fetchUrl, 'https://mock-telemetry.example.com/ping', 'telemetry URL');
+      assert(fetchOptions !== null, 'fetch options should be set');
+      assertEqual(fetchOptions.method, 'POST', 'HTTP method');
+      assertEqual(fetchOptions.headers['Content-Type'], 'application/json', 'Content-Type header');
+      
+      const payload = JSON.parse(fetchOptions.body);
+      assert(payload.anonymousId !== undefined, 'anonymousId should be populated');
+      assertEqual(typeof payload.anonymousId, 'string', 'anonymousId type');
+      assertEqual(payload.platform, os.platform(), 'platform');
+      assertEqual(payload.arch, os.arch(), 'arch');
+      assertEqual(payload.nodeVersion, process.version, 'nodeVersion');
+      assertEqual(payload.perryVersion, '2.0.0', 'perryVersion');
+
+      passed++;
+      console.log('  ✓ telemetry is sent with correct payload details when enabled');
+    } catch (err: any) {
+      failed++;
+      failures.push(`telemetry enabled test: ${err.message}`);
+      console.log('  ✗ telemetry is sent with correct payload details when enabled');
+      console.log(`    ${err.message}`);
+    } finally {
+      process.env.PERRY_TELEMETRY_DISABLED = originalEnvDisabled;
+      process.env.PERRY_TELEMETRY_URL = originalEnvUrl;
+      globalThis.fetch = originalFetch;
+    }
+  })();
+
+  // Test 3: Telemetry fails silently on network errors
+  await (async () => {
+    const originalEnvDisabled = process.env.PERRY_TELEMETRY_DISABLED;
+    process.env.PERRY_TELEMETRY_DISABLED = 'false';
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error('Network offline');
+    }) as any;
+
+    try {
+      const warningLogs: string[] = [];
+      const testLog = {
+        info: () => {},
+        warn: (msg: string) => warningLogs.push(msg),
+        error: () => {},
+        debug: () => {},
+        child: () => testLog,
+      } as any;
+
+      // Should not throw
+      await sendTelemetry(testLog);
+
+      assert(warningLogs.some(log => log.includes('Telemetry ping failed')), 'should log warning on fetch failure');
+      passed++;
+      console.log('  ✓ telemetry fails silently on network/fetch errors');
+    } catch (err: any) {
+      failed++;
+      failures.push(`telemetry fail silent test: ${err.message}`);
+      console.log('  ✗ telemetry fails silently on network/fetch errors');
+      console.log(`    ${err.message}`);
+    } finally {
+      process.env.PERRY_TELEMETRY_DISABLED = originalEnvDisabled;
+      globalThis.fetch = originalFetch;
+    }
+  })();
+
+  // ═══════════════════════════════════════════════════════════
+  // Results
+  // ═══════════════════════════════════════════════════════════
+
+  console.log('\n═══════════════════════════════════════════');
+  console.log(`Results: ${passed} passed, ${failed} failed, ${passed + failed} total`);
+
+  if (failures.length > 0) {
+    console.log('\nFailures:');
+    failures.forEach(f => console.log(`  ✗ ${f}`));
+    process.exit(1);
+  } else {
+    console.log('\n✓ All tests passed!');
+    process.exit(0);
+  }
 }
+
+runAsyncTests().catch(err => {
+  console.error('Fatal test runner error:', err);
+  process.exit(1);
+});
+

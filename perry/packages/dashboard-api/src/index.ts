@@ -381,6 +381,10 @@ async function bootstrap() {
   gc.start();
   void gateways.start();
 
+  // 9. Send startup telemetry (runs asynchronously)
+  const { sendTelemetry } = await import('./services/telemetry.js');
+  void sendTelemetry(log.child('telemetry'));
+
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
