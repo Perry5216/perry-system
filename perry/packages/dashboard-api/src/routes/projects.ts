@@ -129,6 +129,20 @@ export function setupProjectRoutes(engine: ProjectEngine, log: Logger) {
     res.json(io);
   });
 
+  // Goals API
+  router.get('/:id/goal', (req, res) => {
+    const project = engine.getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Not found' });
+    const goalStr = engine.getStateStore().getMeta('project_goal:' + req.params.id);
+    if (goalStr) {
+      try {
+        const goal = JSON.parse(goalStr);
+        return res.json(goal);
+      } catch {}
+    }
+    res.json({ text: '', status: 'paused', turnsUsed: 0, subgoals: [] });
+  });
+
   // Director Chat API
   router.get('/:id/chat', (req, res) => {
     const project = engine.getProject(req.params.id);

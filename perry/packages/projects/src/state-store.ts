@@ -9,16 +9,20 @@
  * the store falls back to a JSON file with synchronous writes.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { join } from 'path';
 import type { Project, ProjectStep, Logger } from '@perry/core';
 
 export class StateStore {
   private db: any = null;
   private jsonPath: string;
+  private proposalsJsonPath: string;
+  private telemetryJsonPath: string;
   private log: Logger;
   private cache = new Map<string, Project>();
   private metaCache = new Map<string, string>();
+  private proposalsCache: any[] = [];
+  private telemetryCache: any[] = [];
   private nextId = 1;
   private usingSqlite = false;
 
@@ -26,6 +30,16 @@ export class StateStore {
     const configDir = join(workspaceDir, '.config');
     mkdirSync(configDir, { recursive: true });
     this.jsonPath = join(configDir, 'projects.json');
+    const oldProposalsJsonPath = join(configDir, 'curator_proposals.json');
+    this.proposalsJsonPath = join(configDir, 'librarian_proposals.json');
+    if (existsSync(oldProposalsJsonPath) && !existsSync(this.proposalsJsonPath)) {
+      try {
+        renameSync(oldProposalsJsonPath, this.proposalsJsonPath);
+      } catch (err: any) {
+        log.warn('Failed to rename curator_proposals.json', { error: err.message });
+      }
+    }
+    this.telemetryJsonPath = join(configDir, 'skill_telemetry.json');
     this.log = log;
   }
 
@@ -35,8 +49,24 @@ export class StateStore {
       const mod: any = await import('better-sqlite3');
       const Database: any = mod.default || mod;
       const dbPath = this.jsonPath.replace('.json', '.db');
-      this.db = new Database(dbPath);
+      this.db = new Database(dbPath, { timeout: 5000 });
       this.db.pragma('journal_mode = WAL');
+      this.db.pragma('synchronous = NORMAL');
+      this.db.pragma('temp_store = MEMORY');
+      this.db.pragma('cache_size = -16000');
+
+      // Wrap prepare to transparently cache prepared statements
+      const originalPrepare = this.db.prepare.bind(this.db);
+      const stmtCache = new Map<string, any>();
+      this.db.prepare = (sql: string) => {
+        let stmt = stmtCache.get(sql);
+        if (!stmt) {
+          stmt = originalPrepare(sql);
+          stmtCache.set(sql, stmt);
+        }
+        return stmt;
+      };
+
       this.applySchema();
       this.loadAllFromDb();
       this.usingSqlite = true;
@@ -63,6 +93,18 @@ export class StateStore {
       // disaster-recovery imports). After that the blob is no longer consulted.
       this.bootstrapPenNamesFromMetaIfEmpty();
 
+      // Migrate curator metadata keys to librarian
+      try {
+        const rows = this.db.prepare("SELECT key, value FROM meta WHERE key LIKE 'curator_%'").all() as any[];
+        for (const row of rows) {
+          const newKey = row.key.replace(/^curator_/, 'librarian_');
+          this.db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?").run(newKey, row.value, row.value);
+          this.db.prepare("DELETE FROM meta WHERE key = ?").run(row.key);
+        }
+      } catch (err: any) {
+        this.log.warn('Failed to migrate curator meta keys in SQLite', { error: err.message });
+      }
+
       this.log.info('State store initialized (SQLite)', { projects: this.cache.size });
       return;
     } catch (err: any) {
@@ -72,6 +114,8 @@ export class StateStore {
 
     // Fallback to JSON
     this.loadAllFromJson();
+    this.loadProposalsFromJson();
+    this.loadTelemetryFromJson();
     this.log.info('State store initialized (JSON)', { projects: this.cache.size });
   }
 
@@ -350,6 +394,65 @@ export class StateStore {
       currentVersion = 10;
     }
 
+    // Migration 10 → 11: Curator proposals and skill telemetry tables.
+    if (currentVersion < 11) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS curator_proposals (
+          id TEXT PRIMARY KEY,
+          service TEXT NOT NULL,
+          skill_name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          action TEXT NOT NULL,
+          details TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_curator_proposals_status ON curator_proposals(status);
+
+        CREATE TABLE IF NOT EXISTS skill_telemetry (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          service TEXT NOT NULL,
+          skill_name TEXT NOT NULL,
+          success INTEGER NOT NULL,
+          duration_ms INTEGER NOT NULL,
+          error TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_telemetry_name ON skill_telemetry(service, skill_name);
+      `);
+      currentVersion = 11;
+    }
+
+    // Migration 11 → 12: Rename curator_proposals to librarian_proposals
+    if (currentVersion < 12) {
+      try {
+        const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='curator_proposals'").get();
+        if (tableCheck) {
+          this.db.exec(`
+            ALTER TABLE curator_proposals RENAME TO librarian_proposals;
+            DROP INDEX IF EXISTS idx_curator_proposals_status;
+            CREATE INDEX IF NOT EXISTS idx_librarian_proposals_status ON librarian_proposals(status);
+          `);
+          this.log.info('Migrated curator_proposals table to librarian_proposals');
+        } else {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS librarian_proposals (
+              id TEXT PRIMARY KEY,
+              service TEXT NOT NULL,
+              skill_name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              action TEXT NOT NULL,
+              details TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_librarian_proposals_status ON librarian_proposals(status);
+          `);
+        }
+      } catch (err: any) {
+        this.log.error('Migration 11 -> 12 failed', { error: err.message });
+      }
+      currentVersion = 12;
+    }
+
     // Persist current schema version
     this.db.prepare(
       "INSERT INTO meta (key, value) VALUES ('schema_version', @v) ON CONFLICT(key) DO UPDATE SET value = @v"
@@ -488,13 +591,45 @@ export class StateStore {
       }
       if (data.meta) {
         for (const [k, v] of Object.entries(data.meta)) {
-          this.metaCache.set(k, v as string);
+          let targetKey = k;
+          if (k.startsWith('curator_')) {
+            targetKey = k.replace(/^curator_/, 'librarian_');
+          }
+          this.metaCache.set(targetKey, v as string);
         }
       }
       this.nextId = data.nextId || this.cache.size + 1;
     } catch {
       this.log.warn('Corrupt JSON state file, starting fresh');
     }
+  }
+
+  private loadProposalsFromJson(): void {
+    if (!existsSync(this.proposalsJsonPath)) return;
+    try {
+      this.proposalsCache = JSON.parse(readFileSync(this.proposalsJsonPath, 'utf-8'));
+    } catch {
+      this.proposalsCache = [];
+    }
+  }
+
+  private persistProposalsJson(): void {
+    if (this.usingSqlite) return;
+    writeFileSync(this.proposalsJsonPath, JSON.stringify(this.proposalsCache, null, 2));
+  }
+
+  private loadTelemetryFromJson(): void {
+    if (!existsSync(this.telemetryJsonPath)) return;
+    try {
+      this.telemetryCache = JSON.parse(readFileSync(this.telemetryJsonPath, 'utf-8'));
+    } catch {
+      this.telemetryCache = [];
+    }
+  }
+
+  private persistTelemetryJson(): void {
+    if (this.usingSqlite) return;
+    writeFileSync(this.telemetryJsonPath, JSON.stringify(this.telemetryCache, null, 2));
   }
 
   private persistJson(): void {
@@ -568,7 +703,7 @@ export class StateStore {
             startedAt: step.startedAt || null, completedAt: step.completedAt || null, error: step.error || null
           });
         }
-      })();
+      }).immediate();
     } else {
       this.persistJson();
     }
@@ -594,7 +729,7 @@ export class StateStore {
           this.db.prepare('DELETE FROM llm_telemetry WHERE project_id = @id').run({ id });
           this.db.prepare('DELETE FROM search_index WHERE project_id = @id').run({ id });
           this.db.prepare('DELETE FROM projects WHERE id = @id').run({ id });
-        })();
+        }).immediate();
       } else {
         this.persistJson();
       }
@@ -642,7 +777,7 @@ export class StateStore {
       } catch (err) {
         // search_index might not support this directly depending on fts5 setup
       }
-    })();
+    }).immediate();
     
     return purged;
   }
@@ -739,7 +874,7 @@ export class StateStore {
           this.db.prepare('INSERT INTO search_index (step_id, project_id, content) VALUES (@id, @projectId, @content)').run({
             id: step.id, projectId: project.id, content: result
           });
-        })();
+        }).immediate();
       } catch (err: any) {
         this.log.warn('Failed to update FTS search index', { error: err.message });
       }
@@ -970,7 +1105,7 @@ export class StateStore {
     });
 
     try {
-      tx();
+      tx.immediate();
       this.log.info('Pen-name tables synced from meta', {
         pens: pens.length,
         loraVersions: pens.reduce((n, p) => n + (Array.isArray(p.loraVersions) ? p.loraVersions.length : 0), 0),
@@ -1075,7 +1210,7 @@ export class StateStore {
         'UPDATE lora_versions SET promoted = 1 WHERE pen_slug = ? AND version = ?'
       ).run(penSlug, version);
     });
-    tx();
+    tx.immediate();
     return true;
   }
 
@@ -1100,7 +1235,7 @@ export class StateStore {
         ids.push(id);
       }
     });
-    tx();
+    tx.immediate();
     return ids;
   }
 
@@ -1427,7 +1562,7 @@ export class StateStore {
     const tx = this.db.transaction(() => {
       for (const id of taskIds) total += stmt.run(id).changes;
     });
-    tx();
+    tx.immediate();
     return total;
   }
 
@@ -1688,6 +1823,149 @@ export class StateStore {
       `SELECT COUNT(*) AS n FROM agent_trajectories ${where}`
     ).get(...params) as any;
     return row?.n || 0;
+  }
+
+  // ── Librarian Proposals CRUD ───────────────────────────────────────────
+
+  addLibrarianProposal(proposal: {
+    id: string;
+    service: string;
+    skill_name: string;
+    status: 'pending' | 'approved' | 'rejected' | 'executed';
+    action: 'archive' | 'merge';
+    details: any;
+    created_at?: string;
+  }): void {
+    const createdAt = proposal.created_at || new Date().toISOString();
+    if (this.usingSqlite && this.db) {
+      try {
+        this.db.prepare(`
+          INSERT INTO librarian_proposals (id, service, skill_name, status, action, details, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          proposal.id,
+          proposal.service,
+          proposal.skill_name,
+          proposal.status,
+          proposal.action,
+          JSON.stringify(proposal.details),
+          createdAt
+        );
+      } catch (err: any) {
+        this.log.error('Failed to add librarian proposal', { error: err.message });
+      }
+    } else {
+      this.proposalsCache.push({
+        ...proposal,
+        created_at: createdAt
+      });
+      this.persistProposalsJson();
+    }
+  }
+
+  listLibrarianProposals(): any[] {
+    if (this.usingSqlite && this.db) {
+      try {
+        const rows = this.db.prepare('SELECT * FROM librarian_proposals ORDER BY created_at DESC').all() as any[];
+        return rows.map(r => ({
+          id: r.id,
+          service: r.service,
+          skill_name: r.skill_name,
+          status: r.status,
+          action: r.action,
+          details: safeParse(r.details),
+          created_at: r.created_at
+        }));
+      } catch { return []; }
+    }
+    return this.proposalsCache;
+  }
+
+  updateLibrarianProposalStatus(id: string, status: 'pending' | 'approved' | 'rejected' | 'executed'): void {
+    if (this.usingSqlite && this.db) {
+      try {
+        this.db.prepare('UPDATE librarian_proposals SET status = ? WHERE id = ?').run(status, id);
+      } catch (err: any) {
+        this.log.error('Failed to update librarian proposal status', { error: err.message });
+      }
+    } else {
+      const prop = this.proposalsCache.find(p => p.id === id);
+      if (prop) {
+        prop.status = status;
+        this.persistProposalsJson();
+      }
+    }
+  }
+
+  // ── Skill Performance Telemetry CRUD ───────────────────────────────────
+
+  logSkillExecution(service: string, name: string, success: boolean, durationMs: number, error?: string): void {
+    const createdAt = new Date().toISOString();
+    const successVal = success ? 1 : 0;
+    if (this.usingSqlite && this.db) {
+      try {
+        this.db.prepare(`
+          INSERT INTO skill_telemetry (service, skill_name, success, duration_ms, error, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(service, name, successVal, durationMs, error || null, createdAt);
+      } catch (err: any) {
+        this.log.error('Failed to log skill execution telemetry', { error: err.message });
+      }
+    } else {
+      this.telemetryCache.push({
+        service,
+        skill_name: name,
+        success: successVal,
+        duration_ms: durationMs,
+        error: error || null,
+        created_at: createdAt
+      });
+      this.persistTelemetryJson();
+    }
+  }
+
+  getSkillSuccessRate(service: string, name: string): { total: number; successRate: number; avgDurationMs: number } {
+    if (this.usingSqlite && this.db) {
+      try {
+        const row = this.db.prepare(`
+          SELECT COUNT(*) as total,
+                 SUM(success) as successful,
+                 AVG(duration_ms) as avg_duration
+          FROM skill_telemetry
+          WHERE service = ? AND skill_name = ?
+        `).get(service, name) as any;
+        if (!row || row.total === 0) {
+          return { total: 0, successRate: 0, avgDurationMs: 0 };
+        }
+        return {
+          total: row.total,
+          successRate: row.successful / row.total,
+          avgDurationMs: row.avg_duration || 0
+        };
+      } catch {
+        return { total: 0, successRate: 0, avgDurationMs: 0 };
+      }
+    }
+    const filtered = this.telemetryCache.filter(t => t.service === service && t.skill_name === name);
+    if (filtered.length === 0) {
+      return { total: 0, successRate: 0, avgDurationMs: 0 };
+    }
+    const successful = filtered.filter(t => t.success === 1).length;
+    const totalDuration = filtered.reduce((acc, t) => acc + t.duration_ms, 0);
+    return {
+      total: filtered.length,
+      successRate: successful / filtered.length,
+      avgDurationMs: totalDuration / filtered.length
+    };
+  }
+
+  listSkillTelemetry(limit = 100): any[] {
+    if (this.usingSqlite && this.db) {
+      try {
+        return this.db.prepare('SELECT * FROM skill_telemetry ORDER BY created_at DESC LIMIT ?').all(limit);
+      } catch { return []; }
+    }
+    return this.telemetryCache.slice(-limit).reverse();
   }
 }
 

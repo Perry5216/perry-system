@@ -290,6 +290,7 @@ async function bootstrap() {
       maxRetries: 3,
       minResponseLength: 100,
       config: config,
+      enableMaintenance: true,
     },
   );
   // Now that projectEngine is built, late-bind RagService into the prompt-builder.

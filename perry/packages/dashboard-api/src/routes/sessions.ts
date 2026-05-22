@@ -2,7 +2,7 @@
  * @perry/dashboard-api — Sessions browser routes
  *
  * Thin REST wrapper around StateStore.searchSteps + getStepResult so the
- * dashboard can offer Hermes-style FTS5 session browsing.
+ * dashboard can offer agentic FTS5 session browsing.
  *
  *   GET /api/sessions/search?q=&limit=&projectId=
  *     Keyword (FTS5) search over completed step outputs.

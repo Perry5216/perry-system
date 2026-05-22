@@ -130,8 +130,8 @@ export function createServer(
   app.use('/api/pens', setupPensRoutes(stateStore, log.child('pens'), workspaceDir, projectEngine.getAutoLearning(), auditService, penProfileService));
   // Sessions browser — FTS5 keyword search over completed step outputs.
   app.use('/api/sessions', setupSessionsRoutes(stateStore, log.child('sessions')));
-  // Skills curator — list installed + pending, promote, reject.
-  app.use('/api/skills', setupSkillsRoutes(log.child('skills'), workspaceDir));
+  // Skills librarian — list installed + pending, promote, reject.
+  app.use('/api/skills', setupSkillsRoutes(log.child('skills'), workspaceDir, stateStore, aiRouter));
   // Analytics — step volume, success rate, prompt sizes, audit health,
   // and learning-corpus snapshot (chunk counts by kind).
   app.use('/api/analytics', setupAnalyticsRoutes(stateStore, log.child('analytics'), memoryStore));

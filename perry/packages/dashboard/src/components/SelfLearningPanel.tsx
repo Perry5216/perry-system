@@ -20,7 +20,7 @@
 
 import { useEffect, useState } from 'react';
 import { PanelHeader } from './PanelHeader';
-import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileText, Sparkles, Edit3, Save } from 'lucide-react';
+import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileText, Sparkles, Edit3, Save, Pin, Trash2, Activity, Shield, Layers, Loader2 } from 'lucide-react';
 
 const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV)
   ? 'http://localhost:4000/api' : '/api';
@@ -406,18 +406,69 @@ function SkillsTab() {
   const [err, setErr] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState<{ filename: string; raw: string } | null>(null);
 
+  // Librarian states
+  const [pins, setPins] = useState<Array<{ service: string; name: string }>>([]);
+  const [proposals, setProposals] = useState<Array<{ id: string; skill_name: string; service: string; action: string; status: string; details: string }>>([]);
+  const [telemetry, setTelemetry] = useState<{
+    stats: Array<{ service: string; name: string; total: number; successRate: number; avgDurationMs: number }>;
+    history: Array<{ id: string; service: string; skill_name: string; timestamp: string; success: number; duration_ms: number; error: string | null }>;
+  }>({ stats: [], history: [] });
+  const [backups, setBackups] = useState<string[]>([]);
+  
+  // Librarian pass states
+  const [runningPass, setRunningPass] = useState(false);
+  const [passResults, setPassResults] = useState<any>(null);
+  const [dryRun, setDryRun] = useState(true);
+  const [runLlmReview, setRunLlmReview] = useState(false);
+  
+  // Rollback state
+  const [rollbackSelected, setRollbackSelected] = useState('');
+  const [rollingBack, setRollingBack] = useState(false);
+  
+  // Merge states
+  const [mergeService, setMergeService] = useState('');
+  const [mergeSkillA, setMergeSkillA] = useState('');
+  const [mergeSkillB, setMergeSkillB] = useState('');
+  const [mergeNewName, setMergeNewName] = useState('');
+  const [merging, setMerging] = useState(false);
+
   const refresh = async (svc?: string | null) => {
     setLoading(true); setErr(null);
     try {
       const qs = svc ? `?service=${encodeURIComponent(svc)}` : '';
-      const r = await fetch(`${API_BASE}/skills${qs}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = await r.json();
-      setInstalled(j.installed || []);
-      setPending(j.pending || []);
-      setServices(j.services || []);
-    } catch (e: any) { setErr(e.message); }
-    finally { setLoading(false); }
+      const [rSkills, rPins, rProposals, rTelemetry, rBackups] = await Promise.all([
+        fetch(`${API_BASE}/skills${qs}`),
+        fetch(`${API_BASE}/skills/pins`),
+        fetch(`${API_BASE}/skills/proposals`),
+        fetch(`${API_BASE}/skills/telemetry`),
+        fetch(`${API_BASE}/skills/backups`),
+      ]);
+
+      if (!rSkills.ok) throw new Error(`Skills fetch failed: ${rSkills.statusText}`);
+      
+      const [jSkills, jPins, jProposals, jTelemetry, jBackups] = await Promise.all([
+        rSkills.json(),
+        rPins.ok ? rPins.json() : { pins: [] },
+        rProposals.ok ? rProposals.json() : { proposals: [] },
+        rTelemetry.ok ? rTelemetry.json() : { stats: [], history: [] },
+        rBackups.ok ? rBackups.json() : { backups: [] },
+      ]);
+
+      setInstalled(jSkills.installed || []);
+      setPending(jSkills.pending || []);
+      setServices(jSkills.services || []);
+      setPins(jPins.pins || []);
+      setProposals(jProposals.proposals || []);
+      setTelemetry({
+        stats: jTelemetry.stats || [],
+        history: jTelemetry.history || [],
+      });
+      setBackups(jBackups.backups || []);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { refresh(serviceFilter); }, [serviceFilter]);
@@ -453,6 +504,167 @@ function SkillsTab() {
     } catch (e: any) { setErr(e.message); }
   };
 
+  const togglePin = async (service: string, name: string) => {
+    const isPinned = pins.some(p => p.service === service && p.name === name);
+    try {
+      const endpoint = isPinned ? 'unpin' : 'pin';
+      const r = await fetch(`${API_BASE}/skills/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service, name }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      // Refresh pins
+      const pinRes = await fetch(`${API_BASE}/skills/pins`);
+      if (pinRes.ok) {
+        const j = await pinRes.json();
+        setPins(j.pins || []);
+      }
+    } catch (e: any) {
+      setErr(e.message);
+    }
+  };
+
+  const deleteInstalled = async (service: string, name: string) => {
+    if (!confirm(`Are you sure you want to delete installed skill "${service}/${name}"?`)) return;
+    try {
+      const r = await fetch(`${API_BASE}/skills/installed/${encodeURIComponent(service)}/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      alert(`Deleted installed skill ${service}/${name}.`);
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    }
+  };
+
+  const approveProposal = async (id: string) => {
+    try {
+      const r = await fetch(`${API_BASE}/skills/proposals/${encodeURIComponent(id)}/approve`, {
+        method: 'POST',
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      alert(`Proposal approved and applied.`);
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    }
+  };
+
+  const rejectProposal = async (id: string) => {
+    try {
+      const r = await fetch(`${API_BASE}/skills/proposals/${encodeURIComponent(id)}/reject`, {
+        method: 'POST',
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      alert(`Proposal rejected.`);
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    }
+  };
+
+  const handleMerge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mergeService || !mergeSkillA || !mergeSkillB || !mergeNewName) {
+      alert('All fields are required to merge skills.');
+      return;
+    }
+    if (mergeSkillA === mergeSkillB) {
+      alert('Skill A and Skill B must be different.');
+      return;
+    }
+    setMerging(true);
+    setErr(null);
+    try {
+      const r = await fetch(`${API_BASE}/skills/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service: mergeService,
+          skillA: mergeSkillA,
+          skillB: mergeSkillB,
+          newSkillName: mergeNewName,
+        }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      alert(`Merged skills into "${mergeNewName}".`);
+      setMergeSkillA('');
+      setMergeSkillB('');
+      setMergeNewName('');
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const triggerLibrarianPass = async () => {
+    setRunningPass(true);
+    setErr(null);
+    setPassResults(null);
+    try {
+      const r = await fetch(`${API_BASE}/skills/librarian-pass`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun, runLlmReview }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      const data = await r.json();
+      setPassResults(data);
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setRunningPass(false);
+    }
+  };
+
+  const triggerRollback = async () => {
+    if (!rollbackSelected) {
+      alert('Please select a backup snapshot to rollback.');
+      return;
+    }
+    if (!confirm(`Are you sure you want to rollback skills to snapshot "${rollbackSelected}"?`)) return;
+    setRollingBack(true);
+    setErr(null);
+    try {
+      const r = await fetch(`${API_BASE}/skills/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timestamp: rollbackSelected }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${r.status}`);
+      }
+      alert(`Successfully rolled back to snapshot ${rollbackSelected}.`);
+      setRollbackSelected('');
+      refresh(serviceFilter);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setRollingBack(false);
+    }
+  };
+
   if (loading) return <div style={{ color: 'var(--text-muted)', padding: 12 }}>Loading skills…</div>;
 
   return (
@@ -479,56 +691,408 @@ function SkillsTab() {
         </div>
       )}
 
-      <section>
-        <h3 style={sectionHeading}>Pending review ({pending.length})</h3>
-        {pending.length === 0 && (
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: 8 }}>
-            No skills awaiting review. Producers call <code>propose_skill</code> after verified-successful tasks; proposals land here grouped by service.
-          </div>
-        )}
-        {pending.map(s => (
-          <div key={`${s.service}::${s.filename}`} style={skillRow}>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={serviceBadge}>{s.service}</span>
-                <span style={skillName}>{s.name}</span>
+      {/* Two Column Layout Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 1.2fr) minmax(320px, 1fr)', gap: 20, alignItems: 'start' }}>
+        {/* Left Column: Skills Curation & Merge */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* Pending Review Section */}
+          <section style={cardPanelStyle}>
+            <h3 style={sectionHeadingWithIcon}>
+              <Sparkles size={16} style={{ color: 'var(--secondary)' }} />
+              Pending Review ({pending.length})
+            </h3>
+            {pending.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
+                No pending skills awaiting review.
               </div>
-              <div style={skillDesc}>{s.description}</div>
-              <div style={skillMeta}>
-                {s.proposedAt && `proposed ${new Date(s.proposedAt).toLocaleString()} · `}
-                {s.bodyLength} chars · <code>{s.filename}</code>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {pending.map(s => (
+                  <div key={`${s.service}::${s.filename}`} style={skillRow}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={serviceBadge}>{s.service}</span>
+                        <span style={skillName}>{s.name}</span>
+                      </div>
+                      <div style={skillDesc}>{s.description}</div>
+                      <div style={skillMeta}>
+                        {s.proposedAt && `proposed ${new Date(s.proposedAt).toLocaleString()} · `}
+                        {s.bodyLength} chars · <code>{s.filename}</code>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button onClick={() => preview(s.filename)} style={btnGhost} title="View raw code">
+                        <FileText size={14} />
+                      </button>
+                      <button onClick={() => promote(s.filename)} style={btnSuccess} title="Approve & Promote">
+                        <Check size={14} />
+                      </button>
+                      <button onClick={() => reject(s.filename)} style={btnDanger} title="Reject & Delete">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={() => preview(s.filename)} style={btnGhost} title="View raw">
-                <FileText size={14} />
-              </button>
-              <button onClick={() => promote(s.filename)} style={btnSuccess} title="Promote">
-                <Check size={14} />
-              </button>
-              <button onClick={() => reject(s.filename)} style={btnDanger} title="Reject">
-                <X size={14} />
-              </button>
-            </div>
-          </div>
-        ))}
-      </section>
+            )}
+          </section>
 
-      <section>
-        <h3 style={sectionHeading}>Installed ({installed.length})</h3>
-        {installed.map(s => (
-          <div key={`${s.service}::${s.filename}`} style={skillRow}>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={serviceBadge}>{s.service}</span>
-                <span style={skillName}>{s.name}</span>
+          {/* Installed Skills Section */}
+          <section style={cardPanelStyle}>
+            <h3 style={sectionHeadingWithIcon}>
+              <BookOpen size={16} style={{ color: 'var(--secondary)' }} />
+              Installed Skills ({installed.length})
+            </h3>
+            {installed.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
+                No installed skills found.
               </div>
-              <div style={skillDesc}>{s.description}</div>
-              <div style={skillMeta}><code>{s.filename}</code> · {s.bodyLength} chars</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 380, overflowY: 'auto' }}>
+                {installed.map(s => {
+                  const isPinned = pins.some(p => p.service === s.service && p.name === s.name);
+                  return (
+                    <div key={`${s.service}::${s.filename}`} style={skillRow}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={serviceBadge}>{s.service}</span>
+                          <span style={skillName}>{s.name}</span>
+                          {isPinned && (
+                            <span style={pinnedBadge}>
+                              <Pin size={10} style={{ fill: '#c4a8ff' }} /> PINNED
+                            </span>
+                          )}
+                        </div>
+                        <div style={skillDesc}>{s.description}</div>
+                        <div style={skillMeta}><code>{s.filename}</code> · {s.bodyLength} chars</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <button
+                          onClick={() => togglePin(s.service, s.name)}
+                          style={isPinned ? btnPinActive : btnGhost}
+                          title={isPinned ? 'Unpin skill' : 'Pin skill'}
+                        >
+                          <Pin size={14} style={{ fill: isPinned ? '#c4a8ff' : 'none' }} />
+                        </button>
+                        <button
+                          onClick={() => deleteInstalled(s.service, s.name)}
+                          disabled={isPinned}
+                          style={isPinned ? btnDangerDisabled : btnDanger}
+                          title={isPinned ? 'Unpin to enable deletion' : 'Delete skill'}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          {/* Merge Skills Section */}
+          <section style={cardPanelStyle}>
+            <h3 style={sectionHeadingWithIcon}>
+              <Layers size={16} style={{ color: 'var(--secondary)' }} />
+              Merge Skills / Synthesis
+            </h3>
+            <form onSubmit={handleMerge} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={formRow}>
+                <label style={formLabel}>Service Domain</label>
+                <select
+                  value={mergeService}
+                  onChange={e => {
+                    setMergeService(e.target.value);
+                    setMergeSkillA('');
+                    setMergeSkillB('');
+                  }}
+                  style={formInput}
+                >
+                  <option value="">-- Select Service --</option>
+                  {Array.from(new Set(installed.map(s => s.service))).map(svc => (
+                    <option key={svc} value={svc}>{svc}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div style={formRow}>
+                  <label style={formLabel}>Skill A (Base)</label>
+                  <select
+                    value={mergeSkillA}
+                    onChange={e => setMergeSkillA(e.target.value)}
+                    disabled={!mergeService}
+                    style={formInput}
+                  >
+                    <option value="">-- Skill A --</option>
+                    {installed
+                      .filter(s => s.service === mergeService)
+                      .map(s => (
+                        <option key={s.name} value={s.name}>{s.name}</option>
+                      ))}
+                  </select>
+                </div>
+                <div style={formRow}>
+                  <label style={formLabel}>Skill B (Extension)</label>
+                  <select
+                    value={mergeSkillB}
+                    onChange={e => setMergeSkillB(e.target.value)}
+                    disabled={!mergeService}
+                    style={formInput}
+                  >
+                    <option value="">-- Skill B --</option>
+                    {installed
+                      .filter(s => s.service === mergeService && s.name !== mergeSkillA)
+                      .map(s => (
+                        <option key={s.name} value={s.name}>{s.name}</option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+              <div style={formRow}>
+                <label style={formLabel}>Synthesized Skill Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. unified-code-standards"
+                  value={mergeNewName}
+                  onChange={e => setMergeNewName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
+                  style={formInput}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={merging || !mergeService || !mergeSkillA || !mergeSkillB || !mergeNewName}
+                style={btnPrimary(merging)}
+              >
+                {merging ? <Loader2 size={12} className="animate-spin" /> : null}
+                {merging ? 'Synthesizing...' : 'Synthesize & Merge'}
+              </button>
+            </form>
+          </section>
+        </div>
+
+        {/* Right Column: Librarian Center, Proposals & Telemetry */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* Librarian Center controls */}
+          <section style={cardPanelStyle}>
+            <h3 style={sectionHeadingWithIcon}>
+              <Shield size={16} style={{ color: 'var(--secondary)' }} />
+              Librarian Center
+            </h3>
+            
+            {/* Run Pass */}
+            <div style={{ borderBottom: '1px solid rgba(34,211,238,0.1)', paddingBottom: 16, marginBottom: 16 }}>
+              <h4 style={subSectionTitle}>Librarian Pipeline Pass</h4>
+              <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: '0.78rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--text-main)' }}>
+                  <input
+                    type="checkbox"
+                    checked={dryRun}
+                    onChange={e => setDryRun(e.target.checked)}
+                    style={{ accentColor: 'var(--secondary)' }}
+                  />
+                  Dry Run (no file writes)
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--text-main)' }}>
+                  <input
+                    type="checkbox"
+                    checked={runLlmReview}
+                    onChange={e => setRunLlmReview(e.target.checked)}
+                    style={{ accentColor: 'var(--secondary)' }}
+                  />
+                  Run LLM Review
+                </label>
+              </div>
+              <button onClick={triggerLibrarianPass} disabled={runningPass} style={btnPrimary(runningPass)}>
+                {runningPass ? <Loader2 size={12} className="animate-spin" /> : null}
+                {runningPass ? 'Executing Librarian...' : 'Run Librarian Pass'}
+              </button>
+              
+              {passResults && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--secondary)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Pass Results:</div>
+                  <pre style={{
+                    margin: 0, padding: 10, background: 'rgba(0,0,0,0.5)',
+                    border: '1px solid rgba(34,211,238,0.15)', borderRadius: 4,
+                    fontSize: '0.72rem', color: 'var(--text-main)',
+                    whiteSpace: 'pre-wrap', maxHeight: 180, overflowY: 'auto',
+                    fontFamily: 'var(--font-mono)'
+                  }}>
+                    {JSON.stringify(passResults, null, 2)}
+                  </pre>
+                </div>
+              )}
             </div>
-          </div>
-        ))}
-      </section>
+
+            {/* Backups & Rollback */}
+            <div>
+              <h4 style={subSectionTitle}>System Restore & Rollback</h4>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                  Select a past Librarian backup snapshot timestamp to restore skills to that point. Pinned skills are safe.
+                </div>
+                {backups.length === 0 ? (
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No backups found.</div>
+                ) : (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <select
+                      value={rollbackSelected}
+                      onChange={e => setRollbackSelected(e.target.value)}
+                      style={{ ...formInput, flex: 1 }}
+                    >
+                      <option value="">-- Choose snapshot backup --</option>
+                      {backups.map(b => (
+                        <option key={b} value={b}>
+                          {new Date(parseInt(b, 10) || b).toLocaleString()}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={triggerRollback}
+                      disabled={rollingBack || !rollbackSelected}
+                      style={{
+                        ...btnDanger,
+                        padding: '6px 12px',
+                        fontSize: '0.75rem',
+                        fontFamily: 'var(--font-mono)',
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        opacity: (rollingBack || !rollbackSelected) ? 0.6 : 1,
+                        cursor: (rollingBack || !rollbackSelected) ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      {rollingBack ? 'Restoring...' : 'Rollback'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* Librarian Proposals */}
+          <section style={cardPanelStyle}>
+            <h3 style={sectionHeadingWithIcon}>
+              <Layers size={16} style={{ color: 'var(--secondary)' }} />
+              Librarian Proposals ({proposals.length})
+            </h3>
+            {proposals.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
+                No active librarian recommendations or curation proposals.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
+                {proposals.map(p => (
+                  <div key={p.id} style={proposalRowStyle}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={serviceBadge}>{p.service}</span>
+                        <span style={skillName}>{p.skill_name}</span>
+                      </div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-main)', marginTop: 2 }}>
+                        Action: <strong style={{ color: p.action === 'delete' ? '#FCA5A5' : '#86EFAC', textTransform: 'uppercase' }}>{p.action}</strong>
+                      </div>
+                      {p.details && (
+                        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontStyle: 'italic', marginTop: 2 }}>
+                          {p.details}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <button onClick={() => approveProposal(p.id)} style={btnSuccess} title="Approve Recommendation">
+                        <Check size={14} />
+                      </button>
+                      <button onClick={() => rejectProposal(p.id)} style={btnDanger} title="Reject Recommendation">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Skill Telemetry & Performance */}
+          <section style={cardPanelStyle}>
+            <h3 style={sectionHeadingWithIcon}>
+              <Activity size={16} style={{ color: 'var(--secondary)' }} />
+              Skill Performance Telemetry
+            </h3>
+            
+            {/* Aggregate table */}
+            <div style={{ marginBottom: 16 }}>
+              <h4 style={subSectionTitle}>Execution Aggregates</h4>
+              {telemetry.stats.length === 0 ? (
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No skill execution stats recorded yet.</div>
+              ) : (
+                <div style={{ overflowX: 'auto', maxHeight: 180, overflowY: 'auto', border: '1px solid rgba(34,211,238,0.1)', borderRadius: 4 }}>
+                  <table style={telemetryTableStyle}>
+                    <thead style={{ position: 'sticky', top: 0, background: 'rgba(10,15,25,0.98)', zIndex: 10 }}>
+                      <tr>
+                        <th style={telemetryThStyle}>Skill</th>
+                        <th style={telemetryThStyle}>Runs</th>
+                        <th style={telemetryThStyle}>Success</th>
+                        <th style={telemetryThStyle}>Avg Latency</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {telemetry.stats.map(s => (
+                        <tr key={`${s.service}:${s.name}`} style={telemetryTrStyle}>
+                          <td style={telemetryTdStyle}>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>{s.service}/</span>{s.name}
+                          </td>
+                          <td style={telemetryTdStyle}>{s.total}</td>
+                          <td style={{ ...telemetryTdStyle, color: s.successRate > 0.9 ? '#86EFAC' : s.successRate > 0.7 ? '#fbbf24' : '#FCA5A5', fontWeight: 600 }}>
+                            {(s.successRate * 100).toFixed(1)}%
+                          </td>
+                          <td style={telemetryTdStyle}>{s.avgDurationMs.toFixed(0)}ms</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Run logs */}
+            <div>
+              <h4 style={subSectionTitle}>Recent Telemetry Logs</h4>
+              {telemetry.history.length === 0 ? (
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No run history logged.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+                  {telemetry.history.slice(0, 15).map(h => (
+                    <div key={h.id} style={telemetryHistoryRowStyle}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 500 }}>
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>{h.service}/</span>{h.skill_name}
+                        </span>
+                        <span style={{
+                          fontSize: '0.65rem',
+                          color: h.success === 1 ? '#86EFAC' : '#FCA5A5',
+                          fontWeight: 'bold',
+                          letterSpacing: 0.5
+                        }}>
+                          {h.success === 1 ? 'SUCCESS' : 'FAILED'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: 4 }}>
+                        <span>{new Date(h.timestamp).toLocaleTimeString()} · {h.duration_ms}ms</span>
+                        {h.error && (
+                          <span
+                            style={{ color: '#FCA5A5', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', maxWidth: '60%' }}
+                            title={h.error}
+                          >
+                            {h.error}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
 
       {previewing && (
         <div style={modalBackdrop} onClick={() => setPreviewing(null)}>
@@ -961,4 +1525,140 @@ const modalBox: React.CSSProperties = {
   borderRadius: 8,
   padding: 16,
   display: 'flex', flexDirection: 'column',
+};
+
+const cardPanelStyle: React.CSSProperties = {
+  background: 'rgba(7,9,15,0.4)',
+  border: '1px solid rgba(34,211,238,0.15)',
+  borderRadius: 8,
+  padding: 16,
+  boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+};
+
+const sectionHeadingWithIcon: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  margin: '0 0 12px 0',
+  fontFamily: 'var(--font-mono)',
+  fontSize: '0.9rem',
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
+  color: 'var(--secondary)',
+  borderBottom: '1px solid rgba(34,211,238,0.1)',
+  paddingBottom: 8,
+};
+
+const subSectionTitle: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: '0.78rem',
+  letterSpacing: '0.05em',
+  textTransform: 'uppercase',
+  color: 'var(--text-main)',
+  margin: '0 0 8px 0',
+};
+
+const pinnedBadge: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: '0.6rem',
+  padding: '1px 5px',
+  borderRadius: 3,
+  background: 'rgba(168,85,247,0.2)',
+  border: '1px solid rgba(168,85,247,0.5)',
+  color: '#c4a8ff',
+  letterSpacing: 0.5,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 3,
+};
+
+const btnPinActive: React.CSSProperties = {
+  padding: 6,
+  background: 'rgba(168,85,247,0.15)',
+  border: '1px solid rgba(168,85,247,0.4)',
+  borderRadius: 6,
+  color: '#c4a8ff',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+};
+
+const btnDangerDisabled: React.CSSProperties = {
+  padding: 6,
+  background: 'rgba(255,255,255,0.03)',
+  border: '1px solid rgba(255,255,255,0.06)',
+  borderRadius: 6,
+  color: 'var(--text-muted)',
+  cursor: 'not-allowed',
+  opacity: 0.5,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+};
+
+const formRow: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+};
+
+const formLabel: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: '0.72rem',
+  color: 'var(--text-muted)',
+};
+
+const formInput: React.CSSProperties = {
+  padding: '6px 10px',
+  background: 'rgba(7,9,15,0.6)',
+  border: '1px solid rgba(34,211,238,0.2)',
+  borderRadius: 6,
+  color: 'var(--text-main)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: '0.78rem',
+  outline: 'none',
+};
+
+const proposalRowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 12,
+  padding: 8,
+  background: 'rgba(7,9,15,0.5)',
+  border: '1px solid rgba(34,211,238,0.1)',
+  borderRadius: 6,
+};
+
+const telemetryTableStyle: React.CSSProperties = {
+  width: '100%',
+  borderCollapse: 'collapse',
+  fontSize: '0.75rem',
+  fontFamily: 'var(--font-mono)',
+};
+
+const telemetryThStyle: React.CSSProperties = {
+  textAlign: 'left',
+  padding: '6px 8px',
+  borderBottom: '1px solid rgba(34,211,238,0.2)',
+  color: 'var(--text-muted)',
+  fontSize: '0.7rem',
+  textTransform: 'uppercase',
+};
+
+const telemetryTrStyle: React.CSSProperties = {
+  borderBottom: '1px solid rgba(34,211,238,0.05)',
+};
+
+const telemetryTdStyle: React.CSSProperties = {
+  padding: '6px 8px',
+  color: 'var(--text-main)',
+};
+
+const telemetryHistoryRowStyle: React.CSSProperties = {
+  padding: 8,
+  background: 'rgba(7,9,15,0.5)',
+  border: '1px solid rgba(34,211,238,0.08)',
+  borderRadius: 6,
+  fontFamily: 'var(--font-mono)',
 };

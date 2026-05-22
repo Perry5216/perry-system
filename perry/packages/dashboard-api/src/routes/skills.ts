@@ -23,6 +23,9 @@ import { Logger } from '@perry/core';
 import { readdir, readFile, unlink, mkdir, writeFile, rename } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { StateStore, LibrarianService } from '@perry/projects';
+import { AIRouter } from '@perry/ai';
+
 
 interface SkillSummary {
   filename: string;
@@ -92,7 +95,7 @@ async function listMarkdownSkills(dir: string, defaultService = 'worker'): Promi
   return out;
 }
 
-export function setupSkillsRoutes(log: Logger, workspaceDir: string) {
+export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore: StateStore, aiRouter: AIRouter) {
   const router = Router();
 
   // In the container, .claude/commands is mounted RO at /app/.claude/commands.
@@ -284,6 +287,10 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string) {
       if (!/^[a-z][a-z0-9-]{1,20}$/.test(service) || !/^[a-z][a-z0-9-]{2,39}$/.test(name)) {
         return res.status(400).json({ error: 'invalid service or name' });
       }
+      const isPinned = stateStore.getMeta(`librarian_pin:${service}:${name}`) === '1';
+      if (isPinned) {
+        return res.status(400).json({ error: `Cannot delete pinned skill ${service}/${name}` });
+      }
       const candidates = service === 'worker'
         ? ['/app/.claude/commands']
         : [join(workspaceDir, 'skills-installed', service)];
@@ -315,12 +322,191 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string) {
       if (!resolved) {
         return res.status(404).json({ error: 'not found' });
       }
+      const raw = await readFile(resolved.path, 'utf-8');
+      const fm = parseFrontmatter(raw);
+      const name = fm.name || filename.replace(/\.md$/, '');
+      const service = fm.service || resolved.service;
+      const isPinned = stateStore.getMeta(`librarian_pin:${service}:${name}`) === '1';
+      if (isPinned) {
+        return res.status(400).json({ error: `Cannot delete pinned skill ${service}/${name}` });
+      }
       await unlink(resolved.path);
       log.info('pending skill rejected', { filename, service: resolved.service });
       res.json({ deleted: true, filename, service: resolved.service });
     } catch (err) {
       log.error('DELETE /skills/pending/:filename failed', { error: (err as Error).message });
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/pin', async (req, res) => {
+    try {
+      const { service, name } = req.body || {};
+      if (!service || !name) {
+        return res.status(400).json({ error: 'service and name are required' });
+      }
+      stateStore.setMeta(`librarian_pin:${service}:${name}`, '1');
+      res.json({ pinned: true, service, name });
+    } catch (err: any) {
+      log.error('POST /skills/pin failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/unpin', async (req, res) => {
+    try {
+      const { service, name } = req.body || {};
+      if (!service || !name) {
+        return res.status(400).json({ error: 'service and name are required' });
+      }
+      stateStore.removeMeta(`librarian_pin:${service}:${name}`);
+      res.json({ unpinned: true, service, name });
+    } catch (err: any) {
+      log.error('POST /skills/unpin failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.get('/pins', async (req, res) => {
+    try {
+      const keys = stateStore.listMetaKeysByPrefix('librarian_pin:');
+      const pins = keys.map(k => {
+        const match = k.match(/^librarian_pin:([^:]+):(.+)$/);
+        return match ? { service: match[1], name: match[2] } : null;
+      }).filter(p => p !== null);
+      res.json({ pins });
+    } catch (err: any) {
+      log.error('GET /skills/pins failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/librarian-pass', async (req, res) => {
+    try {
+      const { dryRun, runLlmReview } = req.body || {};
+      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
+      const result = await librarian.runLibrarianPass({ dryRun, runLlmReview });
+      res.json(result);
+    } catch (err: any) {
+      log.error('POST /skills/librarian-pass failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.get('/backups', async (req, res) => {
+    try {
+      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
+      const backups = await librarian.listBackups();
+      res.json({ backups });
+    } catch (err: any) {
+      log.error('GET /skills/backups failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/rollback', async (req, res) => {
+    try {
+      const { timestamp } = req.body || {};
+      if (!timestamp) {
+        return res.status(400).json({ error: 'timestamp is required' });
+      }
+      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
+      const result = await librarian.rollback(timestamp);
+      res.json(result);
+    } catch (err: any) {
+      log.error('POST /skills/rollback failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Librarian Proposals API
+  router.get('/proposals', async (req, res) => {
+    try {
+      const proposals = stateStore.listLibrarianProposals();
+      res.json({ proposals });
+    } catch (err: any) {
+      log.error('GET /skills/proposals failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/proposals/:id/approve', async (req, res) => {
+    try {
+      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
+      await librarian.applyProposal(req.params.id);
+      res.json({ success: true });
+    } catch (err: any) {
+      log.error('POST /skills/proposals/:id/approve failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/proposals/:id/reject', async (req, res) => {
+    try {
+      stateStore.updateLibrarianProposalStatus(req.params.id, 'rejected');
+      res.json({ success: true });
+    } catch (err: any) {
+      log.error('POST /skills/proposals/:id/reject failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/merge', async (req, res) => {
+    try {
+      const { service, skillA, skillB, newSkillName } = req.body || {};
+      if (!service || !skillA || !skillB || !newSkillName) {
+        return res.status(400).json({ error: 'service, skillA, skillB, and newSkillName are required' });
+      }
+      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
+      await librarian.mergeSkills(service, skillA, skillB, newSkillName);
+      res.json({ success: true });
+    } catch (err: any) {
+      log.error('POST /skills/merge failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Telemetry API
+  router.get('/telemetry', async (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+      const history = stateStore.listSkillTelemetry(limit);
+      
+      const allTelemetry = stateStore.listSkillTelemetry(1000);
+      const statsMap = new Map<string, { service: string; name: string; total: number; successful: number; totalDuration: number }>();
+      
+      for (const item of allTelemetry) {
+        const key = `${item.service}:${item.skill_name}`;
+        let stat = statsMap.get(key);
+        if (!stat) {
+          stat = {
+            service: item.service,
+            name: item.skill_name,
+            total: 0,
+            successful: 0,
+            totalDuration: 0
+          };
+          statsMap.set(key, stat);
+        }
+        stat.total += 1;
+        if (item.success === 1) {
+          stat.successful += 1;
+        }
+        stat.totalDuration += item.duration_ms;
+      }
+      
+      const stats = Array.from(statsMap.values()).map(s => ({
+        service: s.service,
+        name: s.name,
+        total: s.total,
+        successRate: s.total > 0 ? s.successful / s.total : 0,
+        avgDurationMs: s.total > 0 ? s.totalDuration / s.total : 0
+      }));
+
+      res.json({ history, stats });
+    } catch (err: any) {
+      log.error('GET /skills/telemetry failed', { error: err.message });
+      res.status(500).json({ error: err.message });
     }
   });
 

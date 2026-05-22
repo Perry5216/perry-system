@@ -28,6 +28,7 @@ export interface ProjectEngineConfig {
   maxRetries: number;
   minResponseLength: number;
   config: ConfigService;
+  enableMaintenance?: boolean;
 }
 
 export class ProjectEngine {
@@ -120,15 +121,17 @@ export class ProjectEngine {
       eventBus,
     );
 
-    // Recover orphaned "active" steps left behind by a container restart
-    this.recoverOrphanedSteps();
+    // Recover orphaned "active" steps and run GC only if maintenance is enabled
+    if (config.enableMaintenance) {
+      this.recoverOrphanedSteps();
 
-    // Run Garbage Collection asynchronously on boot
-    setTimeout(() => {
-      this.purgeGhostData().catch(err => {
-        this.log.error('Garbage Collector failed on boot', { error: err.message });
-      });
-    }, 5000); // Give the system 5 seconds to settle before sweeping
+      // Run Garbage Collection asynchronously on boot
+      setTimeout(() => {
+        this.purgeGhostData().catch(err => {
+          this.log.error('Garbage Collector failed on boot', { error: err.message });
+        });
+      }, 5000); // Give the system 5 seconds to settle before sweeping
+    }
 
     // ── Project Auto-Chain ──────────────────────────────────────────────
     // When a parent project completes, automatically start any child project

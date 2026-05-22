@@ -45,6 +45,7 @@ const TASK_TIERS: Record<string, TaskTier> = {
   final_edit:        'premium',
   book_cover:        'libre',
   planning:          'libre',
+  goal_judge:        'libre',
 };
 
 const TIER_ROUTING: Record<TaskTier, string[]> = {
@@ -105,6 +106,7 @@ export const STEP_ROUTING_DEFAULTS: Record<string, RoutingTarget> = {
   stat_update:         'librarian',
   voice_profile:       'librarian',
   revision_check:      'librarian',
+  goal_judge:          'librarian',
 
   // Planning / structure / analysis — off to workers (Claude / Gemini).
   outline:             'workers',

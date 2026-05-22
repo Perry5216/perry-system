@@ -156,9 +156,16 @@ export class WorkerCoordinator {
       // voice_anchor_score, synthesize_pair, long_form_scene, ...). Workers
       // claim whatever's first regardless of type, so the coordinator should
       // fire whenever there's any open task, not just assist tasks.
-      const pending = store.db.prepare(
-        "SELECT COUNT(*) AS n FROM task_pool WHERE status='open'"
-      ).get().n as number;
+      let pending = 0;
+      if (store.usingSqlite && store.db) {
+        try {
+          pending = store.db.prepare(
+            "SELECT COUNT(*) AS n FROM task_pool WHERE status='open'"
+          ).get().n as number;
+        } catch (e: any) {
+          this.log.error('failed to query pending task count from SQLite', { error: e.message });
+        }
+      }
 
       // Daemon control: dashboard wrote a start/stop request? Honor + ack.
       for (const a of VALID_AGENTS) {
@@ -175,7 +182,7 @@ export class WorkerCoordinator {
         } catch (e: any) {
           this.log.warn('daemon-control meta parse failed (deleting corrupt row)', { agent: a, error: e.message });
         }
-        store.db.prepare("DELETE FROM meta WHERE key=?").run(`daemon_control_${a}`);
+        store.removeMeta(`daemon_control_${a}`);
       }
 
       // Per-agent fire decision.
@@ -207,7 +214,7 @@ export class WorkerCoordinator {
     this.dispatchSpawn(agent, reason);
     this.state[agent].lastFireAt = nowMs;
     store.setMeta(`assist_last_fired_at_${agent}`, new Date(nowMs).toISOString());
-    store.db.prepare("DELETE FROM meta WHERE key=?").run(`assist_fire_requested_at_${agent}`);
+    store.removeMeta(`assist_fire_requested_at_${agent}`);
   }
 
   private dispatchSpawn(agent: Agent, reason: string): void {

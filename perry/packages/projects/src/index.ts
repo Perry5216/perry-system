@@ -29,3 +29,6 @@ export { AGENT_REGISTRY, getAgent, listAgents, listDelegatableAgents } from './a
 export { AgentRunner } from './agents/runner.js';
 export { DomainRegistry } from './services/domain-registry.js';
 export type { DomainDefinition } from './services/domain-registry.js';
+export { LibrarianService } from './services/librarian-service.js';
+export type { LibrarianPassResult } from './services/librarian-service.js';
+

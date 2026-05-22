@@ -2,11 +2,11 @@ import { ActivityHeatmap } from './ActivityHeatmap';
 /**
  * AnalyticsPanel — Perry-flavoured analytics view.
  *
- * Inspired by Hermes' Analytics tab but tuned to the metrics we actually
+ * Inspired by the system's Analytics tab but tuned to the metrics we actually
  * capture: step volume, success rate, prompt-size trends, audit health,
  * LoRA training cadence. NOT token/cost — the llm_telemetry table only
  * stores prompts (no token counts or cost). Add token tracking later if
- * you want a Hermes-equivalent cost view.
+ * you want an equivalent cost view.
  *
  * Backed by GET /api/analytics/summary?days=N.
  *

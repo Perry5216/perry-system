@@ -7,7 +7,7 @@
  * deepening model of who's driving it, surfacing that model to every agent
  * before generation so Perry can tune its output to the actual user.
  *
- * Mirrors Hermes' Honcho dialectic user-modeling pattern. The "dialectic"
+ * Mirrors the agentic user-modeling pattern. The "dialectic"
  * piece is the update loop: every approval/rejection/edit/preference is an
  * observation that sharpens the model.
  *

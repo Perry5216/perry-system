@@ -21,6 +21,24 @@ import type { Logger } from '@perry/core';
 // ═══════════════════════════════════════════════════════════
 
 export type MemorySource = 'project_step' | 'manuscript' | 'note' | 'conversation';
+export type RagTier = 'library' | 'session' | 'feedback';
+
+export function getTierForKind(kind: string): RagTier {
+  if (kind.startsWith('learning_') || kind === 'voice_anchor' || kind === 'voyager_tool' || kind === 'verified_scout_finding') {
+    return 'feedback';
+  }
+  if (kind === 'session_chat' || kind === 'recent_context' || kind === 'active_task' || kind === 'step_history' || kind === 'chat_memory' || kind === 'project_step') {
+    return 'session';
+  }
+  return 'library';
+}
+
+export function getTierForSource(source: string): RagTier {
+  if (source === 'project_step' || source === 'conversation') {
+    return 'session';
+  }
+  return 'library';
+}
 
 export interface MemoryEntry {
   source: MemorySource;
@@ -29,6 +47,7 @@ export interface MemoryEntry {
   timestamp: string;
   title: string | null;
   body: string;
+  tier?: string;
 }
 
 export interface SearchHit {
@@ -40,6 +59,7 @@ export interface SearchHit {
   title: string | null;
   snippet: string;
   rank: number;
+  tier?: string;
 }
 
 export interface MemoryStats {
@@ -76,9 +96,26 @@ export class MemoryStore {
     try {
       const mod: any = await import('better-sqlite3');
       const Database: any = mod.default || mod;
-      this.db = new Database(this.dbPath);
+      this.db = new Database(this.dbPath, { timeout: 5000 });
       this.db.pragma('journal_mode = WAL');
       this.db.pragma('foreign_keys = ON');
+      this.db.pragma('synchronous = NORMAL');
+      this.db.pragma('temp_store = MEMORY');
+      this.db.pragma('cache_size = -16000');
+      this.db.pragma('mmap_size = 268435456');
+
+      // Wrap prepare to transparently cache prepared statements
+      const originalPrepare = this.db.prepare.bind(this.db);
+      const stmtCache = new Map<string, any>();
+      this.db.prepare = (sql: string) => {
+        let stmt = stmtCache.get(sql);
+        if (!stmt) {
+          stmt = originalPrepare(sql);
+          stmtCache.set(sql, stmt);
+        }
+        return stmt;
+      };
+
       this.applySchema();
       this.log.info('Memory store initialized', { path: this.dbPath });
     } catch (err: any) {
@@ -93,6 +130,7 @@ export class MemoryStore {
   }
 
   private applySchema(): void {
+    // 1. Create base tables if they don't exist
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS entries (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +140,7 @@ export class MemoryStore {
         timestamp   TEXT NOT NULL,
         title       TEXT,
         body        TEXT NOT NULL,
+        tier        TEXT DEFAULT 'library',
         UNIQUE(source, source_ref, project_id)
       );
       CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_id);
@@ -132,10 +171,28 @@ export class MemoryStore {
         embed_dim    INTEGER NOT NULL,
         metadata     TEXT,
         indexed_at   TEXT NOT NULL,
+        tier         TEXT DEFAULT 'library',
         UNIQUE(project_id, source_ref, chunk_index)
       );
       CREATE INDEX IF NOT EXISTS idx_chunks_project_kind ON chunks(project_id, kind);
       CREATE INDEX IF NOT EXISTS idx_chunks_source_ref ON chunks(source_ref);
+    `);
+
+    // 2. Perform migrations to add 'tier' column to existing tables if missing
+    const entriesCols = this.db.pragma('table_info(entries)') as { name: string }[];
+    const chunksCols = this.db.pragma('table_info(chunks)') as { name: string }[];
+
+    if (!entriesCols.some(c => c.name === 'tier')) {
+      this.db.exec("ALTER TABLE entries ADD COLUMN tier TEXT DEFAULT 'library'");
+    }
+    if (!chunksCols.some(c => c.name === 'tier')) {
+      this.db.exec("ALTER TABLE chunks ADD COLUMN tier TEXT DEFAULT 'library'");
+    }
+
+    // 3. Create indices referencing 'tier' now that the column is guaranteed to exist
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_entries_project_tier ON entries(project_id, tier);
+      CREATE INDEX IF NOT EXISTS idx_chunks_project_tier ON chunks(project_id, tier);
     `);
 
     this.db.exec(`
@@ -166,14 +223,16 @@ export class MemoryStore {
    */
   upsert(entry: MemoryEntry): number | null {
     if (!this.db) return null;
+    const tier = entry.tier || getTierForSource(entry.source);
     try {
       const result = this.db.prepare(`
-        INSERT INTO entries (source, source_ref, project_id, timestamp, title, body)
-        VALUES (@source, @sourceRef, @projectId, @timestamp, @title, @body)
+        INSERT INTO entries (source, source_ref, project_id, timestamp, title, body, tier)
+        VALUES (@source, @sourceRef, @projectId, @timestamp, @title, @body, @tier)
         ON CONFLICT(source, source_ref, project_id) DO UPDATE SET
           timestamp = excluded.timestamp,
           title     = excluded.title,
-          body      = excluded.body
+          body      = excluded.body,
+          tier      = excluded.tier
       `).run({
         source: entry.source,
         sourceRef: entry.sourceRef,
@@ -181,6 +240,7 @@ export class MemoryStore {
         timestamp: entry.timestamp,
         title: entry.title,
         body: entry.body,
+        tier,
       });
       return result.lastInsertRowid ? Number(result.lastInsertRowid) : null;
     } catch (err) {
@@ -193,21 +253,26 @@ export class MemoryStore {
    * Search within a SPECIFIC project. This is the primary search method.
    * projectId is REQUIRED — no accidental cross-project leaks.
    */
-  searchProject(projectId: string, query: string, limit: number = 25): SearchHit[] {
+  searchProject(projectId: string, query: string, limit: number = 25, tier?: string): SearchHit[] {
     if (!this.db || !query?.trim()) return [];
     const safeQuery = query.replace(/[\x00-\x1f]/g, '').trim();
     try {
+      const tierFilter = tier ? 'AND e.tier = @tier' : '';
+      const params: any = { q: safeQuery, projectId };
+      if (tier) {
+        params.tier = tier;
+      }
       return this.db.prepare(`
         SELECT e.id, e.source, e.source_ref, e.project_id,
-               e.timestamp, e.title,
+               e.timestamp, e.title, e.tier,
                snippet(entries_fts, 1, '[', ']', '…', 32) AS snippet,
                bm25(entries_fts) AS rank
         FROM entries_fts
         JOIN entries e ON e.id = entries_fts.rowid
-        WHERE entries_fts MATCH @q AND e.project_id = @projectId
+        WHERE entries_fts MATCH @q AND e.project_id = @projectId ${tierFilter}
         ORDER BY rank
         LIMIT ${Math.min(limit, 100)}
-      `).all({ q: safeQuery, projectId }).map((r: any) => ({
+      `).all(params).map((r: any) => ({
         id: r.id,
         source: r.source as MemorySource,
         sourceRef: r.source_ref,
@@ -216,6 +281,7 @@ export class MemoryStore {
         title: r.title,
         snippet: r.snippet,
         rank: r.rank,
+        tier: r.tier,
       }));
     } catch (err: any) {
       this.log.warn('Search failed', { error: err?.message });
@@ -246,10 +312,9 @@ export class MemoryStore {
     return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
   }
 
-  /** Decode a stored BLOB back into a number[] for cosine math. */
-  static decodeEmbedding(blob: Buffer): number[] {
-    const f32 = new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
-    return Array.from(f32);
+  /** Decode a stored BLOB back into a Float32Array for cosine math. */
+  static decodeEmbedding(blob: Buffer): Float32Array {
+    return new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
   }
 
   /** Insert or replace a single chunk. */
@@ -264,12 +329,14 @@ export class MemoryStore {
     embedModel: string;
     embedDim: number;
     metadata?: Record<string, any>;
+    tier?: string;
   }): number | null {
     if (!this.db) return null;
+    const tier = chunk.tier || getTierForKind(chunk.kind);
     try {
       const result = this.db.prepare(`
-        INSERT INTO chunks (project_id, source_ref, kind, chunk_index, text, token_count, embedding, embed_model, embed_dim, metadata, indexed_at)
-        VALUES (@projectId, @sourceRef, @kind, @chunkIndex, @text, @tokenCount, @embedding, @embedModel, @embedDim, @metadata, @indexedAt)
+        INSERT INTO chunks (project_id, source_ref, kind, chunk_index, text, token_count, embedding, embed_model, embed_dim, metadata, indexed_at, tier)
+        VALUES (@projectId, @sourceRef, @kind, @chunkIndex, @text, @tokenCount, @embedding, @embedModel, @embedDim, @metadata, @indexedAt, @tier)
         ON CONFLICT(project_id, source_ref, chunk_index) DO UPDATE SET
           kind        = excluded.kind,
           text        = excluded.text,
@@ -278,7 +345,8 @@ export class MemoryStore {
           embed_model = excluded.embed_model,
           embed_dim   = excluded.embed_dim,
           metadata    = excluded.metadata,
-          indexed_at  = excluded.indexed_at
+          indexed_at  = excluded.indexed_at,
+          tier        = excluded.tier
       `).run({
         projectId: chunk.projectId,
         sourceRef: chunk.sourceRef,
@@ -291,8 +359,12 @@ export class MemoryStore {
         embedDim: chunk.embedDim,
         metadata: chunk.metadata ? JSON.stringify(chunk.metadata) : null,
         indexedAt: new Date().toISOString(),
+        tier,
       });
-      return result.lastInsertRowid ? Number(result.lastInsertRowid) : null;
+      if (result.changes > 0) {
+        return result.lastInsertRowid ? Number(result.lastInsertRowid) : 1;
+      }
+      return null;
     } catch (err: any) {
       this.log.error('upsertChunk failed', { error: err.message, sourceRef: chunk.sourceRef });
       return null;
@@ -306,6 +378,15 @@ export class MemoryStore {
       'DELETE FROM chunks WHERE project_id = @projectId AND source_ref = @sourceRef'
     ).run({ projectId, sourceRef });
     return result.changes;
+  }
+
+  /** Quick check to see if chunks exist for a given source reference. */
+  hasChunksForSource(projectId: string, sourceRef: string): boolean {
+    if (!this.db) return false;
+    const row = this.db.prepare(
+      'SELECT 1 FROM chunks WHERE project_id = ? AND source_ref = ? LIMIT 1'
+    ).get(projectId, sourceRef);
+    return !!row;
   }
 
   /** Count chunks for a project, optionally scoped to a kind. */
@@ -330,6 +411,8 @@ export class MemoryStore {
     kinds?: string[];      // restrict to these kinds; empty/undefined = all
     topK?: number;
     minScore?: number;     // drop hits below this cosine
+    tier?: string;
+    tiers?: string[];
   }): Array<{
     id: number;
     sourceRef: string;
@@ -339,6 +422,7 @@ export class MemoryStore {
     tokenCount: number;
     score: number;
     metadata: any | null;
+    tier?: string;
   }> {
     if (!this.db) return [];
     const topK = Math.max(1, Math.min(opts.topK ?? 8, 50));
@@ -346,12 +430,17 @@ export class MemoryStore {
     const kindFilter = opts.kinds && opts.kinds.length > 0
       ? `AND kind IN (${opts.kinds.map(() => '?').join(',')})`
       : '';
+    const targetTiers = opts.tier ? [opts.tier] : opts.tiers;
+    const tierFilter = targetTiers && targetTiers.length > 0
+      ? `AND tier IN (${targetTiers.map(() => '?').join(',')})`
+      : '';
+
     const sql = `
-      SELECT id, source_ref, kind, chunk_index, text, token_count, embedding, metadata
+      SELECT id, source_ref, kind, chunk_index, text, token_count, embedding, metadata, tier
       FROM chunks
-      WHERE project_id = ? ${kindFilter}
+      WHERE project_id = ? ${kindFilter} ${tierFilter}
     `;
-    const params = [opts.projectId, ...(opts.kinds || [])];
+    const params = [opts.projectId, ...(opts.kinds || []), ...(targetTiers || [])];
     const rows = this.db.prepare(sql).all(...params) as any[];
     if (rows.length === 0) return [];
     // Inline cosine
@@ -383,6 +472,7 @@ export class MemoryStore {
         tokenCount: r.token_count,
         score,
         metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
+        tier: r.tier,
       });
     }
     scored.sort((a, b) => b.score - a.score);
@@ -520,17 +610,31 @@ export class MemoryStore {
     kinds?: string[];
     topK?: number;
     minScore?: number;
+    tier?: string;
+    tiers?: string[];
   }): Array<any> {
     if (!this.db) return [];
     const topK = Math.max(1, Math.min(opts.topK ?? 8, 50));
     const minScore = opts.minScore ?? 0;
     const kindFilter = opts.kinds && opts.kinds.length > 0
-      ? `WHERE kind IN (${opts.kinds.map(() => '?').join(',')})`
+      ? `kind IN (${opts.kinds.map(() => '?').join(',')})`
       : '';
+    const targetTiers = opts.tier ? [opts.tier] : opts.tiers;
+    const tierFilter = targetTiers && targetTiers.length > 0
+      ? `tier IN (${targetTiers.map(() => '?').join(',')})`
+      : '';
+    
+    const whereClauses: string[] = [];
+    if (kindFilter) whereClauses.push(kindFilter);
+    if (tierFilter) whereClauses.push(tierFilter);
+    
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    const params = [...(opts.kinds || []), ...(targetTiers || [])];
+
     const rows = this.db.prepare(`
-      SELECT id, project_id, source_ref, kind, chunk_index, text, token_count, embedding, metadata
-      FROM chunks ${kindFilter}
-    `).all(...(opts.kinds || [])) as any[];
+      SELECT id, project_id, source_ref, kind, chunk_index, text, token_count, embedding, metadata, tier
+      FROM chunks ${whereSql}
+    `).all(...params) as any[];
     const q = opts.queryEmbedding;
     let qMag = 0;
     for (let i = 0; i < q.length; i++) qMag += q[i] * q[i];
@@ -552,6 +656,7 @@ export class MemoryStore {
         kind: r.kind, chunkIndex: r.chunk_index, text: r.text,
         tokenCount: r.token_count, score,
         metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
+        tier: r.tier,
       });
     }
     scored.sort((a, b) => b.score - a.score);
@@ -620,6 +725,7 @@ export class MemoryStore {
       timestamp: r.timestamp,
       title: r.title,
       body: r.body,
+      tier: r.tier,
     }));
   }
 

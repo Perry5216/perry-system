@@ -14,6 +14,7 @@ import { OperatorPanel } from './components/OperatorPanel';
 import { CronPanel } from './components/CronPanel';
 import { IntegrationsPanel } from './components/IntegrationsPanel';
 import { FleetHeader } from './components/FleetHeader';
+import { GoalsPanel } from './components/GoalsPanel';
 import { SuggestedAction } from './components/SuggestedAction';
 import { LeftNav, type NavTab } from './components/LeftNav';
 import { TopStatusBar } from './components/TopStatusBar';
@@ -208,7 +209,7 @@ export function App() {
   }, []);
 
   // UI State
-  type TabId = 'pipeline' | 'bible' | 'chapters' | 'revision' | 'stats' | 'gpu' | 'workers' | 'fleet' | 'director' | 'pens' | 'secrets' | 'trajectories' | 'analytics' | 'models' | 'projects' | 'system' | 'self-learning' | 'domains' | 'operator' | 'cron' | 'integrations';
+  type TabId = 'pipeline' | 'bible' | 'chapters' | 'revision' | 'stats' | 'gpu' | 'workers' | 'fleet' | 'director' | 'pens' | 'secrets' | 'trajectories' | 'analytics' | 'models' | 'projects' | 'system' | 'self-learning' | 'domains' | 'operator' | 'cron' | 'integrations' | 'goals';
   // Fleet is the landing tab — the system's "home view" showing the
   // entire agent constellation. Projects, secrets, models, etc. are
   // all navigated to from Fleet rather than around it.
@@ -712,7 +713,7 @@ export function App() {
    *  These appear in the LeftNav. Other tabs (GPU, Workers,
    *  Pens, Pipeline, etc.) require a selected project — they only surface
    *  once the user opens a project from the sidebar. */
-  const GLOBAL_TAB_IDS: Set<TabId> = useMemo(() => new Set<TabId>(['fleet', 'projects', 'trajectories', 'analytics', 'secrets', 'models', 'self-learning', 'system', 'domains', 'operator', 'cron', 'integrations']), []);
+  const GLOBAL_TAB_IDS: Set<TabId> = useMemo(() => new Set<TabId>(['fleet', 'projects', 'trajectories', 'analytics', 'secrets', 'models', 'self-learning', 'system', 'domains', 'operator', 'cron', 'integrations', 'goals']), []);
 
   // If we land on a project-scoped tab without a project selected (e.g. user
   // bookmarked /workers, or activeTab is set by some other path), redirect
@@ -1472,7 +1473,7 @@ export function App() {
           edge. Replaces the BridgePlanet metaphor with a conventional rail
           that's familiar to any user. */}
       <LeftNav
-        activeTab={(['fleet', 'projects', 'workers', 'trajectories', 'analytics', 'models', 'self-learning', 'secrets', 'system', 'domains', 'operator', 'cron', 'integrations'].includes(activeTab) ? activeTab : 'fleet') as NavTab}
+        activeTab={(['fleet', 'projects', 'workers', 'trajectories', 'analytics', 'models', 'self-learning', 'secrets', 'system', 'domains', 'operator', 'cron', 'integrations', 'goals'].includes(activeTab) ? activeTab : 'fleet') as NavTab}
         onSelectTab={(t) => setActiveTab(t as TabId)}
         chatOpen={chatOpen}
         onToggleChat={() => setChatOpen(o => !o)}
@@ -1877,6 +1878,7 @@ export function App() {
             {activeTab === 'operator' && <OperatorPanel />}
             {activeTab === 'cron' && <CronPanel />}
             {activeTab === 'integrations' && <IntegrationsPanel />}
+            {activeTab === 'goals' && <GoalsPanel selectedProject={selectedProject} onSelectProject={setSelectedProject} />}
           </div>
         )}
         <SuggestedAction />

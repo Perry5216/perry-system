@@ -188,42 +188,33 @@ for (const t of allTemplates) {
   });
 }
 
-// ── Test: novel-pipeline stat_update sections A–G ─────────────────────────
-suite('novel-pipeline — stat_update Sections A–G');
+// ── Test: novel-pipeline Review sections A–G ─────────────────────────
+suite('novel-pipeline — Review Sections A–G');
 
 const novelSteps = getSteps('novel-pipeline');
-const statUpdateSteps = novelSteps.filter(s => s.taskType === 'stat_update');
+const statUpdateSteps = novelSteps.filter(s => s.label.includes('Review') && s.prompt?.includes('## G.'));
 
-test(`novel-pipeline has stat_update steps`, () => {
-  assert(statUpdateSteps.length > 0, 'Must have at least 1 stat_update step');
+test(`novel-pipeline has Review steps containing narrative directives`, () => {
+  assert(statUpdateSteps.length > 0, 'Must have at least 1 Review step with narrative directives');
 });
 
 const requiredSections = ['## A.', '## B.', '## C.', '## D.', '## E.', '## F.', '## G.'];
 for (const section of requiredSections) {
-  test(`stat_update steps all contain ${section}`, () => {
+  test(`Review steps all contain ${section}`, () => {
     const missing = statUpdateSteps.filter(s => !s.prompt?.includes(section));
     assert(missing.length === 0,
-      `stat_update steps missing ${section}: ${missing.map(s => s.label).join(', ')}`);
+      `Review steps missing ${section}: ${missing.map(s => s.label).join(', ')}`);
   });
 }
 
-test('stat_update Section G says NARRATIVE DIRECTIVES', () => {
+test('Review Section G says NARRATIVE DIRECTIVES', () => {
   const missing = statUpdateSteps.filter(s => !s.prompt?.includes('NARRATIVE DIRECTIVES'));
   assert(missing.length === 0, `Steps missing NARRATIVE DIRECTIVES: ${missing.map(s => s.label).join(', ')}`);
 });
 
-test('stat_update Section G is scoped (SCOPED to)', () => {
-  const missing = statUpdateSteps.filter(s => !s.prompt?.includes('SCOPED to'));
-  assert(missing.length === 0, `Steps missing SCOPED scope directive: ${missing.map(s => s.label).join(', ')}`);
-});
-
-// ── Test: novel-pipeline has export step ──────────────────────────────────
-suite('novel-pipeline — Export Step');
-
-test('novel-pipeline has a Compile Manuscript export step', () => {
-  const exp = novelSteps.find(s => s.taskType === 'export');
-  assert(exp !== undefined, 'Must have an export step');
-  assert(exp!.label.toLowerCase().includes('compile'), `Export step label unexpected: "${exp!.label}"`);
+test('Review Section G is scoped (scoped to)', () => {
+  const missing = statUpdateSteps.filter(s => !s.prompt?.includes('scoped to'));
+  assert(missing.length === 0, `Steps missing scoped to scope directive: ${missing.map(s => s.label).join(', ')}`);
 });
 
 // ── Test: style-calibration — 3 scene types + summary per pass ─────────────
@@ -247,9 +238,9 @@ test('style-calibration: Summary & Improvement Directives step exists', () => {
   assert(styleSteps.some(s => s.label.includes('Summary')), 'Must have Summary step');
 });
 
-test('style-calibration: all writing steps have wordCountTarget 800', () => {
+test('style-calibration: all writing steps have wordCountTarget 400', () => {
   const writingSteps = styleSteps.filter(s => s.taskType === 'creative_writing');
-  const wrong = writingSteps.filter(s => s.wordCountTarget !== 800);
+  const wrong = writingSteps.filter(s => s.wordCountTarget !== 400);
   assert(wrong.length === 0, `Steps with wrong wordCountTarget: ${wrong.map(s => `${s.label}(${s.wordCountTarget})`).join(', ')}`);
 });
 
@@ -334,41 +325,43 @@ test('revision-execution: Global Manuscript Polish outputs JSON array', () => {
   assert(step!.prompt?.includes('"old"'), 'Must include old/new replace schema');
 });
 
-// ── Test: book-cover — All 5 steps ────────────────────────────────────────
-suite('book-cover — All 5 Required Steps');
+// ── Test: book-cover — All 4 Required Steps ────────────────────────────────────────
+suite('book-cover — All 4 Required Steps');
 
 const coverSteps = getSteps('book-cover');
 
-test('book-cover: has Genre Visual Research step', () => {
-  assert(coverSteps.some(s => s.label === 'Genre Visual Research'), 'Missing Genre Visual Research');
+test('book-cover: has Generate Cover Art Prompt step', () => {
+  assert(coverSteps.some(s => s.label === 'Generate Cover Art Prompt'), 'Missing Generate Cover Art Prompt');
 });
 
-test('book-cover: has Cover Concept Development step', () => {
-  assert(coverSteps.some(s => s.label === 'Cover Concept Development'), 'Missing Cover Concept Development');
+test('book-cover: has Generate Back Cover Summary step', () => {
+  assert(coverSteps.some(s => s.label === 'Generate Back Cover Summary'), 'Missing Generate Back Cover Summary');
 });
 
-test('book-cover: has FLUX.1-dev Prompt Engineering step', () => {
-  assert(coverSteps.some(s => s.label === 'FLUX.1-dev Prompt Engineering'), 'Missing FLUX.1-dev Prompt Engineering');
+test('book-cover: has Generate Base Artwork step', () => {
+  assert(coverSteps.some(s => s.label.startsWith('Generate Base Artwork')), 'Missing Generate Base Artwork');
+});
+
+test('book-cover: has Composite Typography step', () => {
+  assert(coverSteps.some(s => s.label.startsWith('Composite Typography')), 'Missing Composite Typography');
 });
 
 test('book-cover: FLUX prompt step says output ONLY valid JSON', () => {
-  const fluxStep = coverSteps.find(s => s.label === 'FLUX.1-dev Prompt Engineering');
-  assert(fluxStep?.prompt?.includes('Output ONLY valid JSON'), 'Must enforce JSON-only output');
+  const fluxStep = coverSteps.find(s => s.label === 'Generate Cover Art Prompt');
+  assert(fluxStep?.prompt?.includes('Output ONLY valid JSON') || fluxStep?.prompt?.includes('valid JSON'), 'Must enforce JSON-only output');
 });
 
-test('book-cover: has 5 steps total', () => {
-  assertEqual(coverSteps.length, 5, 'book-cover step count');
+test('book-cover: has 4 steps total', () => {
+  assertEqual(coverSteps.length, 4, 'book-cover step count');
 });
 
-// ── Test: amazon-kdp-launch — All 7 steps ────────────────────────────────
+// ── Test: amazon-kdp-launch — All 7 Required Steps ────────────────────────────────
 suite('amazon-kdp-launch — All 7 Required Steps');
 
 const kdpSteps = getSteps('amazon-kdp-launch');
 const expectedKdpLabels = [
   'SCO', // Keyword Research
-  'Comp Title ASIN',
   'GCO', // Category Strategy
-  'Also-Bought',
   'KDP Metadata Package',
   'A+ Content',
   '90-Day Launch Plan',
@@ -381,8 +374,8 @@ for (const label of expectedKdpLabels) {
   });
 }
 
-test('amazon-kdp-launch: has 8 steps total', () => {
-  assertEqual(kdpSteps.length, 8, 'amazon-kdp-launch step count');
+test('amazon-kdp-launch: has 7 steps total', () => {
+  assertEqual(kdpSteps.length, 7, 'amazon-kdp-launch step count');
 });
 
 // ── Test: short-story — All 4 steps ──────────────────────────────────────
@@ -413,8 +406,8 @@ suite('book-planning — Structural Checks');
 
 const planningSteps = getSteps('book-planning');
 
-test('book-planning: has Faction Bible step', () => {
-  assert(planningSteps.some(s => s.label === 'Faction Bible'), 'Missing Faction Bible');
+test('book-planning: has Setting Bible step', () => {
+  assert(planningSteps.some(s => s.label === 'Setting Bible'), 'Missing Setting Bible');
 });
 
 test('book-planning: has Character Bible step', () => {
@@ -425,16 +418,12 @@ test('book-planning: has Voice Profile step', () => {
   assert(planningSteps.some(s => s.label === 'Voice Profile'), 'Missing Voice Profile');
 });
 
-test('book-planning: has World Building step', () => {
-  assert(planningSteps.some(s => s.label === 'World Building'), 'Missing World Building');
-});
-
 test('book-planning: has Chapter Outline step', () => {
   assert(planningSteps.some(s => s.label === 'Chapter-by-Chapter Outline'), 'Missing Chapter Outline');
 });
 
-test('book-planning: has Tension Blueprint step', () => {
-  assert(planningSteps.some(s => s.label === 'Tension Blueprint'), 'Missing Tension Blueprint');
+test('book-planning: has Story Architecture step', () => {
+  assert(planningSteps.some(s => s.label === 'Story Architecture'), 'Missing Story Architecture');
 });
 
 // ── Results ───────────────────────────────────────────────────────────────

@@ -304,7 +304,7 @@ export class AuditService {
 
   private scoreResponse(text: string, penSlug?: string): AuditFailure[] {
     const failures = scanLeaks(text);
-    // Consumer side of the producer→curator→consumer loop: check whether any
+    // Consumer side of the producer→librarian→consumer loop: check whether any
     // promoted audit skills for this pen called out a leak_tag that scanLeaks
     // also caught. Log the match so we can see skills being learned from in
     // dashboards / logs. Doesn't change scoring — same failures, more signal.

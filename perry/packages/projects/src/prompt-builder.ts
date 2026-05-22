@@ -91,7 +91,7 @@ export class PromptBuilder {
    * Reloaded periodically (cheap fs read of a small dir) so newly-promoted
    * skills become active without a restart.
    */
-  private skipRules: Array<{ queryKind: string; topicFingerprint: string }> = [];
+  private skipRules: Array<{ name: string; queryKind: string; topicFingerprint: string }> = [];
   private skipRulesLoadedAt = 0;
   private readonly SKIP_RULES_TTL_MS = 60_000;
 
@@ -101,6 +101,7 @@ export class PromptBuilder {
       this.skipRules = skills
         .filter(s => s.appliesWhen?.action === 'skip')
         .map(s => ({
+          name: s.name,
           queryKind: String(s.appliesWhen.query_kind || ''),
           topicFingerprint: String(s.appliesWhen.topic_fingerprint || ''),
         }))
@@ -126,7 +127,13 @@ export class PromptBuilder {
     if (this.skipRules.length === 0) return false;
     const topicKey = require('crypto').createHash('sha1')
       .update(queryTopic.toLowerCase().slice(0, 200)).digest('hex').slice(0, 8);
-    return this.skipRules.some(r => r.queryKind === queryKind && r.topicFingerprint === topicKey);
+    
+    const matched = this.skipRules.find(r => r.queryKind === queryKind && r.topicFingerprint === topicKey);
+    if (matched) {
+      this.stateStore.logSkillExecution('prompt-builder', matched.name, true, 0);
+      return true;
+    }
+    return false;
   }
 
   /**

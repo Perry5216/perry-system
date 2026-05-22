@@ -20,7 +20,7 @@
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import {
-  Cpu, MessageSquare, FolderOpen, BarChart3, LineChart, ArrowDownToLine, Settings, Users, GitBranch, Sparkles, Layers, UserCircle2, Clock, Plug, ChevronsLeft, ChevronsRight,
+  Cpu, MessageSquare, FolderOpen, BarChart3, LineChart, ArrowDownToLine, Settings, Users, GitBranch, Sparkles, Layers, UserCircle2, Clock, Plug, ChevronsLeft, ChevronsRight, Target,
 } from 'lucide-react';
 import { playHoverSound, playSelectSound } from '../utils/audio';
 
@@ -28,7 +28,7 @@ const NAV_COLLAPSED_PX = 56;
 const NAV_EXPANDED_PX = 200;
 const NAV_STATE_KEY = 'perry-leftnav-collapsed';
 
-export type NavTab = 'fleet' | 'projects' | 'workers' | 'trajectories' | 'analytics' | 'models' | 'self-learning' | 'secrets' | 'system' | 'domains' | 'operator' | 'cron' | 'integrations';
+export type NavTab = 'fleet' | 'projects' | 'workers' | 'trajectories' | 'analytics' | 'models' | 'self-learning' | 'secrets' | 'system' | 'domains' | 'operator' | 'cron' | 'integrations' | 'goals';
 
 interface NavItem {
   key: string;
@@ -100,6 +100,7 @@ export function LeftNav({
     {
       label: 'Observe',
       items: [
+        { key: 'goals',         label: 'Goals',      icon: <Target size={22} />,    active: activeTab === 'goals',        onClick: () => onSelectTab('goals') },
         { key: 'self-learning', label: 'Self-Learn', icon: <Sparkles size={22} />,  active: activeTab === 'self-learning', onClick: () => onSelectTab('self-learning') },
         { key: 'analytics',     label: 'Analytics',  icon: <LineChart size={22} />, active: activeTab === 'analytics',     onClick: () => onSelectTab('analytics') },
         { key: 'system',        label: 'System',     icon: <GitBranch size={22} />, active: activeTab === 'system',        onClick: () => onSelectTab('system') },

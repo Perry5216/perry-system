@@ -45,8 +45,11 @@ function getDb(): Database.Database | null {
       || '/app/workspace/.config/network-cache.db';
     const dir = dirname(cachePath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const db: Database.Database = new Database(cachePath);
+    const db: Database.Database = new Database(cachePath, { timeout: 5000 });
     db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('temp_store = MEMORY');
+    db.pragma('cache_size = -16000');
     db.exec(`
       CREATE TABLE IF NOT EXISTS network_cache (
         url           TEXT NOT NULL,

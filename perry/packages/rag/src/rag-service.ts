@@ -37,6 +37,8 @@ export interface IndexOptions extends ChunkerOptions {
   replace?: boolean;
   /** Optional per-source metadata stamped on every chunk (e.g., chapterNumber). */
   metadata?: Record<string, any>;
+  /** Optional memory tier ('library', 'session', 'feedback') */
+  tier?: string;
 }
 
 export interface RagHit {
@@ -181,38 +183,74 @@ export class RagService {
       return { chunks: 0, skipped: true, reason: 'text-too-short' };
     }
 
+    // Skip indexing if already chunked and we are not forcing a replace
+    if (!opts.replace && this.store.hasChunksForSource(opts.projectId, opts.sourceRef)) {
+      return { chunks: 0, skipped: true, reason: 'already-indexed' };
+    }
+
     if (opts.replace) {
       this.store.deleteChunksBySource(opts.projectId, opts.sourceRef);
     }
 
     const chunks = this.chunk(opts.text, opts);
-    let stored = 0;
-    for (let i = 0; i < chunks.length; i++) {
-      const c = chunks[i];
-      try {
-        const e = await this.embeddings.embed(c.text);
-        // Tag entities at index-time. Stored in metadata.entities so later
-        // queries can filter "chunks mentioning Kaelen" without re-scanning.
-        const entities = RagService.extractEntities(c.text);
-        const id = this.store.upsertChunk({
-          projectId: opts.projectId,
-          sourceRef: opts.sourceRef,
-          kind: opts.kind,
-          chunkIndex: i,
-          text: c.text,
-          tokenCount: c.tokenCount,
-          embedding: e.embedding,
-          embedModel: e.model,
-          embedDim: e.dim,
-          metadata: { ...(opts.metadata || {}), entities },
-        });
-        if (id !== null) stored++;
-      } catch (err: any) {
-        this.log.warn('chunk embed failed — skipping chunk', {
-          sourceRef: opts.sourceRef, chunkIndex: i, error: err.message,
-        });
-      }
+    const CONCURRENCY_LIMIT = 5;
+    const results: Array<{
+      chunkIndex: number;
+      text: string;
+      tokenCount: number;
+      embedding: number[];
+      embedModel: string;
+      embedDim: number;
+      entities: string[];
+    } | null> = [];
+
+    // Process chunk embedding in concurrent batches
+    for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
+      const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
+      const batchPromises = batch.map(async (c, index) => {
+        const chunkIndex = i + index;
+        try {
+          const e = await this.embeddings.embed(c.text);
+          const entities = RagService.extractEntities(c.text);
+          return {
+            chunkIndex,
+            text: c.text,
+            tokenCount: c.tokenCount,
+            embedding: e.embedding,
+            embedModel: e.model,
+            embedDim: e.dim,
+            entities,
+          };
+        } catch (err: any) {
+          this.log.warn('chunk embed failed — skipping chunk', {
+            sourceRef: opts.sourceRef, chunkIndex, error: err.message,
+          });
+          return null;
+        }
+      });
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
     }
+
+    let stored = 0;
+    for (const r of results) {
+      if (!r) continue;
+      const id = this.store.upsertChunk({
+        projectId: opts.projectId,
+        sourceRef: opts.sourceRef,
+        kind: opts.kind,
+        chunkIndex: r.chunkIndex,
+        text: r.text,
+        tokenCount: r.tokenCount,
+        embedding: r.embedding,
+        embedModel: r.embedModel,
+        embedDim: r.embedDim,
+        metadata: { ...(opts.metadata || {}), entities: r.entities },
+        tier: opts.tier,
+      });
+      if (id !== null) stored++;
+    }
+
     this.log.info('Indexed text', {
       projectId: opts.projectId, sourceRef: opts.sourceRef, kind: opts.kind,
       chunks: stored, totalChars: opts.text.length,
@@ -265,6 +303,7 @@ export class RagService {
       minChunkChars: opts.minChunkChars,
       targetTokens: opts.targetTokens,
       overlapTokens: opts.overlapTokens,
+      tier: opts.tier,
     });
     return {
       indexed: !result.skipped && result.chunks > 0,
@@ -283,6 +322,7 @@ export class RagService {
     kinds?: string[];
     topK?: number;
     minScore?: number;
+    tier?: string;
   }): Promise<RagHit[]> {
     if (!(await this.embeddings.isAvailable())) return [];
     if (!opts.query?.trim()) return [];
@@ -294,6 +334,7 @@ export class RagService {
         kinds: opts.kinds,
         topK: opts.topK,
         minScore: opts.minScore,
+        tier: opts.tier,
       });
     } catch (err: any) {
       this.log.warn('retrieve failed', { error: err.message });
@@ -307,6 +348,7 @@ export class RagService {
     kinds?: string[];
     topK?: number;
     minScore?: number;
+    tier?: string;
   }): Promise<any[]> {
     if (!(await this.embeddings.isAvailable())) return [];
     if (!opts.query?.trim()) return [];
@@ -317,6 +359,7 @@ export class RagService {
         kinds: opts.kinds,
         topK: opts.topK,
         minScore: opts.minScore,
+        tier: opts.tier,
       });
     } catch (err: any) {
       this.log.warn('retrieveGlobal failed', { error: err.message });

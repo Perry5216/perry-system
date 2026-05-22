@@ -937,7 +937,7 @@ export class StepRunner {
 
   private mcpClient: McpClientService;
 
-  // Consumer side of producer→curator→consumer for director skills.
+  // Consumer side of producer→librarian→consumer for director skills.
   // Skills landed at `workspace/skills-installed/director/` describe
   // remedies for recurring `(task_type, error_fingerprint)` failure
   // patterns. Loaded on a TTL so newly-promoted skills come into effect
@@ -1109,6 +1109,16 @@ export class StepRunner {
       taskType: step.taskType,
     });
 
+    if (Date.now() - this.directorSkillsLoadedAt > this.DIRECTOR_SKILLS_TTL_MS) {
+      this.refreshDirectorSkills();
+    }
+    const appliedSkills = this.directorSkills.filter(s => {
+      const w = s.appliesWhen;
+      if (!w) return false;
+      return !w.task_type || w.task_type === '*' || w.task_type === step.taskType;
+    });
+    const startTime = Date.now();
+
     // 1. Mark step as active
     this.stateStore.startStep(project.id, step.id);
     this.eventBus.emit('step:started', { projectId: project.id, stepId: step.id });
@@ -1119,6 +1129,7 @@ export class StepRunner {
     });
 
     let result: string | null = null;
+    try {
     let lastError: Error | null = null;
 
     // ── ComfyUI image generation (no LLM needed) ──────────────────────────────
@@ -3247,15 +3258,27 @@ ${result}`;
         }
       }
     }
-    if (step.taskType === 'manuscript_cleanup') {
-      await this.continuityGate.applyManuscriptCleanup(project, step, result);
-    }
-    // Revision Brief (Pass H) — parse verdict and act
-    if (step.taskType === 'revision_check' && step.label.includes('Revision Brief')) {
-      await this.revisionGate.apply(project, step, result);
-    }
+      if (step.taskType === 'manuscript_cleanup') {
+        await this.continuityGate.applyManuscriptCleanup(project, step, result);
+      }
+      // Revision Brief (Pass H) — parse verdict and act
+      if (step.taskType === 'revision_check' && step.label.includes('Revision Brief')) {
+        await this.revisionGate.apply(project, step, result);
+      }
 
-    return result;
+      const duration = Date.now() - startTime;
+      for (const skill of appliedSkills) {
+        this.stateStore.logSkillExecution('director', skill.name, true, duration);
+      }
+
+      return result!;
+    } catch (err: any) {
+      const duration = Date.now() - startTime;
+      for (const skill of appliedSkills) {
+        this.stateStore.logSkillExecution('director', skill.name, false, duration, err.message || String(err));
+      }
+      throw err;
+    }
   }
 
   /**

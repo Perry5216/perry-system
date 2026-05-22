@@ -15,18 +15,83 @@ import { z } from 'zod';
 import { ConfigService, EventBus, Logger, Vault } from '@perry/core';
 import { AIRouter } from '@perry/ai';
 import { MemoryStore, ContextEngine, RagService } from '@perry/rag';
-import { ProjectEngine, StateStore, resolvePenAwareWriterModel, StyleDnaService } from '@perry/projects';
+import { ProjectEngine, StateStore, resolvePenAwareWriterModel, StyleDnaService, LibrarianService } from '@perry/projects';
 import { join } from 'path';
 import { execSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, mkdirSync } from 'fs';
+import { pathToFileURL } from 'url';
 
 async function bootstrap() {
   process.env.IS_MCP_SERVER = 'true';
+
+  // If running in stdio transport mode (default, when PERRY_MCP_HTTP_PORT is not set),
+  // redirect console.log and console.warn to console.error to keep stdout clean.
+  // This prevents any accidental logging (e.g. from context compression or Ollama stream debugs)
+  // from corrupting the stdio JSON-RPC stream.
+  const isStdio = !process.env.PERRY_MCP_HTTP_PORT || parseInt(process.env.PERRY_MCP_HTTP_PORT, 10) <= 0;
+  if (isStdio) {
+    console.log = (...args: any[]) => {
+      console.error(...args);
+    };
+    console.warn = (...args: any[]) => {
+      console.error(...args);
+    };
+  }
+
   const log = new Logger('mcp', 'error'); // Keep stdout clean for MCP protocol
 
   // 1. Initialize P.E.R.R.Y. Core Services
   const WORKSPACE = process.env.PERRY_WORKSPACE || join(process.cwd(), 'workspace');
   const CONFIG_DIR = process.env.PERRY_CONFIG || join(process.cwd(), 'config');
+
+  interface CustomTool {
+    meta: {
+      name: string;
+      description: string;
+      inputSchema: any;
+    };
+    run: (args: any, context: any) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    path: string;
+  }
+  const customTools = new Map<string, CustomTool>();
+  const CUSTOM_TOOLS_DIR = join(WORKSPACE, 'custom-tools');
+  mkdirSync(CUSTOM_TOOLS_DIR, { recursive: true });
+
+  async function loadCustomTools() {
+    customTools.clear();
+    try {
+      const files = readdirSync(CUSTOM_TOOLS_DIR).filter(f => (f.endsWith('.js') || f.endsWith('.cjs')) && !f.startsWith('_'));
+      for (const file of files) {
+        const fullPath = join(CUSTOM_TOOLS_DIR, file);
+        try {
+          const url = pathToFileURL(fullPath).href + `?t=${Date.now()}`;
+          const mod = await import(url);
+          const target = mod.default || mod;
+          if (target.meta && typeof target.run === 'function') {
+            const name = target.meta.name;
+            if (!/^[a-z][a-z0-9-_]{1,40}$/.test(name)) {
+              log.error(`[custom-tools] Invalid custom tool name: ${name}`);
+              continue;
+            }
+            customTools.set(name, {
+              meta: target.meta,
+              run: target.run,
+              path: fullPath,
+            });
+            log.error(`[custom-tools] Loaded custom tool: ${name}`);
+          } else {
+            log.error(`[custom-tools] Custom tool file ${file} must export 'meta' and 'run' function.`);
+          }
+        } catch (err: any) {
+          log.error(`[custom-tools] Failed to load custom tool ${file}: ${err.message}`);
+        }
+      }
+    } catch (err: any) {
+      log.error(`[custom-tools] Error reading custom tools directory: ${err.message}`);
+    }
+  }
+
+  await loadCustomTools();
 
   const config = new ConfigService(CONFIG_DIR);
   config.load();
@@ -143,6 +208,18 @@ async function bootstrap() {
     embed_similarity:        'Embed text and rank candidates by cosine similarity.',
     compress_context:        'Summarize a passage to target tokens via local Librarian.',
     get_tool_schema:         'Fetch the full inputSchema for a named tool (companion to compact mode).',
+    reload_custom_tools:     'Reload custom synthesized tools from the workspace directory.',
+    librarian_pin_skill:       'Pin a skill to protect it from curation or deletion.',
+    librarian_unpin_skill:     'Unpin a skill to allow automated curation.',
+    librarian_run_pass:        'Run automated skills curation maintenance pass.',
+    librarian_list_backups:    'List backup snapshots of skills.',
+    librarian_rollback:        'Rollback skills to a backup snapshot.',
+    librarian_status:          'Get curation/pin status of skills.',
+    librarian_list_proposals:  'List all pending and historical librarian proposals.',
+    librarian_approve_proposal: 'Approve a librarian proposal to execute its archive/merge action.',
+    librarian_reject_proposal: 'Reject a librarian proposal.',
+    librarian_merge_skills:    'Directly merge two overlapping skills into a single synthesized skill.',
+    librarian_get_telemetry:   'Retrieve skill execution telemetry history and aggregated statistics.',
   };
   const COMPACT_STUB_SCHEMA = { type: 'object', additionalProperties: true };
 
@@ -418,6 +495,7 @@ async function bootstrap() {
               kinds: { type: 'array', items: { type: 'string' }, description: 'Restrict to specific kinds (e.g., ["bible_character","bible_setting"]). Omit for all kinds.' },
               top_k: { type: 'number', description: 'Max hits to return. Default 8, max 50.' },
               min_score: { type: 'number', description: 'Drop hits below this cosine score (0–1). Default 0.' },
+              tier: { type: 'string', enum: ['library', 'session', 'feedback'], description: 'Memory tier to restrict search. Omit for all tiers.' },
             },
             required: ['project_id', 'query'],
           },
@@ -432,6 +510,7 @@ async function bootstrap() {
               kinds: { type: 'array', items: { type: 'string' } },
               top_k: { type: 'number' },
               min_score: { type: 'number' },
+              tier: { type: 'string', enum: ['library', 'session', 'feedback'], description: 'Memory tier to restrict search. Omit for all tiers.' },
             },
             required: ['query'],
           },
@@ -462,7 +541,7 @@ async function bootstrap() {
         },
         {
           name: 'propose_skill',
-          description: 'Submit a candidate skill (procedural memory) for human review. Use ONLY after finishing a verified-successful complex task — when you\'ve discovered a non-trivial workflow that other workers (or services) would benefit from. Lands in workspace/skills-pending/{service}/ for human approval. Set service="scout" for source-discovery patterns, "audit" for voice-leak recipes, "director" for orchestration patterns, etc. Default service="worker" (general agent workflows). Mirrors Hermes\' agent-authored skills pattern with a verification gate.',
+          description: 'Submit a candidate skill (procedural memory) for human review. Use ONLY after finishing a verified-successful complex task — when you\'ve discovered a non-trivial workflow that other workers (or services) would benefit from. Lands in workspace/skills-pending/{service}/ for human approval. Set service="scout" for source-discovery patterns, "audit" for voice-leak recipes, "director" for orchestration patterns, etc. Default service="worker" (general agent workflows). Mirrors the agent-authored skills pattern with a verification gate.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -627,7 +706,141 @@ async function bootstrap() {
             required: ['name'],
           },
         },
+        {
+          name: 'reload_custom_tools',
+          description: 'Scan and reload custom tools from the custom-tools/ workspace directory.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'librarian_pin_skill',
+          description: 'Pin a skill to protect it from automated curation and deletion.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              service: { type: 'string', description: 'The service tag of the skill (e.g. worker, scout, audit)' },
+              name: { type: 'string', description: 'The name of the skill' },
+            },
+            required: ['service', 'name'],
+          },
+        },
+        {
+          name: 'librarian_unpin_skill',
+          description: 'Unpin a skill to allow automated curation and deletion.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              service: { type: 'string', description: 'The service tag of the skill (e.g. worker, scout, audit)' },
+              name: { type: 'string', description: 'The name of the skill' },
+            },
+            required: ['service', 'name'],
+          },
+        },
+        {
+          name: 'librarian_run_pass',
+          description: 'Run the automated librarian pass on installed skills.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              dryRun: { type: 'boolean', description: 'If true, does not write changes. Defaults to true.' },
+              runLlmReview: { type: 'boolean', description: 'If true, performs LLM overlap/redundancy review. Defaults to false.' },
+            },
+          },
+        },
+        {
+          name: 'librarian_list_backups',
+          description: 'List all skills backup snapshots.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'librarian_rollback',
+          description: 'Rollback skills to a specific backup snapshot timestamp.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              timestamp: { type: 'string', description: 'The backup snapshot timestamp' },
+            },
+            required: ['timestamp'],
+          },
+        },
+        {
+          name: 'librarian_status',
+          description: 'Get curation/pin status of installed and pending skills.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'librarian_list_proposals',
+          description: 'List all pending and historical librarian proposals.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'librarian_approve_proposal',
+          description: 'Approve a librarian proposal to execute its archive/merge action.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'The unique ID of the proposal to approve' },
+            },
+            required: ['id'],
+          },
+        },
+        {
+          name: 'librarian_reject_proposal',
+          description: 'Reject a librarian proposal.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'The unique ID of the proposal to reject' },
+            },
+            required: ['id'],
+          },
+        },
+        {
+          name: 'librarian_merge_skills',
+          description: 'Directly merge two overlapping skills into a single synthesized skill.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              service: { type: 'string', description: 'The service tag (e.g. scout, worker)' },
+              skillA: { type: 'string', description: 'The name of the first skill' },
+              skillB: { type: 'string', description: 'The name of the second skill' },
+              newSkillName: { type: 'string', description: 'The name of the new synthesized skill' },
+            },
+            required: ['service', 'skillA', 'skillB', 'newSkillName'],
+          },
+        },
+        {
+          name: 'librarian_get_telemetry',
+          description: 'Retrieve skill execution telemetry history and aggregated statistics.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              limit: { type: 'number', description: 'Maximum number of history records to return' },
+            },
+          },
+        },
     ];
+
+    // Append custom tools dynamically to the available tools list
+    for (const [name, tool] of customTools.entries()) {
+      fullList.push({
+        name: name,
+        description: tool.meta.description,
+        inputSchema: tool.meta.inputSchema,
+      });
+    }
+
     // Stash full list on the server instance so get_tool_schema can look up
     // schemas at runtime without rebuilding the array. The fullList is
     // built fresh each tools/list call, but the captured `serverFullToolList`
@@ -1182,7 +1395,7 @@ async function bootstrap() {
       }
 
       case 'rag_search': {
-        const { project_id, query, kinds, top_k, min_score } = request.params.arguments as any;
+        const { project_id, query, kinds, top_k, min_score, tier } = request.params.arguments as any;
         if (typeof project_id !== 'string' || typeof query !== 'string') {
           throw new McpError(ErrorCode.InvalidParams, 'project_id and query are required');
         }
@@ -1191,6 +1404,7 @@ async function bootstrap() {
             projectId: project_id, query, kinds,
             topK: typeof top_k === 'number' ? top_k : undefined,
             minScore: typeof min_score === 'number' ? min_score : undefined,
+            tier: typeof tier === 'string' ? tier : undefined,
           });
           return { content: [{ type: 'text', text: JSON.stringify({ hits, count: hits.length }) }] };
         } catch (err: any) {
@@ -1243,7 +1457,7 @@ async function bootstrap() {
         // workspace/skills-pending/{service}/ — never directly active — so a
         // human reviews before the skill enters rotation. Mirrors the
         // verified-success learning loop's gate philosophy: producers
-        // propose, humans (or a future curator) decide.
+        // propose, humans (or a future librarian) decide.
         const { name, description, body, service, applies_when, evidence } = request.params.arguments as any;
         if (typeof name !== 'string' || !/^[a-z0-9-]{3,40}$/.test(name)) {
           throw new McpError(ErrorCode.InvalidParams, 'name must be lowercase-kebab-case, 3-40 chars');
@@ -1411,13 +1625,14 @@ async function bootstrap() {
       }
 
       case 'rag_search_global': {
-        const { query, kinds, top_k, min_score } = request.params.arguments as any;
+        const { query, kinds, top_k, min_score, tier } = request.params.arguments as any;
         if (typeof query !== 'string') throw new McpError(ErrorCode.InvalidParams, 'query is required');
         try {
           const hits = await ragService.retrieveGlobal({
             query, kinds,
             topK: typeof top_k === 'number' ? top_k : undefined,
             minScore: typeof min_score === 'number' ? min_score : undefined,
+            tier: typeof tier === 'string' ? tier : undefined,
           });
           return { content: [{ type: 'text', text: JSON.stringify({ hits, count: hits.length }) }] };
         } catch (err: any) {
@@ -1559,8 +1774,282 @@ async function bootstrap() {
         }
       }
 
-      default:
+      case 'reload_custom_tools': {
+        try {
+          await loadCustomTools();
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Successfully reloaded custom tools. Currently loaded: ${Array.from(customTools.keys()).join(', ') || 'none'}`
+              }
+            ]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `Failed to reload custom tools: ${err.message}`);
+        }
+      }
+
+      case 'librarian_pin_skill': {
+        const { service, name } = request.params.arguments as any;
+        if (typeof service !== 'string' || typeof name !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'service and name must be strings');
+        }
+        stateStore.setMeta(`librarian_pin:${service}:${name}`, '1');
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ pinned: true, service, name })
+          }]
+        };
+      }
+
+      case 'librarian_unpin_skill': {
+        const { service, name } = request.params.arguments as any;
+        if (typeof service !== 'string' || typeof name !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'service and name must be strings');
+        }
+        stateStore.removeMeta(`librarian_pin:${service}:${name}`);
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ unpinned: true, service, name })
+          }]
+        };
+      }
+
+      case 'librarian_run_pass': {
+        const { dryRun, runLlmReview } = request.params.arguments as any;
+        try {
+          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
+          const result = await librarian.runLibrarianPass({ dryRun, runLlmReview });
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result, null, 2)
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_run_pass failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_list_backups': {
+        try {
+          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
+          const backups = await librarian.listBackups();
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ backups }, null, 2)
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_list_backups failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_rollback': {
+        const { timestamp } = request.params.arguments as any;
+        if (typeof timestamp !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'timestamp must be a string');
+        }
+        try {
+          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
+          const result = await librarian.rollback(timestamp);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result, null, 2)
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_rollback failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_status': {
+        try {
+          const installedDir = join(WORKSPACE, 'skills-installed');
+          const pendingDir = join(WORKSPACE, 'skills-pending');
+          const legacyInstalledDir = '/app/.claude/commands';
+
+          const scan = (dir: string): Array<{ name: string; service: string; isPinned: boolean; path: string }> => {
+            if (!existsSync(dir)) return [];
+            const out: any[] = [];
+            const entries = readdirSync(dir, { withFileTypes: true });
+            for (const ent of entries) {
+              if (ent.isDirectory()) {
+                const subDir = join(dir, ent.name);
+                const subFiles = readdirSync(subDir).filter(f => f.endsWith('.md'));
+                for (const file of subFiles) {
+                  const name = file.replace(/\.md$/, '');
+                  const isPinned = stateStore.getMeta(`librarian_pin:${ent.name}:${name}`) === '1';
+                  out.push({ name, service: ent.name, isPinned, path: join(subDir, file) });
+                }
+              } else if (ent.isFile() && ent.name.endsWith('.md')) {
+                const name = ent.name.replace(/\.md$/, '');
+                const isPinned = stateStore.getMeta(`librarian_pin:worker:${name}`) === '1';
+                out.push({ name, service: 'worker', isPinned, path: join(dir, ent.name) });
+              }
+            }
+            return out;
+          };
+
+          const installedList = [...scan(installedDir), ...scan(legacyInstalledDir)];
+          const pendingList = scan(pendingDir);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                installed: installedList,
+                pending: pendingList
+              }, null, 2)
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_status failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_list_proposals': {
+        try {
+          const proposals = stateStore.listLibrarianProposals();
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ proposals }, null, 2)
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_list_proposals failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_approve_proposal': {
+        const { id } = request.params.arguments as any;
+        if (typeof id !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'id must be a string');
+        }
+        try {
+          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
+          await librarian.applyProposal(id);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ success: true })
+          }]
+        };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_approve_proposal failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_reject_proposal': {
+        const { id } = request.params.arguments as any;
+        if (typeof id !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'id must be a string');
+        }
+        try {
+          stateStore.updateLibrarianProposalStatus(id, 'rejected');
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ success: true })
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_reject_proposal failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_merge_skills': {
+        const { service, skillA, skillB, newSkillName } = request.params.arguments as any;
+        if (typeof service !== 'string' || typeof skillA !== 'string' || typeof skillB !== 'string' || typeof newSkillName !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'service, skillA, skillB, and newSkillName must be strings');
+        }
+        try {
+          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
+          await librarian.mergeSkills(service, skillA, skillB, newSkillName);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ success: true })
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_merge_skills failed: ${err.message}`);
+        }
+      }
+
+      case 'librarian_get_telemetry': {
+        const { limit } = request.params.arguments as any;
+        const limitVal = typeof limit === 'number' ? limit : 100;
+        try {
+          const history = stateStore.listSkillTelemetry(limitVal);
+          
+          const allTelemetry = stateStore.listSkillTelemetry(1000);
+          const statsMap = new Map<string, { service: string; name: string; total: number; successful: number; totalDuration: number }>();
+          for (const item of allTelemetry) {
+            const key = `${item.service}:${item.skill_name}`;
+            let stat = statsMap.get(key);
+            if (!stat) {
+              stat = { service: item.service, name: item.skill_name, total: 0, successful: 0, totalDuration: 0 };
+              statsMap.set(key, stat);
+            }
+            stat.total += 1;
+            if (item.success === 1) stat.successful += 1;
+            stat.totalDuration += item.duration_ms;
+          }
+          const stats = Array.from(statsMap.values()).map(s => ({
+            service: s.service,
+            name: s.name,
+            total: s.total,
+            successRate: s.total > 0 ? s.successful / s.total : 0,
+            avgDurationMs: s.total > 0 ? s.totalDuration / s.total : 0
+          }));
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ history, stats }, null, 2)
+            }]
+          };
+        } catch (err: any) {
+          throw new McpError(ErrorCode.InternalError, `librarian_get_telemetry failed: ${err.message}`);
+        }
+      }
+
+      default: {
+        const tool = customTools.get(request.params.name);
+        if (tool) {
+          try {
+            const context = {
+              log,
+              workspaceDir: WORKSPACE,
+              config,
+              vault,
+              eventBus,
+              stateStore,
+              aiRouter,
+              memoryStore,
+              contextEngine,
+              ragService,
+              projectEngine,
+              styleDnaService,
+            };
+            const result = await tool.run(request.params.arguments || {}, context);
+            return result;
+          } catch (err: any) {
+            throw new McpError(
+              ErrorCode.InternalError,
+              `Error executing custom tool '${request.params.name}': ${err.message}`
+            );
+          }
+        }
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
+      }
     }
   });
 

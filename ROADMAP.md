@@ -134,7 +134,7 @@ Foundation that the LearningCore refactor sits on top of:
 
 **Phase 3 + 4 — Producer side for in-process services (this session)**
 - **`SkillProposer` helper** in `@perry/core` ([skill-proposer.ts](perry/packages/core/src/skill-proposer.ts)) — service-internal counterpart to the worker-facing `mcp__perry__propose_skill` tool. Same file format, same storage layout. Built-in throttling (1h between proposals of the same name) and pending-dir dedup. NEVER throws — best-effort, can't break the caller.
-- **`loadInstalledSkills` helper** in `@perry/core` — reads `workspace/skills-installed/{service}/` and returns parsed frontmatter + body for consumer use. NOW used by prompt-builder's `refreshSkipSkills()` / `shouldSkipRagQuery()` — first end-to-end producer→curator→consumer loop in production.
+- **`loadInstalledSkills` helper** in `@perry/core` — reads `workspace/skills-installed/{service}/` and returns parsed frontmatter + body for consumer use. NOW used by prompt-builder's `refreshSkipSkills()` / `shouldSkipRagQuery()` — first end-to-end producer→librarian→consumer loop in production.
 - **Director / step-runner** producer — EventBus listener on `step:failed`. After ≥3 occurrences of `(taskType, error fingerprint)`, propose a director skill. Counter persists in meta.
 - **Audit service** producer — post-audit, counts which `topFailureTags` recur across audits per pen. After ≥3 consecutive audit runs flagging the same tag, propose a pre-screen-rule skill scoped to `(pen_slug, leak_tag)`.
 - **GC** producer — post-sweep, compares dir bytes to prior snapshot stored in meta. After ≥3 consecutive sweeps where a dir doubles in size AND exceeds 10 MB, propose a tighter-TTL skill.
@@ -232,7 +232,7 @@ What's needed:
 ---
 
 ### Cron / scheduled writes
-> Hermes' Cron tab pattern — schedule recurring agent runs with delivery
+> P.E.R.R.Y.'s Cron tab pattern — schedule recurring agent runs with delivery
 > target (Telegram / Discord / Slack / email).
 
 Perry version: *"Write chapter 12 at 9am and deliver to Telegram."*
@@ -325,12 +325,12 @@ the same as any other service's.
 
 ---
 
-### Skill curator GC stage (Phase 5 of skills system)
+### Skill librarian GC stage (Phase 5 of skills system)
 > Auto-promote `workspace/skills-pending/` entries when N≥3 independent
 > proposals match.
 
 Right now `propose_skill` lands files in the pending dir and the human
-clicks promote in the dashboard. The curator stage would:
+clicks promote in the dashboard. The librarian stage would:
 - Run on the 6h GC sweep
 - Deduplicate near-identical pending skills (cosine similarity ≥ 0.85)
 - Count independent proposals per cluster
@@ -344,7 +344,7 @@ test data has to come from actual usage, not synthetic seeds.
 
 ---
 
-### Memory editor — Hermes leapfrog
+### Memory editor — profile curation
 ✅ **Partially done** — SOUL.md / LESSONS.md editable from the Pens tab.
 
 Still want:
@@ -374,7 +374,7 @@ Or: file an upstream PR.
 ---
 
 ### Theme picker
-Hermes ships 6 themes (Hermes Teal, Midnight, Ember, Mono, Cyberpunk, Rosé).
+P.E.R.R.Y. ships 6 themes (Perry Cyan, Midnight, Ember, Mono, Cyberpunk, Rosé).
 Perry currently has one cyan/purple dark theme. Easy polish, cheap to add.
 
 **Effort:** Small. ~30 min.
@@ -510,7 +510,7 @@ regenerate). Needs a "kept" endpoint or dashboard button.
 These are larger or longer-term — discussed but not blocking.
 
 ### DSPy prompt optimization
-The Hermes catalog has it. Conceptual match to Perry's "self-learning"
+The P.E.R.R.Y. catalog has it. Conceptual match to Perry's "self-learning"
 north star: a Python sidecar that A/B-tests prompt variants using the
 verified-success RAG corpus as the reward signal. If it works, retires
 the manual compression rounds we did today.
@@ -568,7 +568,7 @@ signal that doesn't exist yet.
 **Effort:** Medium. New text-analysis component.
 
 ### "AGENTS.md" / context-file system
-Hermes' `.hermes.md` / `AGENTS.md` / `CLAUDE.md` discovery pattern. Perry
+P.E.R.R.Y.'s `.perry.md` / `AGENTS.md` / `CLAUDE.md` discovery pattern. Perry
 has `CLAUDE.md` already. Could extend to per-pen / per-project context
 files automatically discovered when a worker starts in a directory.
 
@@ -586,7 +586,7 @@ files automatically discovered when a worker starts in a directory.
   runtime level. [[perry-subscription-only-mode]].
 - **Backup conventions** — git backup branches + tar to `d:/n8n-backups/`
   before risky changes. [[backup-conventions]].
-- **Hermes-pattern source material** — the Nous Research Hermes Agent
+- **Nous-pattern source material** — reference Nous Research Hermes Agent
   docs at `https://hermes-agent.nousresearch.com/docs/`. Patterns we
   cribbed: Skills System, FTS5 sessions search, persistent memory,
   per-task auxiliary model picker, time-range analytics. Patterns we
