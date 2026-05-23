@@ -1574,7 +1574,12 @@ export function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to intelligently generate template');
 
-      alert(`Successfully created template: ${data.templateName}!\nAssigned skill "${data.skillName}" to the ${data.domainId} domain.`);
+      if (data.templates && Array.isArray(data.templates)) {
+        const listStr = data.templates.map((t: any) => `- ${t.templateName}`).join('\n');
+        alert(`Successfully created template suite:\n${listStr}\n\nAssigned matching builder skills to the "${data.domainId}" domain.`);
+      } else {
+        alert(`Successfully created template: ${data.templateName}!\nAssigned skill "${data.skillName}" to the ${data.domainId} domain.`);
+      }
 
       // Refresh templates
       const templatesRes = await fetch(`${API_BASE}/system/templates`);

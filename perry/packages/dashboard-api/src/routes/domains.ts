@@ -743,14 +743,25 @@ When this skill is activated:
 
       // Phase 3: Synthesis & Design
       eventBus.emit('intelligent-evolve:log', {
-        message: 'Synthesizing template structure, custom playbooks, and worker recommendations...',
+        message: 'Synthesizing template suite, custom playbooks, and worker recommendations...',
         timestamp: new Date().toISOString()
       });
 
       const systemPrompt = [
-        `You are the Perry Intelligent Template Generator. Your job is to analyze the requested domain work type, combine it with web search context showing best-practices and industry guidelines, check existing domain skills, and generate a highly custom template tailored to that work type.`,
+        `You are the Perry Intelligent Template Generator. Your job is to analyze the requested domain work type, combine it with web search context showing best-practices and industry guidelines, check existing domain skills, and generate a suite of 2 to 4 custom templates tailored to that work type.`,
         ``,
-        `For each step of the new template, you must determine the appropriate taskType and prompt to run.`,
+        `For example:`,
+        `- If workType is 'code', generate a suite of specialized templates like:`,
+        `  1. 'Code Design & Architecture' (for outlining, flowcharts, planning)`,
+        `  2. 'Code Implementation' (for writing code files, unit tests)`,
+        `  3. 'Code Review & Refactoring' (for audits, debugging, refactoring)`,
+        `- If workType is 'dnd', generate a suite like:`,
+        `  1. 'D&D Campaign Planning' (planning world, lore, main quests)`,
+        `  2. 'D&D NPC Generation' (building NPCs, background, stats)`,
+        `  3. 'D&D Encounter Design' (designing combat/social encounters, maps)`,
+        `- If workType is anything else, generate 2-4 distinct, logical, specialized template pipelines corresponding to different stages or aspects of that domain.`,
+        ``,
+        `For each step of each template, you must determine the appropriate taskType and prompt to run.`,
         `Perry has the following task types and routing target systems:`,
         `1. 'comfyui_generate', 'text_overlay', 'qwen_text_render': Smartly assigned if the step involves image generation, card/visual design, map layout, or cover creation. These route directly to ComfyUI (Local GPU).`,
         `2. 'creative_writing', 'revision_execution': Smartly assigned for creative narrative writing, prose generation, or dialogue polishing. These route to the local Writer GPU.`,
@@ -769,30 +780,33 @@ When this skill is activated:
         `Analyze the existing skills in the domain:`,
         `${skillsContextText}`,
         ``,
-        `Determine if additional custom skills/playbooks should be created to help the AI perform specific steps in this template successfully. If so, define them in the 'recommendedNewSkills' list.`,
+        `Determine if additional custom skills/playbooks should be created to help the AI perform specific steps in these templates successfully. If so, define them in the 'recommendedNewSkills' list.`,
         ``,
         `Compute Worker Resource Recommendations:`,
-        `Evaluate the complexity of this pipeline template. Does it require more parallel workers, or special routing to run efficiently? Recommend worker allocations in 'workerResourceRecommendations'.`,
+        `Evaluate the complexity of this pipeline template suite. Does it require more parallel workers, or special routing to run efficiently? Recommend worker allocations in 'workerResourceRecommendations'.`,
         ``,
-        `Output MUST be a valid JSON object matching the CustomPipelineDef schema:`,
+        `Output MUST be a valid JSON object matching this schema:`,
         `{`,
-        `  "id": "kebab-case-unique-id-prefixed-with-custom",`,
-        `  "name": "Template Display Name",`,
-        `  "description": "Short template description",`,
-        `  "workType": "${workType}",`,
-        `  "steps": [`,
+        `  "templates": [`,
         `    {`,
-        `      "label": "Step Name",`,
-        `      "phase": "planning | writing | revision | marketing",`,
-        `      "taskType": "comfyui_generate | creative_writing | outline | planning | analysis | pov_check | research",`,
-        `      "prompt": "Highly detailed system prompt instructing the AI on exactly what to do for this step. Include instructions on using inputs from previous steps."`,
+        `      "id": "kebab-case-unique-id-prefixed-with-custom",`,
+        `      "name": "Template Display Name (e.g. Code Implementation)",`,
+        `      "description": "Short template description",`,
+        `      "steps": [`,
+        `        {`,
+        `          "label": "Step Name",`,
+        `          "phase": "planning | writing | revision | marketing",`,
+        `          "taskType": "comfyui_generate | creative_writing | outline | planning | analysis | pov_check | research",`,
+        `          "prompt": "Highly detailed system prompt instructing the AI on exactly what to do for this step. Include instructions on using inputs from previous steps."`,
+        `        }`,
+        `      ]`,
         `    }`,
         `  ],`,
         `  "recommendedNewSkills": [`,
         `    {`,
         `      "name": "skill-name-kebab-case",`,
         `      "description": "Short description of the skill and why it's needed",`,
-        `      "body": "Complete Markdown skill playbook contents, including frontmatter block at the top containing name, service: ${workType}, and description, followed by detailed instructions."`,
+        `      "body": "Complete Markdown skill playbook contents, including frontmatter block at the top containing name, service: \${workType}, and description, followed by detailed instructions."`,
         `    }`,
         `  ],`,
         `  "workerResourceRecommendations": {`,
@@ -805,24 +819,24 @@ When this skill is activated:
       ].join('\n');
 
       const userPrompt = [
-        `Generate a reusable custom template under the "${workType}" domain.`,
+        `Generate a reusable custom template suite under the "${workType}" domain.`,
         ``,
         `--- Target Domain Context ---`,
-        `Title: ${projectTitle}`,
-        `Description: ${projectDesc}`,
-        `Context: ${projectStepsText}`,
+        `Title: \${projectTitle}`,
+        `Description: \${projectDesc}`,
+        `Context: \${projectStepsText}`,
         ``,
         `--- Research/Brainstorming Answers ---`,
         searchContext || 'No context available.',
         ``,
         `--- Requirements ---`,
-        `Template Name: ${name || projectTitle + ' Template'}`,
-        `Template Description: ${description || 'Intelligent template for ' + workType}`,
-        `Worker Mode: ${workersMode || 'smart'}`,
-        `Work Type: ${workType}`,
+        `Template Base Name: \${name || projectTitle}`,
+        `Template Description: \${description || 'Intelligent template suite for ' + workType}`,
+        `Worker Mode: \${workersMode || 'smart'}`,
+        `Work Type: \${workType}`,
       ].join('\n');
 
-      log.info('Invoking AI Router to intelligently evolve workType to template', { workType, name, workersMode, targetProvider });
+      log.info('Invoking AI Router to intelligently evolve workType to templates suite', { workType, name, workersMode, targetProvider });
 
       const aiResponse = await aiRouter.complete({
         provider: targetProvider,
@@ -838,12 +852,27 @@ When this skill is activated:
       });
 
       const generatedJson = extractJson(aiResponse.text);
-      if (!generatedJson || !generatedJson.steps || !Array.isArray(generatedJson.steps)) {
-        throw new Error('AI failed to return a valid template structure with steps');
+      if (!generatedJson) {
+        throw new Error('AI failed to return a valid JSON structure');
+      }
+
+      const templatesList = Array.isArray(generatedJson.templates) ? generatedJson.templates : [];
+      // Fallback if AI generated steps at root instead of templates array
+      if (templatesList.length === 0 && generatedJson.steps && Array.isArray(generatedJson.steps)) {
+        templatesList.push({
+          id: generatedJson.id || `custom-\${(generatedJson.name || name || \`\${projectTitle} Template\`).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`,
+          name: generatedJson.name || name || `\${projectTitle} Template`,
+          description: generatedJson.description || description || `Generated template evolved from workType: \${workType}`,
+          steps: generatedJson.steps
+        });
+      }
+
+      if (templatesList.length === 0) {
+        throw new Error('No template structures found in the AI response.');
       }
 
       eventBus.emit('intelligent-evolve:log', {
-        message: `Parsed template successfully with ${generatedJson.steps.length} steps. Writing to custom_pipelines.json...`,
+        message: `Parsed template suite successfully. Found \${templatesList.length} template(s).`,
         timestamp: new Date().toISOString()
       });
 
@@ -858,31 +887,95 @@ When this skill is activated:
         }
       }
 
-      const templateName = generatedJson.name || name || `${projectTitle} Template`;
-      const kebabName = templateName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      const templateType = `custom-${kebabName}`;
+      const processedTemplates: any[] = [];
 
-      const newPipeline = {
-        id: templateType,
-        name: templateName,
-        description: generatedJson.description || description || `Generated template evolved from workType: ${workType}`,
-        workType,
-        steps: generatedJson.steps.map((s: any) => ({
-          label: s.label,
-          phase: s.phase || 'planning',
-          taskType: s.taskType || 'general',
-          prompt: s.prompt || '',
-        }))
-      };
+      for (const t of templatesList) {
+        const tName = t.name || `\${projectTitle} Template`;
+        const kebabName = tName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        let templateType = t.id || `custom-\${kebabName}`;
+        if (!templateType.startsWith('custom-')) {
+          templateType = `custom-\${templateType}`;
+        }
 
-      pipelines = pipelines.filter((p: any) => p.id !== templateType);
-      pipelines.push(newPipeline);
+        const newPipeline = {
+          id: templateType,
+          name: tName,
+          description: t.description || `Generated template evolved from workType: \${workType}`,
+          workType,
+          steps: (t.steps || []).map((s: any) => ({
+            label: s.label,
+            phase: s.phase || 'planning',
+            taskType: s.taskType || 'general',
+            prompt: s.prompt || '',
+          }))
+        };
 
+        // Filter out existing one with same ID
+        pipelines = pipelines.filter((p: any) => p.id !== templateType);
+        pipelines.push(newPipeline);
+        processedTemplates.push(newPipeline);
+
+        // Register primary skill playbook for this template
+        eventBus.emit('intelligent-evolve:log', {
+          message: `Creating skill playbook for template "\${tName}": "template-builder-\${kebabName}.md"...`,
+          timestamp: new Date().toISOString()
+        });
+
+        const skillName = `template-builder-\${kebabName}`;
+        const skillPath = join(skillDir, `\${skillName}.md`);
+        const now = new Date().toISOString();
+        const skillContent = `---
+name: \${skillName}
+service: \${workType}
+description: Skill dedicated to generating and maintaining the custom template \${templateType} (\${tName}).
+proposed_at: \${now}
+promoted_at: \${now}
+proposed_by: template-evolution
+status: installed
+applies_when:
+  kind: template-builder
+  fingerprint: \${templateType}
+---
+
+# Template Builder Skill: \${tName}
+
+This skill belongs to the domain \${workType} and is dedicated to generating and running templates for this domain.
+When this skill is activated:
+- Utilize the structure and prompt strategies defined in the \${tName} template.
+- Refine steps, parameters, and prompts to align with domain guidelines.
+- Self-improve the template over time based on execution observations.
+`;
+        await writeFile(skillPath, skillContent, 'utf-8');
+
+        // Assign skill to domain default skills
+        const domain = registry.get(workType);
+        if (domain) {
+          const defaultSkills = domain.defaultSkills || [];
+          const skillExists = defaultSkills.some(s => s.service === workType && s.name === skillName);
+          if (!skillExists) {
+            const updatedSkills = [...defaultSkills, { service: workType, name: skillName }];
+            registry.update(workType, { defaultSkills: updatedSkills });
+            log.info(`Assigned skill \${workType}/\${skillName} to domain \${workType}`);
+          }
+        }
+
+        eventBus.emit('intelligent-evolve:log', {
+          message: `Registered template builder skill: "\${skillName}"`,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Save all updated pipelines back to custom_pipelines.json
       const configDir = join(configPath, '..');
       if (!existsSync(configDir)) {
         await mkdir(configDir, { recursive: true });
       }
       await writeFile(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
+
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Saved all templates to custom_pipelines.json`,
+        timestamp: new Date().toISOString()
+      });
 
       // Process recommended skills
       if (generatedJson.recommendedNewSkills && Array.isArray(generatedJson.recommendedNewSkills)) {
@@ -890,11 +983,11 @@ When this skill is activated:
           if (!skill.name || !skill.body) continue;
           
           eventBus.emit('intelligent-evolve:log', {
-            message: `Synthesizing missing skill playbook: "${skill.name}"...`,
+            message: `Synthesizing missing skill playbook: "\${skill.name}"...`,
             timestamp: new Date().toISOString()
           });
           
-          const skPath = join(workspaceDir, 'skills-installed', workType, `${skill.name}.md`);
+          const skPath = join(workspaceDir, 'skills-installed', workType, `\${skill.name}.md`);
           // Write skill body
           await writeFile(skPath, skill.body.trim(), 'utf-8');
           
@@ -906,57 +999,14 @@ When this skill is activated:
             if (!skillExists) {
               const updatedSkills = [...defaultSkills, { service: workType, name: skill.name }];
               registry.update(workType, { defaultSkills: updatedSkills });
-              log.info(`Assigned new custom skill ${workType}/${skill.name} to domain ${workType}`);
+              log.info(`Assigned new custom skill \${workType}/\${skill.name} to domain \${workType}`);
             }
           }
           
           eventBus.emit('intelligent-evolve:log', {
-            message: `Registered new custom skill playbook: "${skill.name}"`,
+            message: `Registered new custom skill playbook: "\${skill.name}"`,
             timestamp: new Date().toISOString()
           });
-        }
-      }
-
-      // Register primary skill playbook
-      eventBus.emit('intelligent-evolve:log', {
-        message: `Creating skill playbook skill for template: "template-builder-${kebabName}.md"...`,
-        timestamp: new Date().toISOString()
-      });
-
-      const skillName = `template-builder-${kebabName}`;
-      const skillPath = join(skillDir, `${skillName}.md`);
-      const now = new Date().toISOString();
-      const skillContent = `---
-name: ${skillName}
-service: ${workType}
-description: Skill dedicated to generating and maintaining the custom template ${templateType} (${templateName}).
-proposed_at: ${now}
-promoted_at: ${now}
-proposed_by: template-evolution
-status: installed
-applies_when:
-  kind: template-builder
-  fingerprint: ${templateType}
----
-
-# Template Builder Skill: ${templateName}
-
-This skill belongs to the domain ${workType} and is dedicated to generating and running templates for this domain.
-When this skill is activated:
-- Utilize the structure and prompt strategies defined in the ${templateName} template.
-- Refine steps, parameters, and prompts to align with domain guidelines.
-- Self-improve the template over time based on execution observations.
-`;
-      await writeFile(skillPath, skillContent, 'utf-8');
-
-      const domain = registry.get(workType);
-      if (domain) {
-        const defaultSkills = domain.defaultSkills || [];
-        const skillExists = defaultSkills.some(s => s.service === workType && s.name === skillName);
-        if (!skillExists) {
-          const updatedSkills = [...defaultSkills, { service: workType, name: skillName }];
-          registry.update(workType, { defaultSkills: updatedSkills });
-          log.info(`Assigned skill ${workType}/${skillName} to domain ${workType}`);
         }
       }
 
@@ -964,7 +1014,7 @@ When this skill is activated:
       if (generatedJson.workerResourceRecommendations) {
         const { suggestedWorkerCount, reason } = generatedJson.workerResourceRecommendations;
         eventBus.emit('intelligent-evolve:log', {
-          message: `[WORKER ALLOCATION RECOMMENDATION] Suggest assigning ${suggestedWorkerCount || 2} concurrent workers. Reason: ${reason || 'Based on template step analysis.'}`,
+          message: `[WORKER ALLOCATION RECOMMENDATION] Suggest assigning \${suggestedWorkerCount || 2} concurrent workers. Reason: \${reason || 'Based on template step analysis.'}`,
           timestamp: new Date().toISOString()
         });
       }
@@ -983,17 +1033,25 @@ When this skill is activated:
         timestamp: new Date().toISOString()
       });
 
+      // Backwards compatible response parameters (first template in list)
+      const primaryTemplate = processedTemplates[0];
+      const primarySkillName = `template-builder-\${primaryTemplate.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`;
+
       res.json({
         success: true,
-        templateType,
-        templateName: newPipeline.name,
+        templateType: primaryTemplate.id,
+        templateName: primaryTemplate.name,
         domainId: workType,
-        skillName
+        skillName: primarySkillName,
+        templates: processedTemplates.map(pt => ({
+          templateType: pt.id,
+          templateName: pt.name
+        }))
       });
     } catch (err: any) {
       log.error('Failed to intelligently evolve project to template', { error: err.message });
       eventBus.emit('intelligent-evolve:log', {
-        message: `ERROR: ${err.message}`,
+        message: `ERROR: \${err.message}`,
         timestamp: new Date().toISOString()
       });
       res.status(500).json({ error: err.message });
