@@ -325,7 +325,9 @@ test('prompt-builder uses slice(-300) not slice(-200) for chapter echo', () => {
 // ═══════════════════════════════════════════════════════════
 console.log('\n─── Fix: Step-runner persona routing ───');
 
-const stepRunnerSource = readFileSync(join(projectRoot, 'projects/src/step-runner.ts'), 'utf8');
+const stepRunnerSource = readFileSync(join(projectRoot, 'projects/src/step-runner.ts'), 'utf8') + '\n' +
+                         readFileSync(join(projectRoot, 'projects/src/runners/StandardLlmRunner.ts'), 'utf8') + '\n' +
+                         readFileSync(join(projectRoot, 'projects/src/runners/CompileRunner.ts'), 'utf8');
 
 test('planningTypes includes outline', () => {
   assert(stepRunnerSource.includes("'outline', 'voice_profile'") || stepRunnerSource.includes("'outline'"), 'outline must be in planningTypes');
@@ -354,7 +356,7 @@ test('GPU label is dynamic (not hardcoded Writer 5090)', () => {
 });
 
 test('Export step runs sanitizer', () => {
-  assert(stepRunnerSource.includes('this.sanitizer.sanitize(result)'), 'Sanitizer must be called on export result');
+  assert(stepRunnerSource.includes('sanitizer.sanitize(result)'), 'Sanitizer must be called on export result');
 });
 
 test('book_bible system prompt uses positive framing', () => {

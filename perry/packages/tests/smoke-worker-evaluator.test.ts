@@ -58,6 +58,34 @@ const mockMcpClient = {
   executeTool: () => ({}),
 } as any;
 
+function mockStateStoreDb(store: any, getCallback: (sql: string) => any) {
+  const runStub = () => ({ changes: 1, lastInsertRowid: 1 });
+  const allStub = () => [];
+  store.db = {
+    prepare: (sql: string) => {
+      if (sql.includes('task_pool') || sql.includes('SELECT status, result')) {
+        return {
+          get: getCallback,
+          run: runStub,
+          all: allStub,
+        };
+      }
+      return {
+        run: runStub,
+        all: allStub,
+        get: () => null,
+      };
+    },
+    transaction: (fn: Function) => {
+      const runTx = () => fn();
+      runTx.immediate = () => fn();
+      runTx.deferred = () => fn();
+      runTx.exclusive = () => fn();
+      return runTx;
+    },
+  } as any;
+}
+
 console.log('\n─── Worker-Evaluator Loop Smoke Test ───');
 
 await test('Worker-Evaluator validation success with resilient JSON parsing', async () => {
@@ -75,18 +103,10 @@ await test('Worker-Evaluator validation success with resilient JSON parsing', as
     store.enqueueTasks = () => ['task-123'];
 
     // Mock the DB preparation & response for polling task_pool (with Markdown ticks + trailing comma JSON)
-    store.db = {
-      prepare: (sql: string) => {
-        return {
-          get: (id: string) => {
-            return {
-              status: 'done',
-              result: '```json\n{\n  "approved": true,\n}\n```',
-            };
-          },
-        };
-      },
-    } as any;
+    mockStateStoreDb(store, () => ({
+      status: 'done',
+      result: '```json\n{\n  "approved": true,\n}\n```',
+    }));
 
     // Mock router
     let completeCalls = 0;
@@ -191,19 +211,13 @@ await test('Worker-Evaluator state persistence across attempts', async () => {
 
     // Mock evaluator to reject first attempt, but approve on second
     let evalCalls = 0;
-    store.db = {
-      prepare: (sql: string) => {
-        return {
-          get: (id: string) => {
-            evalCalls++;
-            return {
-              status: 'done',
-              result: JSON.stringify({ approved: evalCalls > 1 }),
-            };
-          },
-        };
-      },
-    } as any;
+    mockStateStoreDb(store, () => {
+      evalCalls++;
+      return {
+        status: 'done',
+        result: JSON.stringify({ approved: evalCalls > 1 }),
+      };
+    });
 
     // Mock router
     const mockRouter = {
@@ -300,18 +314,10 @@ await test('Worker-Evaluator step-level token budget enforcement', async () => {
     store.enqueueTasks = () => ['task-123'];
 
     // Mock evaluator to always reject (if we get there)
-    store.db = {
-      prepare: (sql: string) => {
-        return {
-          get: (id: string) => {
-            return {
-              status: 'done',
-              result: JSON.stringify({ approved: false, failureLogs: 'Fails.' }),
-            };
-          },
-        };
-      },
-    } as any;
+    mockStateStoreDb(store, () => ({
+      status: 'done',
+      result: JSON.stringify({ approved: false, failureLogs: 'Fails.' }),
+    }));
 
     // Mock router to return a massive token usage
     const mockRouter = {
@@ -412,18 +418,10 @@ await test('Worker-Evaluator fallback strategy - switch provider', async () => {
     store.enqueueTasks = () => ['task-123'];
 
     // Mock evaluator to always reject
-    store.db = {
-      prepare: (sql: string) => {
-        return {
-          get: (id: string) => {
-            return {
-              status: 'done',
-              result: JSON.stringify({ approved: false, failureLogs: 'Formatting error.' }),
-            };
-          },
-        };
-      },
-    } as any;
+    mockStateStoreDb(store, () => ({
+      status: 'done',
+      result: JSON.stringify({ approved: false, failureLogs: 'Formatting error.' }),
+    }));
 
     // Mock router
     const mockRouter = {
