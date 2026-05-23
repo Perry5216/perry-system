@@ -860,7 +860,98 @@ export function DomainsPanel() {
       
       // Refresh domain list
       refresh();
-      cancelForm();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setIsProvisioningTeam(false);
+    }
+  }
+
+  async function provisionEverything() {
+    if (!assessmentResults || !assessmentResults.domainAnalysis || !assessmentResults.domainAnalysis.suggestedTeamRoles) return;
+    try {
+      setIsProvisioningTeam(true);
+      setError(null);
+      
+      // 1. Save or Update the domain definition first so it exists in the registry!
+      const isEdit = mode === 'edit' && editingId;
+      const url = isEdit ? `/api/domains/${editingId}` : '/api/domains';
+      const method = isEdit ? 'PATCH' : 'POST';
+      const payload = {
+        ...draft,
+        allowedMcpServers: draft.allowedMcpServers === undefined ? null : draft.allowedMcpServers
+      };
+      const r = await fetch(url, {
+        method,
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+        throw new Error(err.error || 'Failed to save domain definition before provisioning');
+      }
+
+      // 2. Call the provision-team API to create agents, souls, and register MCP servers
+      const provResponse = await fetch('/api/domains/provision-team', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domainId: draft.id,
+          teamRoles: assessmentResults.domainAnalysis.suggestedTeamRoles,
+          recommendedAbilities: assessmentResults.recommendedSkills || [],
+          suggestedNewAbilities: assessmentResults.suggestedNewSkills || [],
+          recommendedMcpServers: assessmentResults.domainAnalysis.requiredMcpServers || [],
+        }),
+      });
+
+      if (!provResponse.ok) {
+        const errData = await provResponse.json().catch(() => ({ error: `HTTP ${provResponse.status}` }));
+        throw new Error(errData.error || 'Failed to provision team');
+      }
+
+      const provData = await provResponse.json();
+
+      // 3. Automatically install all suggested new bespoke skills/playbooks
+      if (assessmentResults.suggestedNewSkills && assessmentResults.suggestedNewSkills.length > 0) {
+        for (const s of assessmentResults.suggestedNewSkills) {
+          const installRes = await fetch('/api/domains/install-skill', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: s.name,
+              description: s.description,
+              service: 'worker',
+              body: s.body,
+            }),
+          });
+          if (installRes.ok) {
+            setInstalledSuggestedSkills(prev => ({ ...prev, [s.name]: true }));
+          }
+        }
+      }
+
+      // 4. Automatically enable all recommended existing skills in draft
+      const recSkills = assessmentResults.recommendedSkills;
+      if (recSkills && recSkills.length > 0) {
+        setDraft(d => {
+          const updatedSkills = [...d.defaultSkills];
+          for (const rec of recSkills) {
+            const skillObj = skills.find(s => s.name === rec.name);
+            if (skillObj && !updatedSkills.some(x => x.name === rec.name)) {
+              updatedSkills.push({ service: skillObj.service || 'worker', name: rec.name });
+            }
+          }
+          return { ...d, defaultSkills: updatedSkills };
+        });
+      }
+
+      alert(`Domain "${draft.label}" fully setup successfully!\nCreated agents:\n${provData.agentsCreated.join('\n')}\nSoul files initialized under workspace/souls/agents/\nAll bespoke skills generated & installed.`);
+      
+      // Refresh domain list & skills from backend so the rest of the UI knows about it
+      await refresh();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -2029,6 +2120,30 @@ export function DomainsPanel() {
                                   <Users size={12} color="#a78bfa" />
                                 )}
                                 {isProvisioningTeam ? 'Provisioning Domain Team...' : 'Provision Team & Souls'}
+                              </button>
+                              
+                              <button
+                                onClick={provisionEverything}
+                                disabled={isProvisioningTeam}
+                                style={{
+                                  background: 'rgba(16, 185, 129, 0.15)',
+                                  border: '1px solid #10b981',
+                                  borderRadius: 4,
+                                  color: '#f3f4f6',
+                                  padding: '6px 12px',
+                                  fontSize: '0.68rem',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                {isProvisioningTeam ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : (
+                                  <Sparkles size={12} color="#10b981" />
+                                )}
+                                {isProvisioningTeam ? 'Setting up everything...' : 'Provision Everything (One-Click)'}
                               </button>
                             </div>
 
