@@ -80,7 +80,7 @@ interface McpServerInfo {
   tools: McpTool[];
 }
 
-const AVAILABLE_PANELS = ['projects', 'workers', 'trajectories', 'analytics', 'models', 'self-learning', 'pens'];
+const AVAILABLE_PANELS = ['projects', 'workers', 'trajectories', 'analytics', 'models', 'self-learning', 'pens', 'agent', 'souls'];
 const KNOWN_SERVICES = ['worker', 'audit', 'director', 'gc', 'prompt-builder', 'scout', 'trainer'];
 
 const PRESET_COLORS = [

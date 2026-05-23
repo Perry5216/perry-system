@@ -782,6 +782,11 @@ When this skill is activated:
         ``,
         `Determine if additional custom skills/playbooks should be created to help the AI perform specific steps in these templates successfully. If so, define them in the 'recommendedNewSkills' list.`,
         ``,
+        `Agent & Soul Gap Analysis:`,
+        `Evaluate if new specialized agents or characters/souls (pen names) are needed to execute the steps in this template suite successfully.`,
+        `If new agents are needed, define them in the 'recommendedNewAgents' list.`,
+        `If new souls (pen names) are needed, define them in the 'recommendedNewSouls' list.`,
+        ``,
         `Compute Worker Resource Recommendations:`,
         `Evaluate the complexity of this pipeline template suite. Does it require more parallel workers, or special routing to run efficiently? Recommend worker allocations in 'workerResourceRecommendations'.`,
         ``,
@@ -807,6 +812,27 @@ When this skill is activated:
         `      "name": "skill-name-kebab-case",`,
         `      "description": "Short description of the skill and why it's needed",`,
         `      "body": "Complete Markdown skill playbook contents, including frontmatter block at the top containing name, service: \${workType}, and description, followed by detailed instructions."`,
+        `    }`,
+        `  ],`,
+        `  "recommendedNewAgents": [`,
+        `    {`,
+        `      "id": "\${workType}.agent-name-kebab-case",`,
+        `      "label": "Agent Display Name",`,
+        `      "description": "Short description of the agent's role",`,
+        `      "systemPrompt": "Complete system prompt instructing this agent on what to do, its style, guidelines, and constraints",`,
+        `      "modelBinding": {`,
+        `        "provider": "workers | librarian | writer"`,
+        `      }`,
+        `    }`,
+        `  ],`,
+        `  "recommendedNewSouls": [`,
+        `    {`,
+        `      "slug": "soul-name-kebab-case",`,
+        `      "displayName": "Soul/Pen Display Name",`,
+        `      "genreOrSeries": "Genre or campaign context",`,
+        `      "voiceTagline": "A unique voice/tone tagline",`,
+        `      "soulMarkdown": "Markdown content for SOUL.md styling guidelines",`,
+        `      "lessonsMarkdown": "Markdown content for LESSONS.md rules"`,
         `    }`,
         `  ],`,
         `  "workerResourceRecommendations": {`,
@@ -1005,6 +1031,122 @@ When this skill is activated:
           
           eventBus.emit('intelligent-evolve:log', {
             message: `Registered new custom skill playbook: "\${skill.name}"`,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      // Process recommended agents
+      if (generatedJson.recommendedNewAgents && Array.isArray(generatedJson.recommendedNewAgents)) {
+        const customAgentsPath = join(workspaceDir, '.config', 'custom_agents.json');
+        let customAgents: Record<string, any> = {};
+        if (existsSync(customAgentsPath)) {
+          try {
+            const raw = await readFile(customAgentsPath, 'utf8');
+            customAgents = JSON.parse(raw);
+          } catch (e) {
+            log.error('Failed to parse custom_agents.json', { error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+
+        for (const agent of generatedJson.recommendedNewAgents) {
+          if (!agent.id || !agent.label || !agent.systemPrompt) continue;
+          
+          eventBus.emit('intelligent-evolve:log', {
+            message: `Synthesizing and registering new agent: "\${agent.label}" (\${agent.id})...`,
+            timestamp: new Date().toISOString()
+          });
+
+          const finalId = agent.id.includes('.') ? agent.id : `\${workType}.\${agent.id}`;
+          const finalDomain = agent.domain || workType;
+
+          customAgents[finalId] = {
+            id: finalId,
+            domain: finalDomain,
+            label: agent.label,
+            description: agent.description || `Custom agent for \${workType} domain`,
+            systemPrompt: agent.systemPrompt,
+            modelBinding: agent.modelBinding || { provider: 'workers' },
+            toolACL: agent.toolACL || null,
+            outputFormat: agent.outputFormat || 'free',
+            compression: agent.compression || 'low',
+            timeoutMs: agent.timeoutMs || 5 * 60_000,
+            canDelegate: agent.canDelegate !== false
+          };
+
+          eventBus.emit('intelligent-evolve:log', {
+            message: `Registered custom agent: "\${agent.label}"`,
+            timestamp: new Date().toISOString()
+          });
+        }
+
+        const configDir = join(customAgentsPath, '..');
+        if (!existsSync(configDir)) {
+          await mkdir(configDir, { recursive: true });
+        }
+        await writeFile(customAgentsPath, JSON.stringify(customAgents, null, 2), 'utf8');
+      }
+
+      // Process recommended souls
+      if (generatedJson.recommendedNewSouls && Array.isArray(generatedJson.recommendedNewSouls)) {
+        const db = (stateStore as any).db;
+        for (const soul of generatedJson.recommendedNewSouls) {
+          const { slug, displayName, genreOrSeries, voiceTagline, soulMarkdown, lessonsMarkdown } = soul;
+          if (!slug || !displayName) continue;
+
+          eventBus.emit('intelligent-evolve:log', {
+            message: `Synthesizing and registering new character soul/pen: "\${displayName}" (\${slug})...`,
+            timestamp: new Date().toISOString()
+          });
+
+          // Insert into database if db is available
+          if (db) {
+            try {
+              const existing = db.prepare('SELECT 1 FROM pen_names WHERE slug = ?').get(slug);
+              if (!existing) {
+                const now = new Date().toISOString();
+                const defaultData = JSON.stringify({ antiPatterns: [] });
+                db.prepare(`
+                  INSERT INTO pen_names (slug, display_name, genre_or_series, voice_tagline, base_model, created_at, data)
+                  VALUES (?, ?, ?, ?, ?, ?, ?)
+                `).run(slug, displayName, genreOrSeries || null, voiceTagline || null, 'workers', now, defaultData);
+              }
+            } catch (dbErr: any) {
+              log.error('Failed to insert pen name into database', { slug, error: dbErr.message });
+            }
+          }
+
+          // Create directories & initial SOUL.md / LESSONS.md files on disk
+          const targetDir = join(workspaceDir, 'pens', slug);
+          await mkdir(targetDir, { recursive: true });
+
+          const defaultSoul = soulMarkdown || [
+            `# SOUL: \${displayName}`,
+            ``,
+            `## Style DNA`,
+            `- Tone: Natural, engaging, human.`,
+            `- Vocabulary: Precise, avoids clichés.`,
+            `- Pacing: Measured, showing rather than telling.`,
+            ``,
+            `## Voice Tagline`,
+            `_\${voiceTagline || 'No tagline configured'}_`,
+            ``,
+          ].join('\n');
+
+          const defaultLessons = lessonsMarkdown || [
+            `# LESSONS: \${displayName}`,
+            ``,
+            `## Core Principles`,
+            `1. Keep prose clean and grounded.`,
+            `2. Avoid repetitive sentence structures.`,
+            ``,
+          ].join('\n');
+
+          await writeFile(join(targetDir, 'SOUL.md'), defaultSoul, 'utf-8');
+          await writeFile(join(targetDir, 'LESSONS.md'), defaultLessons, 'utf-8');
+
+          eventBus.emit('intelligent-evolve:log', {
+            message: `Registered and configured files for custom soul: "\${displayName}"`,
             timestamp: new Date().toISOString()
           });
         }

@@ -19,6 +19,8 @@
  */
 
 import type { AgentDefinition } from '@perry/core';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 
 export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
   // ──────────────────────────────────────────────────────────────────
@@ -373,15 +375,44 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
   },
 };
 
+function getCustomAgents(): Record<string, AgentDefinition> {
+  const wsDir = process.env.WORKSPACE_DIR || '/app/workspace';
+  const customPath = join(wsDir, '.config', 'custom_agents.json');
+  if (existsSync(customPath)) {
+    try {
+      const raw = readFileSync(customPath, 'utf8');
+      const custom = JSON.parse(raw);
+      const out: Record<string, AgentDefinition> = {};
+      for (const [key, val] of Object.entries(custom)) {
+        out[key] = val as AgentDefinition;
+      }
+      return out;
+    } catch (e) {
+      // ignore
+    }
+  }
+  return {};
+}
+
 /** Get an agent definition or null if not registered. */
 export function getAgent(id: string): AgentDefinition | null {
-  return AGENT_REGISTRY[id] || null;
+  const custom = getCustomAgents();
+  return custom[id] || AGENT_REGISTRY[id] || null;
 }
 
 /** List all registered agents, optionally filtered by domain. */
 export function listAgents(domain?: AgentDefinition['domain']): AgentDefinition[] {
-  const all = Object.values(AGENT_REGISTRY);
-  return domain ? all.filter(a => a.domain === domain) : all;
+  const custom = getCustomAgents();
+  const all = [...Object.values(AGENT_REGISTRY), ...Object.values(custom)];
+  
+  // Deduplicate by ID
+  const uniqueMap = new Map<string, AgentDefinition>();
+  for (const a of all) {
+    uniqueMap.set(a.id, a);
+  }
+  const uniqueList = Array.from(uniqueMap.values());
+  
+  return domain ? uniqueList.filter(a => a.domain === domain) : uniqueList;
 }
 
 /** List the agents available for delegation from a given parent agent.

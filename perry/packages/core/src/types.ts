@@ -336,7 +336,7 @@ export interface EventMap {
  * tool ACL, default model bindings, and memory namespace. The
  * core domains (code, email, hacking, meta) extend the framework.
  */
-export type AgentDomain = 'code' | 'email' | 'hacking' | 'meta' | 'books' | 'dnd';
+export type AgentDomain = 'code' | 'email' | 'hacking' | 'meta' | 'books' | 'dnd' | string;
 
 /**
  * Map a ProjectType to its domain. Every project type belongs to exactly
