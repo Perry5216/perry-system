@@ -57,6 +57,37 @@ export function ModelsPanel() {
   const [pulling, setPulling] = useState<{ name: string; endpoint: string; progress: string } | null>(null);
   const [pullInput, setPullInput] = useState({ name: '', endpoint: 'librarian' as 'writer' | 'librarian' });
   const [error, setError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<{ isSyncing: boolean; tasks: any[] } | null>(null);
+  const [isSyncStarting, setIsSyncStarting] = useState<boolean>(false);
+
+  const fetchSyncStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/models/sync/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setSyncStatus(data);
+      }
+    } catch (e: any) {
+      console.error('Failed to fetch sync status:', e);
+    }
+  };
+
+  const startSync = async () => {
+    try {
+      setIsSyncStarting(true);
+      const res = await fetch(`${API_BASE}/models/sync/start`, { method: 'POST' });
+      if (res.ok) {
+        fetchSyncStatus();
+      } else {
+        const data = await res.json();
+        alert(`Sync failed to start: ${data.error || 'unknown error'}`);
+      }
+    } catch (e: any) {
+      alert(`Sync error: ${e.message}`);
+    } finally {
+      setIsSyncStarting(false);
+    }
+  };
 
   const refresh = () => {
     Promise.all([
@@ -66,8 +97,22 @@ export function ModelsPanel() {
       setEndpoints(m.endpoints || []);
       setSuggestions(s.suggestions || []);
     }).catch(e => setError(e.message));
+    fetchSyncStatus();
   };
+
   useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    let interval: any;
+    if (syncStatus?.isSyncing) {
+      interval = setInterval(() => {
+        fetchSyncStatus();
+      }, 2000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [syncStatus?.isSyncing]);
 
   const handleDelete = async (endpoint: string, name: string) => {
     if (!confirm(`Delete model "${name}" from ${endpoint}? This frees disk space but can be re-pulled.`)) return;
@@ -149,6 +194,91 @@ export function ModelsPanel() {
       />
 
       {error && <div style={{ padding: 16, color: '#FF6B6B' }}>{error}</div>}
+
+      {/* System Model Sync Section */}
+      {syncStatus && (
+        <div style={{
+          margin: '0 16px 16px 16px', padding: '16px', borderRadius: '8px',
+          background: 'rgba(16,185,129,0.04)', border: '1px solid rgba(16,185,129,0.2)',
+          display: 'flex', flexDirection: 'column', gap: '12px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+            <div>
+              <strong style={{ color: '#10B981', fontSize: '0.85rem', fontFamily: 'monospace', letterSpacing: '0.05em' }}>
+                PERRY SYSTEM MODEL SYNC
+              </strong>
+              <div style={{ fontSize: '0.7rem', color: '#9BA4B5', marginTop: '2px' }}>
+                Ensures all models required for text generation, embeddings, and ComfyUI image generation workflows are downloaded.
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={fetchSyncStatus}
+                disabled={syncStatus.isSyncing}
+                style={{
+                  padding: '6px 12px', fontSize: '0.7rem', fontFamily: 'monospace',
+                  background: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '4px', cursor: 'pointer'
+                }}
+              >
+                REFRESH STATUS
+              </button>
+              {syncStatus.tasks.some(t => t.status === 'pending') && (
+                <button
+                  onClick={startSync}
+                  disabled={syncStatus.isSyncing || isSyncStarting}
+                  style={{
+                    padding: '6px 16px', fontSize: '0.75rem', fontFamily: 'monospace',
+                    background: 'rgba(16,185,129,0.15)', color: '#10B981', border: '1px solid rgba(16,185,129,0.4)',
+                    borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'
+                  }}
+                >
+                  {syncStatus.isSyncing ? 'SYNCING MODELS…' : 'PULL ALL REQUIRED MODELS'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px',
+            background: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)'
+          }}>
+            {syncStatus.tasks.map((task) => (
+              <div key={task.id} style={{
+                padding: '10px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.04)',
+                borderRadius: '4px', display: 'flex', flexDirection: 'column', gap: '6px', fontFamily: 'monospace', fontSize: '0.7rem'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{
+                    color: task.type === 'comfyui' ? '#EC4899' : task.endpoint === 'writer' ? '#A855F7' : '#22D3EE',
+                    fontWeight: 'bold', fontSize: '0.6rem', textTransform: 'uppercase'
+                  }}>
+                    {task.type === 'comfyui' ? `ComfyUI // ${task.category}` : `Ollama // ${task.endpoint}`}
+                  </span>
+                  <span style={{
+                    color: task.status === 'completed' ? '#10B981' : task.status === 'downloading' ? '#EC4899' : '#EF4444',
+                    fontSize: '0.65rem'
+                  }}>
+                    {task.status === 'completed' ? '✓ Ready' : task.status === 'downloading' ? '⟳ Syncing' : '✗ Missing'}
+                  </span>
+                </div>
+                <div style={{ color: 'white', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {task.name}
+                </div>
+                {task.status === 'downloading' && (
+                  <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
+                    <div style={{ width: `${task.progress}%`, height: '100%', background: '#EC4899', transition: 'width 0.3s ease' }} />
+                  </div>
+                )}
+                <div style={{ color: '#9BA4B5', fontSize: '0.65rem', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>{task.sizeNote}</span>
+                  {task.status === 'downloading' && <span>{task.progress}%</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Active pull indicator */}
       {pulling && (

@@ -632,6 +632,7 @@ export function App() {
   const [evolveWorkersMode, setEvolveWorkersMode] = useState('smart');
   const [isEvolvingTemplate, setIsEvolvingTemplate] = useState(false);
   const [adminIntelligentWorkType, setAdminIntelligentWorkType] = useState<string>('dnd');
+  const [adminIntelligentTarget, setAdminIntelligentTarget] = useState<'workers' | 'gpu'>('workers');
   const [isIntelligentEnableSearch, setIntelligentEnableSearch] = useState<boolean>(true);
   const [isIntelligentlyEvolving, setIsIntelligentlyEvolving] = useState<boolean>(false);
   const [assessmentSessionId, setAssessmentSessionId] = useState<string | null>(null);
@@ -1549,6 +1550,7 @@ export function App() {
         body: JSON.stringify({
           workType: adminIntelligentWorkType,
           enableSearch: isIntelligentEnableSearch,
+          evolutionTarget: adminIntelligentTarget,
           workersMode: 'smart'
         })
       });
@@ -2066,6 +2068,25 @@ export function App() {
                         <option value="email">Email</option>
                         <option value="hacking">Hacking</option>
                         <option value="meta">Meta</option>
+                      </select>
+
+                      <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT COMPUTE SOURCE</label>
+                      <select
+                        value={adminIntelligentTarget}
+                        onChange={(e) => setAdminIntelligentTarget(e.target.value as any)}
+                        style={{
+                          width: '100%',
+                          padding: '0.4rem',
+                          borderRadius: '4px',
+                          border: '1px solid var(--panel-border)',
+                          background: 'var(--bg-main)',
+                          color: 'white',
+                          fontSize: '0.75rem',
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="workers">Workers (Cloud API - Claude/Gemini)</option>
+                        <option value="gpu">GPU (Local Ollama/Librarian)</option>
                       </select>
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: '0.25rem 0' }}>

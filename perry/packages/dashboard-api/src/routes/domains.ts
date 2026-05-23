@@ -473,7 +473,7 @@ When this skill is activated:
   // Intelligent template generator evaluating project + workType + web search
   router.post('/intelligent-evolve-project', async (req, res) => {
     try {
-      const { projectId, workType, name, description, workersMode, enableSearch } = req.body || {};
+      const { projectId, workType, name, description, workersMode, enableSearch, evolutionTarget } = req.body || {};
       if (!workType) {
         return res.status(400).json({ error: 'workType is required' });
       }
@@ -590,10 +590,46 @@ When this skill is activated:
         `Work Type: ${workType}`,
       ].join('\n');
 
-      log.info('Invoking AI Router to intelligently evolve workType to template', { workType, name, workersMode });
+      let targetProvider = 'gemini';
+      let selectedTarget = evolutionTarget || 'workers';
+
+      if (selectedTarget === 'gpu') {
+        if (aiRouter.getProvider('ollama')) {
+          targetProvider = 'ollama';
+        } else if (aiRouter.getProvider('librarian')) {
+          targetProvider = 'librarian';
+        } else {
+          log.warn('GPU target requested but local GPU providers are not initialized. Falling back to workers.');
+          selectedTarget = 'workers';
+        }
+      }
+
+      if (selectedTarget === 'workers') {
+        if (aiRouter.getProvider('gemini')) {
+          targetProvider = 'gemini';
+        } else if (aiRouter.getProvider('claude')) {
+          targetProvider = 'claude';
+        } else if (aiRouter.getProvider('deepseek')) {
+          targetProvider = 'deepseek';
+        } else if (aiRouter.getProvider('openai')) {
+          targetProvider = 'openai';
+        } else if (aiRouter.getProvider('openrouter')) {
+          targetProvider = 'openrouter';
+        } else {
+          // Absolute fallback
+          const active = aiRouter.getActiveProviders();
+          if (active.length > 0) {
+            targetProvider = active[0].id;
+          } else {
+            throw new Error('No active AI providers were found. Please configure Ollama or add an API key to the vault.');
+          }
+        }
+      }
+
+      log.info('Invoking AI Router to intelligently evolve workType to template', { workType, name, workersMode, targetProvider });
 
       const aiResponse = await aiRouter.complete({
-        provider: 'gemini',
+        provider: targetProvider,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
         maxTokens: 4096,

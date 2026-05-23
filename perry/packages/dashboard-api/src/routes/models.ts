@@ -20,6 +20,13 @@
 import { Router } from 'express';
 import type { Logger } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
+import { createWriteStream } from 'fs';
+import { mkdir } from 'fs/promises';
+import { join } from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execPromise = promisify(exec);
 
 interface OllamaEndpoint {
   id: 'writer' | 'librarian';
@@ -205,5 +212,287 @@ export function setupModelsRoutes(aiRouter: AIRouter, log: Logger) {
     });
   });
 
+  // ── Sync required models across Ollama and ComfyUI ──────────────────
+  router.get('/models/sync/status', async (req, res) => {
+    if (isSyncing) {
+      return res.json({ isSyncing, tasks: syncTasks });
+    }
+
+    const tasks: any[] = [];
+
+    // 1. Ollama Models
+    const writerUrl = process.env.OLLAMA_BASE_URL || aiRouter.config.get<string>('ai.ollama.endpoint', 'http://ollama:11434');
+    const librarianUrl = process.env.OLLAMA_LIBRARIAN_BASE_URL || aiRouter.config.get<string>('ai.ollama.librarianEndpoint', 'http://ollama-embeddings:11434');
+
+    let writerInstalled: string[] = [];
+    try {
+      const r = await fetch(`${writerUrl}/api/tags`);
+      if (r.ok) {
+        const data: any = await r.json();
+        writerInstalled = (data.models || []).map((m: any) => m.name);
+      }
+    } catch {}
+
+    let librarianInstalled: string[] = [];
+    try {
+      const r = await fetch(`${librarianUrl}/api/tags`);
+      if (r.ok) {
+        const data: any = await r.json();
+        librarianInstalled = (data.models || []).map((m: any) => m.name);
+      }
+    } catch {}
+
+    const reqWriterModels = Array.from(new Set([
+      aiRouter.config.get<string>('ai.ollama.model', 'hf.co/bartowski/magnum-32b-v2-GGUF:Q5_K_M'),
+      aiRouter.config.get<string>('ai.ollama.researcherModel', 'qwen3.6:27b'),
+      aiRouter.config.get<string>('ai.ollama.directorModel', 'qwen3:14b')
+    ].filter(Boolean)));
+
+    for (const model of reqWriterModels) {
+      const isInstalled = writerInstalled.some(m => m === model || m.startsWith(model.split(':')[0] + ':'));
+      tasks.push({
+        id: `ollama-writer-${model}`,
+        name: model,
+        type: 'ollama',
+        endpoint: 'writer',
+        endpointUrl: writerUrl,
+        status: isInstalled ? 'completed' : 'pending',
+        progress: isInstalled ? 100 : 0,
+        sizeNote: isInstalled ? '✓ Installed' : 'Pending download'
+      });
+    }
+
+    const reqLibrarianModels = Array.from(new Set([
+      aiRouter.config.get<string>('ai.ollama.librarianModel', 'gemma3:12b'),
+      aiRouter.config.get<string>('ai.ollama.embedModel', 'nomic-embed-text')
+    ].filter(Boolean)));
+
+    for (const model of reqLibrarianModels) {
+      const isInstalled = librarianInstalled.some(m => m === model || m.startsWith(model.split(':')[0] + ':'));
+      tasks.push({
+        id: `ollama-librarian-${model}`,
+        name: model,
+        type: 'ollama',
+        endpoint: 'librarian',
+        endpointUrl: librarianUrl,
+        status: isInstalled ? 'completed' : 'pending',
+        progress: isInstalled ? 100 : 0,
+        sizeNote: isInstalled ? '✓ Installed' : 'Pending download'
+      });
+    }
+
+    // 2. ComfyUI Models
+    let comfyCheckpoints: string[] = [];
+    let comfyUnets: string[] = [];
+    let comfyVaes: string[] = [];
+    let comfyClips: string[] = [];
+    let comfyLoras: string[] = [];
+    let comfyReachable = false;
+
+    const comfyUrl = process.env.COMFYUI_BASE_URL || 'http://comfyui:8188';
+    try {
+      const comfyRes = await fetch(`${comfyUrl}/object_info`);
+      if (comfyRes.ok) {
+        comfyReachable = true;
+        const data: any = await comfyRes.json();
+        comfyCheckpoints = data?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] || [];
+        comfyUnets = data?.UNETLoader?.input?.required?.unet_name?.[0] || [];
+        comfyVaes = data?.VAELoader?.input?.required?.vae_name?.[0] || [];
+        comfyClips = data?.DualCLIPLoader?.input?.required?.clip_name1?.[0] || [];
+        comfyLoras = data?.LoraLoader?.input?.required?.lora_name?.[0] || data?.LoraLoaderModelOnly?.input?.required?.lora_name?.[0] || [];
+      }
+    } catch {}
+
+    const comfyRequired = [
+      { name: 'flux1-dev.safetensors', category: 'unet', url: 'https://huggingface.co/lllyasviel/flux_decoders/resolve/main/flux1-dev.safetensors', list: comfyUnets },
+      { name: 'ae.safetensors', category: 'vae', url: 'https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors', list: comfyVaes },
+      { name: 'clip_l.safetensors', category: 'clip', url: 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors', list: comfyClips },
+      { name: 't5xxl_fp16.safetensors', category: 'clip', url: 'https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors', list: comfyClips },
+      { name: 'bookcover-redmond-fluxklein.safetensors', category: 'loras', url: 'https://huggingface.co/artificialguybr/BookCoverRedmond/resolve/main/BookCoverRedmond.safetensors', list: comfyLoras },
+      { name: 'v1-5-pruned-emaonly.safetensors', category: 'checkpoints', url: 'https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors', list: comfyCheckpoints }
+    ];
+
+    for (const item of comfyRequired) {
+      const isInstalled = comfyReachable && item.list.includes(item.name);
+      tasks.push({
+        id: `comfyui-${item.category}-${item.name}`,
+        name: item.name,
+        type: 'comfyui',
+        endpoint: 'comfyui',
+        category: item.category,
+        url: item.url,
+        status: isInstalled ? 'completed' : comfyReachable ? 'pending' : 'failed',
+        progress: isInstalled ? 100 : 0,
+        sizeNote: isInstalled ? '✓ Installed' : comfyReachable ? 'Pending download' : '⚠ ComfyUI unreachable'
+      });
+    }
+
+    syncTasks = tasks;
+    res.json({ isSyncing, tasks: syncTasks });
+  });
+
+  router.post('/models/sync/start', async (req, res) => {
+    if (isSyncing) {
+      return res.status(400).json({ error: 'Sync already in progress' });
+    }
+
+    const pending = syncTasks.filter(t => t.status === 'pending');
+    if (pending.length === 0) {
+      return res.json({ message: 'All models are already installed' });
+    }
+
+    isSyncing = true;
+    res.json({ message: 'Sync started', tasksCount: pending.length });
+
+    (async () => {
+      for (const task of pending) {
+        try {
+          if (task.type === 'ollama') {
+            await pullOllamaModel(task.endpointUrl, task.name, task, log);
+          } else if (task.type === 'comfyui') {
+            const stageFileName = `stage_${task.category}_${task.name}`;
+            await downloadComfyUIModel(task.url, stageFileName, task.category, task.name, task, log);
+          }
+        } catch (err: any) {
+          task.status = 'failed';
+          task.error = err.message;
+          task.sizeNote = `⚠ Error: ${err.message}`;
+          log.error('Model sync task failed', { taskId: task.id, error: err.message });
+        }
+      }
+      isSyncing = false;
+    })();
+  });
+
   return router;
+}
+
+let syncTasks: any[] = [];
+let isSyncing = false;
+
+function bytes(n: number): string {
+  if (!n) return '?';
+  const gb = n / 1e9;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(n / 1e6).toFixed(0)} MB`;
+}
+
+async function downloadComfyUIModel(
+  url: string,
+  stageFileName: string,
+  destCategory: string,
+  destFileName: string,
+  task: any,
+  log: Logger
+) {
+  const stageDir = '/app/workspace/comfyui-output';
+  const stageFilePath = join(stageDir, stageFileName);
+
+  await mkdir(stageDir, { recursive: true });
+
+  log.info(`Starting download for ComfyUI model: ${destFileName} from ${url}`);
+  task.status = 'downloading';
+  task.progress = 0;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    const contentLength = response.headers.get('content-length');
+    const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
+
+    const fileStream = createWriteStream(stageFilePath);
+    
+    // Using response.body readable stream reader to download
+    const reader = response.body!.getReader();
+    let downloadedBytes = 0;
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      fileStream.write(value);
+      downloadedBytes += value.length;
+      if (totalBytes > 0) {
+        task.progress = Math.round((downloadedBytes / totalBytes) * 100);
+        task.sizeNote = `${(downloadedBytes / 1e9).toFixed(2)} GB / ${(totalBytes / 1e9).toFixed(2)} GB`;
+      } else {
+        task.sizeNote = `${(downloadedBytes / 1e9).toFixed(2)} GB`;
+      }
+    }
+    fileStream.end();
+
+    log.info(`Download completed for ${destFileName}, staging moving to ComfyUI`);
+    task.progress = 100;
+    task.sizeNote = 'Moving model to destination folder…';
+
+    // Ensure destination directory exists in ComfyUI
+    await execPromise(`docker exec comfyui mkdir -p /root/ComfyUI/models/${destCategory}/`);
+
+    // Move from output to destination folder
+    await execPromise(`docker exec comfyui mv /root/ComfyUI/output/${stageFileName} /root/ComfyUI/models/${destCategory}/${destFileName}`);
+
+    task.status = 'completed';
+    task.sizeNote = '✓ Complete';
+    log.info(`Successfully moved ComfyUI model ${destFileName} to /root/ComfyUI/models/${destCategory}/`);
+  } catch (err: any) {
+    log.error(`Failed to download ComfyUI model ${destFileName}`, { error: err.message });
+    task.status = 'failed';
+    task.error = err.message;
+    task.sizeNote = `⚠ Error: ${err.message}`;
+  }
+}
+
+async function pullOllamaModel(
+  endpointUrl: string,
+  modelName: string,
+  task: any,
+  log: Logger
+) {
+  log.info(`Starting pull for Ollama model: ${modelName} on ${endpointUrl}`);
+  task.status = 'downloading';
+  task.progress = 0;
+
+  try {
+    const r = await fetch(`${endpointUrl}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: modelName, stream: true }),
+    });
+
+    if (!r.ok || !r.body) throw new Error(`Ollama pull failed: HTTP ${r.status}`);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.status === 'downloading' || parsed.status === 'pulling manifest') {
+            if (parsed.completed && parsed.total) {
+              task.progress = Math.round((parsed.completed / parsed.total) * 100);
+              task.sizeNote = `${(parsed.completed / 1e9).toFixed(2)} GB / ${(parsed.total / 1e9).toFixed(2)} GB`;
+            } else {
+              task.sizeNote = parsed.status;
+            }
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    task.status = 'completed';
+    task.progress = 100;
+    task.sizeNote = '✓ Complete';
+    log.info(`Successfully pulled Ollama model: ${modelName}`);
+  } catch (err: any) {
+    log.error(`Failed to pull Ollama model ${modelName}`, { error: err.message });
+    task.status = 'failed';
+    task.error = err.message;
+    task.sizeNote = `⚠ Error: ${err.message}`;
+  }
 }
