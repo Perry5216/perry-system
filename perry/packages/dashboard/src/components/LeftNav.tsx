@@ -118,33 +118,51 @@ export function LeftNav({
       backdropFilter: 'blur(16px)',
       boxShadow: '4px 0 24px rgba(0, 0, 0, 0.6), 1px 0 0 rgba(34, 211, 238, 0.05)',
       display: 'flex', flexDirection: 'column',
-      padding: '16px 0',
-      gap: 8,
+      padding: '16px 0 8px 0',
       zIndex: 80,
       fontFamily: 'var(--font-mono)',
+      justifyContent: 'space-between',
     }}>
-      {sections.map((section, sIdx) => (
-        <div key={sIdx} style={{ display: 'flex', flexDirection: 'column' }}>
-          {section.label && !collapsed && (
-            <div style={{
-              padding: '12px 14px 4px',
-              fontSize: '0.55rem',
-              fontWeight: 700,
-              letterSpacing: '0.18em',
-              textTransform: 'uppercase',
-              color: 'rgba(34, 211, 238, 0.5)',
-              textAlign: 'center',
-            }}>
-              {section.label}
-            </div>
-          )}
-          {section.items.map(item => <NavButton key={item.key} item={item} collapsed={collapsed} />)}
-          {sIdx < sections.length - 1 && (
-            <div style={{ margin: '6px 18px', height: 1, background: 'rgba(34, 211, 238, 0.1)' }} />
-          )}
-        </div>
-      ))}
-      <div style={{ flex: 1 }} />
+      {/* Scrollable sections list */}
+      <div style={{
+        flex: 1,
+        overflowY: 'auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        paddingBottom: 8,
+        scrollbarWidth: 'none', // Firefox
+        msOverflowStyle: 'none', // IE 10+
+      }}>
+        <style dangerouslySetInnerHTML={{__html: `
+          div::-webkit-scrollbar {
+            display: none;
+          }
+        `}} />
+        {sections.map((section, sIdx) => (
+          <div key={sIdx} style={{ display: 'flex', flexDirection: 'column' }}>
+            {section.label && !collapsed && (
+              <div style={{
+                padding: '12px 14px 4px',
+                fontSize: '0.55rem',
+                fontWeight: 700,
+                letterSpacing: '0.18em',
+                textTransform: 'uppercase',
+                color: 'rgba(34, 211, 238, 0.5)',
+                textAlign: 'center',
+              }}>
+                {section.label}
+              </div>
+            )}
+            {section.items.map(item => <NavButton key={item.key} item={item} collapsed={collapsed} />)}
+            {sIdx < sections.length - 1 && (
+              <div style={{ margin: '6px 18px', height: 1, background: 'rgba(34, 211, 238, 0.1)' }} />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Pinned collapse toggle */}
       <button
         onClick={() => setCollapsed(c => !c)}
         title={collapsed ? 'Expand nav' : 'Collapse nav'}
@@ -163,6 +181,7 @@ export function LeftNav({
           fontFamily: 'inherit',
           fontSize: '0.7rem',
           letterSpacing: '0.05em',
+          flexShrink: 0,
         }}
         onMouseEnter={(e: any) => { e.currentTarget.style.background = 'rgba(34,211,238,0.06)'; e.currentTarget.style.color = 'var(--secondary)'; }}
         onMouseLeave={(e: any) => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; e.currentTarget.style.color = 'var(--text-muted)'; }}

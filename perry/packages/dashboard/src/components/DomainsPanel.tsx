@@ -203,6 +203,19 @@ export function DomainsPanel() {
   const [researchProgress, setResearchProgress] = useState<number>(0);
   const [isResearching, setIsResearching] = useState<boolean>(false);
 
+  const [expandedDomainIds, setExpandedDomainIds] = useState<Set<string>>(new Set());
+  const toggleDomainExpanded = (id: string) => {
+    setExpandedDomainIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   // Playbook Assessment states
   const [assessmentResults, setAssessmentResults] = useState<{
     domainAnalysis?: {
@@ -2291,7 +2304,32 @@ export function DomainsPanel() {
                   </div>
                 </div>
                 
-                {d.description && <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: 12, lineHeight: 1.4 }}>{d.description}</div>}
+                {d.description && (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: 12, lineHeight: 1.4 }}>
+                    {d.description.length > 150 && !expandedDomainIds.has(d.id)
+                      ? `${d.description.slice(0, 150)}...`
+                      : d.description}
+                    {d.description.length > 150 && (
+                      <button
+                        type="button"
+                        onClick={() => toggleDomainExpanded(d.id)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: 'var(--secondary)',
+                          cursor: 'pointer',
+                          fontSize: '0.75rem',
+                          fontWeight: 600,
+                          padding: 0,
+                          marginLeft: 6,
+                          textDecoration: 'underline'
+                        }}
+                      >
+                        {expandedDomainIds.has(d.id) ? 'Less' : 'More'}
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {/* Base Model Info */}
                 <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.04)', borderRadius: 6, padding: '8px 10px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
