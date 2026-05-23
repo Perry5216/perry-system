@@ -19,8 +19,8 @@
  */
 
 import { Logger } from '@perry/core';
-import type { EventBus, LoadedSkill } from '@perry/core';
-import { loadInstalledSkills, SkillEvaluator } from '@perry/core';
+import type { EventBus, LoadedAbility } from '@perry/core';
+import { loadInstalledAbilities, AbilityEvaluator } from '@perry/core';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -35,8 +35,8 @@ const TRAINING_DIR   = path.join(WORKSPACE_DIR, 'training');
 const COMFYUI_OUT_DIR= path.join(WORKSPACE_DIR, 'comfyui-output');
 const SCOUT_OUT_DIR  = path.join(WORKSPACE_DIR, 'scout-findings');
 const PENS_DIR       = path.join(WORKSPACE_DIR, 'pens');
-const SKILLS_PENDING_DIR  = path.join(WORKSPACE_DIR, 'skills-pending');
-const SKILLS_REJECTED_DIR = path.join(WORKSPACE_DIR, 'skills-rejected');
+const ABILITIES_PENDING_DIR  = path.join(WORKSPACE_DIR, 'abilities-pending');
+const ABILITIES_REJECTED_DIR = path.join(WORKSPACE_DIR, 'abilities-rejected');
 
 // Thresholds (seconds-based for SQL strftime comparisons; ms for fs.stat).
 const STALE_CLAIM_SECS         = 60 * 60;          // release claimed after 1h
@@ -51,7 +51,7 @@ const READY_FLAG_TTL_MS        = 24 * 60 * 60 * 1000;
 // New thresholds (added for production-scale GC — 2026-05-21).
 const COMFYUI_OUTPUT_TTL_MS    = 30 * 24 * 60 * 60 * 1000;  // 30d for ad-hoc covers
 const SCOUT_FINDINGS_TTL_MS    = 30 * 24 * 60 * 60 * 1000;  // 30d for scrape dumps
-const SKILLS_PENDING_TTL_MS    = 14 * 24 * 60 * 60 * 1000;  // 14d unreviewed → reject
+const ABILITIES_PENDING_TTL_MS    = 14 * 24 * 60 * 60 * 1000;  // 14d unreviewed → reject
 const AUDIT_FILES_KEEP_LAST    = 10;                          // per pen, keep last N audit-v*.md/jsonl pairs
 const RAG_LEARNING_TTL_DAYS    = 180;                         // learning_* corpus age-out
 const RAG_REFERENCE_TTL_DAYS   = 365;                         // bible_*/voice_anchor age-out
@@ -112,13 +112,13 @@ export class GarbageCollector {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
-  private getTtl(dirPath: string, defaultTtl: number, skills: LoadedSkill[]): number {
-    const matched = SkillEvaluator.evaluate(skills, {
+  private getTtl(dirPath: string, defaultTtl: number, abilities: LoadedAbility[]): number {
+    const matched = AbilityEvaluator.evaluate(abilities, {
       dir_path: dirPath,
     });
     let ttl = defaultTtl;
-    for (const skill of matched) {
-      if (skill.frontmatter.suggested_ttl_action === 'tighten') {
+    for (const ability of matched) {
+      if (ability.frontmatter.suggested_ttl_action === 'tighten') {
         ttl = Math.floor(defaultTtl / 4);
         this.log.info('GC: Tightened TTL for directory', { dirPath, defaultTtl, tightenedTtl: ttl });
       }
@@ -139,29 +139,29 @@ export class GarbageCollector {
     const startedAt = new Date();
     const summary: GcSummary = { trigger, startedAt: startedAt.toISOString(), stages: {} };
 
-    // Consumer side: load any promoted GC skills + log which directories
+    // Consumer side: load any promoted GC abilities + log which directories
     // they'd override TTLs for.
-    let skills: LoadedSkill[] = [];
+    let abilities: LoadedAbility[] = [];
     try {
-      skills = loadInstalledSkills(WORKSPACE_DIR, 'gc');
-      if (skills.length > 0) {
-        this.log.info('GC sweep loaded skills', { count: skills.length, names: skills.map(s => s.name) });
-        for (const s of skills) {
+      abilities = loadInstalledAbilities(WORKSPACE_DIR, 'gc');
+      if (abilities.length > 0) {
+        this.log.info('GC sweep loaded abilities', { count: abilities.length, names: abilities.map(s => s.name) });
+        for (const s of abilities) {
           const w = s.appliesWhen;
           if (w?.dir_path && w?.suggested_ttl_action) {
-            this.log.info('GC skill applicable', { skill: s.name, dir_path: w.dir_path, action: w.suggested_ttl_action });
+            this.log.info('GC ability applicable', { ability: s.name, dir_path: w.dir_path, action: w.suggested_ttl_action });
             this.eventBus?.emit('learning:observation', {
               source: 'gc',
-              kind: 'skill-applied',
+              kind: 'ability-applied',
               fingerprint: `${s.name}::${String(w.dir_path)}`,
               value: 1,
-              metadata: { skill: s.name, dir_path: w.dir_path, action: w.suggested_ttl_action, trigger },
+              metadata: { ability: s.name, dir_path: w.dir_path, action: w.suggested_ttl_action, trigger },
             });
           }
         }
       }
     } catch (err: any) {
-      this.log.warn('GC skill consumer pre-sweep step failed (non-fatal)', { error: err.message });
+      this.log.warn('GC ability consumer pre-sweep step failed (non-fatal)', { error: err.message });
     }
 
     this.log.info('sweep starting', { trigger });
@@ -178,15 +178,15 @@ export class GarbageCollector {
       summary.stages.vaultKey       = this.auditVaultKey();
 
       // Resolve dynamic TTL overrides
-      const comfyuiTtl = this.getTtl(COMFYUI_OUT_DIR, COMFYUI_OUTPUT_TTL_MS, skills);
-      const scoutFindingsTtl = this.getTtl(SCOUT_OUT_DIR, SCOUT_FINDINGS_TTL_MS, skills);
-      const skillsPendingTtl = this.getTtl(SKILLS_PENDING_DIR, SKILLS_PENDING_TTL_MS, skills);
+      const comfyuiTtl = this.getTtl(COMFYUI_OUT_DIR, COMFYUI_OUTPUT_TTL_MS, abilities);
+      const scoutFindingsTtl = this.getTtl(SCOUT_OUT_DIR, SCOUT_FINDINGS_TTL_MS, abilities);
+      const abilitiesPendingTtl = this.getTtl(ABILITIES_PENDING_DIR, ABILITIES_PENDING_TTL_MS, abilities);
 
       // Storage / corpus stages — added 2026-05-21 for production scale.
       summary.stages.comfyuiOutput  = await this.sweepComfyuiOutput(comfyuiTtl);
       summary.stages.scoutFindings  = await this.sweepScoutFindings(scoutFindingsTtl);
       summary.stages.auditFiles     = await this.sweepAuditFiles();
-      summary.stages.skillsPending  = await this.sweepSkillsPending(skillsPendingTtl);
+      summary.stages.abilitiesPending  = await this.sweepAbilitiesPending(abilitiesPendingTtl);
       summary.stages.penProfiles    = await this.sweepPenProfiles();
       summary.stages.ragCorpus      = this.sweepRagCorpus();
       summary.stages.chatMemory     = await this.sweepChatMemory();
@@ -648,28 +648,28 @@ export class GarbageCollector {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // Stage: skills-pending/ orphan sweep
+  // Stage: abilities-pending/ orphan sweep
   //
   // Workers can propose freely; humans review on a less-busy cadence.
-  // Proposals that go unreviewed for SKILLS_PENDING_TTL_MS move into
-  // skills-rejected/ (not deleted — operator can recover them) so the
+  // Proposals that go unreviewed for ABILITIES_PENDING_TTL_MS move into
+  // abilities-rejected/ (not deleted — operator can recover them) so the
   // Pending tab doesn't drown in stale candidates.
   // ─────────────────────────────────────────────────────────────────────
-  private async sweepSkillsPending(ttlMs?: number): Promise<StageResult> {
-    if (!fs.existsSync(SKILLS_PENDING_DIR)) return { skipped: true };
-    const ttl = ttlMs ?? SKILLS_PENDING_TTL_MS;
+  private async sweepAbilitiesPending(ttlMs?: number): Promise<StageResult> {
+    if (!fs.existsSync(ABILITIES_PENDING_DIR)) return { skipped: true };
+    const ttl = ttlMs ?? ABILITIES_PENDING_TTL_MS;
     const cutoff = Date.now() - ttl;
     let archived = 0;
     const errors: string[] = [];
     try {
-      if (!fs.existsSync(SKILLS_REJECTED_DIR)) fs.mkdirSync(SKILLS_REJECTED_DIR, { recursive: true });
-      for (const f of fs.readdirSync(SKILLS_PENDING_DIR)) {
+      if (!fs.existsSync(ABILITIES_REJECTED_DIR)) fs.mkdirSync(ABILITIES_REJECTED_DIR, { recursive: true });
+      for (const f of fs.readdirSync(ABILITIES_PENDING_DIR)) {
         if (!f.endsWith('.md')) continue;
-        const src = path.join(SKILLS_PENDING_DIR, f);
+        const src = path.join(ABILITIES_PENDING_DIR, f);
         try {
           const st = fs.statSync(src);
           if (st.mtimeMs >= cutoff) continue;
-          const dst = path.join(SKILLS_REJECTED_DIR, f);
+          const dst = path.join(ABILITIES_REJECTED_DIR, f);
           fs.renameSync(src, dst);
           archived++;
         } catch (e: any) { errors.push(`${f}: ${e.message}`); }
@@ -809,8 +809,8 @@ export class GarbageCollector {
       { path: COMFYUI_OUT_DIR,   label: '$WORKSPACE/comfyui-output' },
       { path: SCOUT_OUT_DIR,     label: '$WORKSPACE/scout-findings' },
       { path: PENS_DIR,          label: '$WORKSPACE/pens' },
-      { path: SKILLS_PENDING_DIR,label: '$WORKSPACE/skills-pending' },
-      { path: SKILLS_REJECTED_DIR,label:'$WORKSPACE/skills-rejected' },
+      { path: ABILITIES_PENDING_DIR,label: '$WORKSPACE/abilities-pending' },
+      { path: ABILITIES_REJECTED_DIR,label:'$WORKSPACE/abilities-rejected' },
       { path: path.join(WORKSPACE_DIR, '.config'), label: '$WORKSPACE/.config' },
       { path: path.join(WORKSPACE_DIR, 'memory'),  label: '$WORKSPACE/memory' },
     ];

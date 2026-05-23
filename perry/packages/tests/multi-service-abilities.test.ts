@@ -13,7 +13,7 @@
 import { rmSync, mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { SkillEvaluator, loadInstalledSkills } from '../core/src/index.js';
+import { AbilityEvaluator, loadInstalledAbilities } from '../core/src/index.js';
 import { scanLeaks } from '../projects/src/voice-screens.js';
 import { GarbageCollector } from '../dashboard-api/src/services/garbage-collector.js';
 import { StandardLlmRunner } from '../projects/src/runners/StandardLlmRunner.js';
@@ -62,21 +62,21 @@ const mockLog = {
 
 function createTempWorkspace(): string {
   const systemTemp = tmpdir();
-  const dir = mkdtempSync(join(systemTemp, 'perry-skills-test-'));
-  mkdirSync(join(dir, 'skills-installed'), { recursive: true });
-  mkdirSync(join(dir, 'skills-pending'), { recursive: true });
-  mkdirSync(join(dir, 'skills-archived'), { recursive: true });
+  const dir = mkdtempSync(join(systemTemp, 'perry-abilities-test-'));
+  mkdirSync(join(dir, 'abilities-installed'), { recursive: true });
+  mkdirSync(join(dir, 'abilities-pending'), { recursive: true });
+  mkdirSync(join(dir, 'abilities-archived'), { recursive: true });
   return dir;
 }
 
-console.log('\n─── Multi-Service Skills System Tests ───');
+console.log('\n─── Multi-Service Abilities System Tests ───');
 
 // ═══════════════════════════════════════════════════════════
 // Test 1: SkillEvaluator trigger condition evaluation
 // ═══════════════════════════════════════════════════════════
 
-test('SkillEvaluator evaluates exact, wildcard, and regex matches', () => {
-  const skills = [
+test('AbilityEvaluator evaluates exact, wildcard, and regex matches', () => {
+  const abilities = [
     {
       name: 'exact-match',
       appliesWhen: { task_type: 'creative_writing', pen_slug: 'pen-1' },
@@ -105,13 +105,13 @@ test('SkillEvaluator evaluates exact, wildcard, and regex matches', () => {
   ] as any[];
 
   // 1. Matches exact and wildcard
-  const matched1 = SkillEvaluator.evaluate(skills, { task_type: 'creative_writing', pen_slug: 'pen-1' });
+  const matched1 = AbilityEvaluator.evaluate(abilities, { task_type: 'creative_writing', pen_slug: 'pen-1' });
   assertEqual(matched1.length, 2, 'matched count 1');
   assert(matched1.some(s => s.name === 'exact-match'), 'exact-match matches');
   assert(matched1.some(s => s.name === 'wildcard-match'), 'wildcard-match matches');
 
   // 2. Matches regex and substring
-  const matched2 = SkillEvaluator.evaluate(skills, { error_fingerprint: 'A Timeout has occurred in the API' });
+  const matched2 = AbilityEvaluator.evaluate(abilities, { error_fingerprint: 'A Timeout has occurred in the API' });
   assertEqual(matched2.length, 2, 'matched count 2');
   assert(matched2.some(s => s.name === 'regex-match'), 'regex-match matches');
   assert(matched2.some(s => s.name === 'substring-match'), 'substring-match matches');
@@ -144,7 +144,7 @@ test('StandardLlmRunner applies retry_override when a failure skill matches', as
       startStep: () => {},
       save: () => {},
       enqueueTasks: () => [],
-      logSkillExecution: () => {},
+      logAbilityExecution: () => {},
       recordTelemetry: () => {},
     },
     router: {
@@ -177,7 +177,7 @@ test('StandardLlmRunner applies retry_override when a failure skill matches', as
         budgetReport: { used: 100, remaining: 900, droppedSlots: [] }
       }),
     },
-    directorSkills: [
+    directorAbilities: [
       {
         name: 'timeout-retry-booster',
         appliesWhen: { task_type: 'creative_writing', error_fingerprint: 'API Timeout occurred' },
@@ -202,7 +202,7 @@ test('StandardLlmRunner applies retry_override when a failure skill matches', as
 // Test 3: scanLeaks ignore filter
 // ═══════════════════════════════════════════════════════════
 
-test('scanLeaks ignores leak tags based on matching audit skills', () => {
+test('scanLeaks ignores leak tags based on matching audit abilities', () => {
   const text = 'A chill ran down her spine.';
   
   // Baseline check: should trigger spine_chill leak tag
@@ -210,13 +210,13 @@ test('scanLeaks ignores leak tags based on matching audit skills', () => {
   assertEqual(baselineHits.length, 1, 'baseline hits count');
   assertEqual(baselineHits[0].tag, 'spine_chill', 'baseline hit tag');
 
-  // Set up temp workspace with an audit skill ignoring spine_chill
+  // Set up temp workspace with an audit ability ignoring spine_chill
   const workspaceDir = createTempWorkspace();
   try {
-    const auditSkillDir = join(workspaceDir, 'skills-installed', 'audit');
-    mkdirSync(auditSkillDir, { recursive: true });
+    const auditAbilityDir = join(workspaceDir, 'abilities-installed', 'audit');
+    mkdirSync(auditAbilityDir, { recursive: true });
     
-    const skillContent = `---
+    const abilityContent = `---
 name: ignore-spine-chill
 service: audit
 applies_when:
@@ -226,7 +226,7 @@ action: ignore
 ---
 Ignore spine chill clichés for detective-noir pen.
 `;
-    writeFileSync(join(auditSkillDir, 'ignore-spine-chill.md'), skillContent);
+    writeFileSync(join(auditAbilityDir, 'ignore-spine-chill.md'), abilityContent);
 
     // Run scanLeaks with workspace and matching pen slug -> should ignore tag
     const filteredHits = scanLeaks(text, workspaceDir, 'detective-noir');
@@ -246,8 +246,8 @@ Ignore spine chill clichés for detective-noir pen.
 // Test 4: GarbageCollector TTL overrides
 // ═══════════════════════════════════════════════════════════
 
-test('GarbageCollector dynamically tightens TTLs based on GC skills', () => {
-  const gcSkills = [
+test('GarbageCollector dynamically tightens TTLs based on GC abilities', () => {
+  const gcAbilities = [
     {
       name: 'tighten-comfyui',
       appliesWhen: { dir_path: '/my/comfyui-output' },
@@ -264,11 +264,11 @@ test('GarbageCollector dynamically tightens TTLs based on GC skills', () => {
 
   // 1. Matches and tightens comfyui output TTL by 4x
   const defaultTtl = 30 * 24 * 60 * 60 * 1000; // 30 days
-  const comfyuiTtl = (gc as any).getTtl('/my/comfyui-output', defaultTtl, gcSkills);
+  const comfyuiTtl = (gc as any).getTtl('/my/comfyui-output', defaultTtl, gcAbilities);
   assertEqual(comfyuiTtl, Math.floor(defaultTtl / 4), 'tightened comfyui TTL');
 
   // 2. Mismatch/No tighten -> remains default
-  const scoutTtl = (gc as any).getTtl('/my/scout-findings', defaultTtl, gcSkills);
+  const scoutTtl = (gc as any).getTtl('/my/scout-findings', defaultTtl, gcAbilities);
   assertEqual(scoutTtl, defaultTtl, 'untouched scout TTL');
 });
 
@@ -281,6 +281,6 @@ if (failures.length > 0) {
   failures.forEach(f => console.log(`  ✗ ${f}`));
   process.exit(1);
 } else {
-  console.log('\n✓ All multi-service skills tests passed successfully!');
+  console.log('\n✓ All multi-service abilities tests passed successfully!');
   process.exit(0);
 }

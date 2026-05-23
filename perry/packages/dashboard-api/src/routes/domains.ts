@@ -41,14 +41,14 @@ function parseFrontmatter(raw: string): { name?: string; description?: string; s
   return out;
 }
 
-async function listMarkdownSkills(dir: string, defaultService = 'worker'): Promise<any[]> {
+async function listMarkdownAbilities(dir: string, defaultService = 'worker'): Promise<any[]> {
   if (!existsSync(dir)) return [];
   const out: any[] = [];
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const ent of entries) {
       if (ent.isDirectory()) {
-        const sub = await listMarkdownSkills(join(dir, ent.name), ent.name);
+        const sub = await listMarkdownAbilities(join(dir, ent.name), ent.name);
         out.push(...sub);
       } else if (ent.isFile() && ent.name.endsWith('.md')) {
         try {
@@ -67,6 +67,45 @@ async function listMarkdownSkills(dir: string, defaultService = 'worker'): Promi
   } catch {}
   return out;
 }
+const listMarkdownSkills = listMarkdownAbilities;
+
+function repairJsonNewlines(jsonStr: string): string {
+  let insideString = false;
+  let escaped = false;
+  let result = '';
+  for (let i = 0; i < jsonStr.length; i++) {
+    const char = jsonStr[i];
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      result += char;
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      insideString = !insideString;
+      result += char;
+      continue;
+    }
+    if (insideString) {
+      if (char === '\n') {
+        result += '\\n';
+      } else if (char === '\r') {
+        result += '\\r';
+      } else if (char === '\t') {
+        result += '\\t';
+      } else {
+        result += char;
+      }
+    } else {
+      result += char;
+    }
+  }
+  return result;
+}
 
 function extractJson(text: string): any {
   const match = text.match(/```json\s*([\s\S]*?)\s*```/);
@@ -74,12 +113,23 @@ function extractJson(text: string): any {
   try {
     return JSON.parse(jsonStr.trim());
   } catch (err: any) {
+    try {
+      const repaired = repairJsonNewlines(jsonStr.trim());
+      return JSON.parse(repaired);
+    } catch {}
+
     const startIdx = text.indexOf('{');
     const endIdx = text.lastIndexOf('}');
     if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      const sliced = text.slice(startIdx, endIdx + 1).trim();
       try {
-        return JSON.parse(text.slice(startIdx, endIdx + 1).trim());
-      } catch {}
+        return JSON.parse(sliced);
+      } catch {
+        try {
+          const repairedSliced = repairJsonNewlines(sliced);
+          return JSON.parse(repairedSliced);
+        } catch {}
+      }
     }
     throw new Error(`Failed to parse AI output as JSON: ${err.message}. Raw text: ${text}`);
   }
@@ -153,7 +203,7 @@ export function setupDomainsRoutes(opts: {
 
   const installedDirs = [
     '/app/.claude/commands',
-    join(workspaceDir, 'skills-installed'),
+    join(workspaceDir, 'abilities-installed'),
   ];
 
   router.get('/', (_req, res) => {
@@ -211,11 +261,11 @@ export function setupDomainsRoutes(opts: {
         return res.status(400).json({ error: 'description is required and must be a non-empty string' });
       }
 
-      // Gather installed skills
+      // Gather installed abilities
       const installed: any[] = [];
       const seen = new Set<string>();
       for (const dir of installedDirs) {
-        const items = await listMarkdownSkills(dir);
+        const items = await listMarkdownAbilities(dir);
         for (const i of items) {
           const key = `${i.service}::${i.name}`;
           if (seen.has(key)) continue;
@@ -230,7 +280,7 @@ export function setupDomainsRoutes(opts: {
         return res.status(500).json({ error: `Agent ${agentId} is not registered in the system` });
       }
 
-      const skillsFormatted = installed
+      const abilitiesFormatted = installed
         .map(s => `- Name: ${s.name}\n  Service: ${s.service}\n  Description: ${s.description}`)
         .join('\n\n');
 
@@ -239,11 +289,11 @@ export function setupDomainsRoutes(opts: {
         `Label: ${label}`,
         `Description: ${description}`,
         ``,
-        `Below is the list of existing installed skills in the system:`,
-        skillsFormatted || '(none)',
+        `Below is the list of existing installed abilities in the system:`,
+        abilitiesFormatted || '(none)',
         ``,
-        `Analyze the domain label and description. Select which of the existing skills (if any) are highly relevant to this domain and why.`,
-        `Also, recommend any new custom skills that should be created specifically for this domain, providing a kebab-case name, short description, and draft markdown body for each.`,
+        `Analyze the domain label and description. Select which of the existing abilities (if any) are highly relevant to this domain and why.`,
+        `Also, recommend any new custom abilities that should be created specifically for this domain, providing a kebab-case name, short description, and draft markdown body for each.`,
       ].join('\n');
 
       // Create a session for tracking
@@ -415,18 +465,18 @@ export function setupDomainsRoutes(opts: {
       }
       await writeFile(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
 
-      // Register skill playbooks
-      const skillName = `template-builder-${kebabName}`;
-      const skillDir = join(workspaceDir, 'skills-installed', workType);
-      if (!existsSync(skillDir)) {
-        await mkdir(skillDir, { recursive: true });
+      // Register ability playbooks
+      const abilityName = `template-builder-${kebabName}`;
+      const abilityDir = join(workspaceDir, 'abilities-installed', workType);
+      if (!existsSync(abilityDir)) {
+        await mkdir(abilityDir, { recursive: true });
       }
-      const skillPath = join(skillDir, `${skillName}.md`);
+      const abilityPath = join(abilityDir, `${abilityName}.md`);
       const now = new Date().toISOString();
-      const skillContent = `---
-name: ${skillName}
+      const abilityContent = `---
+name: ${abilityName}
 service: ${workType}
-description: Skill dedicated to generating and maintaining the custom template ${templateType} (${name}).
+description: Ability dedicated to generating and maintaining the custom template ${templateType} (${name}).
 proposed_at: ${now}
 promoted_at: ${now}
 proposed_by: template-evolution
@@ -436,24 +486,24 @@ applies_when:
   fingerprint: ${templateType}
 ---
 
-# Template Builder Skill: ${name}
+# Template Builder Ability: ${name}
 
-This skill belongs to the domain ${workType} and is dedicated to generating and running templates for this domain.
-When this skill is activated:
+This ability belongs to the domain ${workType} and is dedicated to generating and running templates for this domain.
+When this ability is activated:
 - Utilize the structure and prompt strategies defined in the ${name} template.
 - Refine steps, parameters, and prompts to align with domain guidelines.
 - Self-improve the template over time based on execution observations.
 `;
-      await writeFile(skillPath, skillContent, 'utf-8');
+      await writeFile(abilityPath, abilityContent, 'utf-8');
 
       const domain = registry.get(workType);
       if (domain) {
-        const defaultSkills = domain.defaultSkills || [];
-        const skillExists = defaultSkills.some(s => s.service === workType && s.name === skillName);
-        if (!skillExists) {
-          const updatedSkills = [...defaultSkills, { service: workType, name: skillName }];
-          registry.update(workType, { defaultSkills: updatedSkills });
-          log.info(`Assigned skill ${workType}/${skillName} to domain ${workType}`);
+        const defaultAbilities = domain.defaultAbilities || domain.defaultSkills || [];
+        const abilityExists = defaultAbilities.some(s => s.service === workType && s.name === abilityName);
+        if (!abilityExists) {
+          const updatedAbilities = [...defaultAbilities, { service: workType, name: abilityName }];
+          registry.update(workType, { defaultAbilities: updatedAbilities, defaultSkills: updatedAbilities });
+          log.info(`Assigned ability ${workType}/${abilityName} to domain ${workType}`);
         }
       }
 
@@ -466,7 +516,8 @@ When this skill is activated:
         templateType,
         templateName: newPipeline.name,
         domainId: workType,
-        skillName
+        abilityName,
+        skillName: abilityName // Keep skillName for backward compatibility!
       });
     } catch (err: any) {
       log.error('Failed to evolve workType to template', { error: err.message });
@@ -1201,7 +1252,7 @@ When this skill is activated:
   });
 
   // Install custom skill
-  router.post('/install-skill', async (req, res) => {
+  const installAbilityHandler = async (req: any, res: any) => {
     try {
       const { name, description, service, body } = req.body || {};
       if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{2,39}$/.test(name)) {
@@ -1246,10 +1297,159 @@ When this skill is activated:
       ].join('\n');
 
       await writeFile(dst, content, 'utf-8');
-      log.info('skill created for domain wizard', { name, service, path: dst });
+      log.info('ability created for domain wizard', { name, service, path: dst });
       res.status(201).json({ created: true, name, service, path: dst });
     } catch (err: any) {
-      log.error('POST /install-skill failed', { error: err.message });
+      log.error('POST /install-ability failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  };
+
+  router.post('/install-ability', installAbilityHandler);
+  router.post('/install-skill', installAbilityHandler);
+
+  // Provision domain team (agents, default abilities, and souls)
+  router.post('/provision-team', async (req, res) => {
+    try {
+      const { domainId, teamRoles, recommendedAbilities, suggestedNewAbilities, recommendedSkills, suggestedNewSkills } = req.body || {};
+      if (typeof domainId !== 'string' || !domainId.trim()) {
+        return res.status(400).json({ error: 'domainId is required' });
+      }
+      if (!Array.isArray(teamRoles) || teamRoles.length === 0) {
+        return res.status(400).json({ error: 'teamRoles must be a non-empty array' });
+      }
+
+      // Normalize abilities / skills lists
+      const recAbs = recommendedAbilities || recommendedSkills || [];
+      const sugNewAbs = suggestedNewAbilities || suggestedNewSkills || [];
+
+      // 1. Read existing custom_agents.json
+      const configPath = join(workspaceDir, '.config', 'custom_agents.json');
+      let customAgents: Record<string, any> = {};
+      if (existsSync(configPath)) {
+        try {
+          const raw = await readFile(configPath, 'utf8');
+          customAgents = JSON.parse(raw);
+        } catch (e) {
+          log.error('Failed to parse custom_agents.json', { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
+      const createdAgentIds: string[] = [];
+
+      // 2. Loop through teamRoles to build agents and write soul files
+      for (const roleInfo of teamRoles) {
+        const { role, description } = roleInfo;
+        if (!role || typeof role !== 'string') continue;
+
+        const kebabRole = role.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        const agentId = `${domainId}.${kebabRole}`;
+
+        // Create AgentDefinition
+        const agentDef = {
+          id: agentId,
+          domain: domainId,
+          label: role,
+          description: description || `Specialized agent for domain ${domainId}`,
+          systemPrompt: [
+            `You are the ${role} for the ${domainId} domain.`,
+            ``,
+            description || `Your primary goal is to execute tasks related to ${role} in this domain.`,
+          ].join('\n'),
+          modelBinding: { provider: 'workers' },
+          toolACL: null, // Allow all tools
+          outputFormat: 'markdown',
+          compression: 'low',
+          timeoutMs: 5 * 60_000,
+          canDelegate: false,
+        };
+
+        customAgents[agentId] = agentDef;
+        createdAgentIds.push(agentId);
+
+        // Write Agent Soul Files
+        const agentSoulDir = join(workspaceDir, 'souls', 'agents', agentId);
+        if (!existsSync(agentSoulDir)) {
+          await mkdir(agentSoulDir, { recursive: true });
+        }
+
+        // CONFIG.json
+        const agentConfigPath = join(agentSoulDir, 'CONFIG.json');
+        await writeFile(agentConfigPath, JSON.stringify({
+          id: agentId,
+          domain: domainId,
+          label: role,
+        }, null, 2), 'utf-8');
+
+        // SOUL.md
+        const agentSoulPath = join(agentSoulDir, 'SOUL.md');
+        const soulContent = [
+          `# SOUL: ${role}`,
+          ``,
+          `## Style DNA`,
+          `- Tone: Professional, structured, and goal-oriented.`,
+          `- Vocabulary: Domain-specific, clear, avoids unnecessary fluff.`,
+          ``,
+          `## Voice Tagline`,
+          `_${role} for the ${domainId} domain._`,
+          ``,
+        ].join('\n');
+        await writeFile(agentSoulPath, soulContent, 'utf-8');
+
+        // LESSONS.md
+        const agentLessonsPath = join(agentSoulDir, 'LESSONS.md');
+        const lessonsContent = [
+          `# LESSONS: ${role}`,
+          ``,
+          `## Core Principles`,
+          `1. Ensure all actions satisfy the goal of the current task.`,
+          `2. Log execution details and maintain structured notes.`,
+          ``,
+        ].join('\n');
+        await writeFile(agentLessonsPath, lessonsContent, 'utf-8');
+      }
+
+      // Save custom_agents.json
+      const configDir = join(configPath, '..');
+      if (!existsSync(configDir)) {
+        await mkdir(configDir, { recursive: true });
+      }
+      await writeFile(configPath, JSON.stringify(customAgents, null, 2), 'utf8');
+
+      // 3. Assign abilities/skills to the domain registry
+      const domain = registry.get(domainId);
+      if (domain) {
+        // Collect recommended abilities
+        const existingAbilities = domain.defaultAbilities || domain.defaultSkills || [];
+        const updatedAbilities = [...existingAbilities];
+
+        // Add recommended abilities
+        for (const ab of recAbs) {
+          const name = typeof ab === 'string' ? ab : ab.name;
+          if (name && !updatedAbilities.some(x => x.name === name)) {
+            updatedAbilities.push({ service: 'worker', name }); // default worker service command
+          }
+        }
+
+        // Add suggested new abilities
+        for (const ab of sugNewAbs) {
+          const name = typeof ab === 'string' ? ab : ab.name;
+          if (name && !updatedAbilities.some(x => x.name === name)) {
+            updatedAbilities.push({ service: 'worker', name });
+          }
+        }
+
+        registry.update(domainId, {
+          defaultAbilities: updatedAbilities,
+          defaultSkills: updatedAbilities
+        });
+        log.info(`Assigned ${updatedAbilities.length} abilities to domain ${domainId}`);
+      }
+
+      log.info('Provisioned domain team successfully', { domainId, agents: createdAgentIds });
+      res.json({ success: true, agentsCreated: createdAgentIds });
+    } catch (err: any) {
+      log.error('POST /domains/provision-team failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

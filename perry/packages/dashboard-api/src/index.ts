@@ -326,13 +326,13 @@ async function bootstrap() {
   // AgentLearningBridge translates already-existing agent:invocation:*
   // events into learning:* events so EVERY registered agent gets the
   // loop automatically, no wiring per agent.
-  const { SkillProposer, TrajectorySkillWriter } = await import('@perry/core');
-  const learningSkillProposer = new SkillProposer({ workspaceDir: WORKSPACE, log: log.child('learning-skills') });
-  const trajectoryWriter = new TrajectorySkillWriter({ workspaceDir: WORKSPACE, log: log.child('trajectory-skills') });
+  const { AbilityProposer, TrajectoryAbilityWriter } = await import('@perry/core');
+  const learningAbilityProposer = new AbilityProposer({ workspaceDir: WORKSPACE, log: log.child('learning-abilities') });
+  const trajectoryWriter = new TrajectoryAbilityWriter({ workspaceDir: WORKSPACE, log: log.child('trajectory-abilities') });
   const { LearningCore } = await import('./services/learning-core.js');
-  const learningCore = new LearningCore(eventBus, stateStore, learningSkillProposer, log.child('learning-core'), WORKSPACE, trajectoryWriter);
-  const { SkillEvolution } = await import('./services/skill-evolution.js');
-  const skillEvolution = new SkillEvolution(WORKSPACE, log.child('skill-evolution'), eventBus, stateStore, aiRouter);
+  const learningCore = new LearningCore(eventBus, stateStore, learningAbilityProposer, log.child('learning-core'), WORKSPACE, trajectoryWriter);
+  const { AbilityEvolution } = await import('./services/ability-evolution.js');
+  const abilityEvolution = new AbilityEvolution(WORKSPACE, log.child('ability-evolution'), eventBus, stateStore, aiRouter);
   const { OperatorProfileService } = await import('./services/operator-profile-service.js');
   const operatorProfile = new OperatorProfileService(WORKSPACE, log.child('operator-profile'), eventBus, aiRouter.compressor as any);
   const { CronService } = await import('./services/cron-service.js');
@@ -362,7 +362,7 @@ async function bootstrap() {
   });
 
   // 7. Server (routes get access to the services they need)
-  const app = createServer(projectEngine, aiRouter, eventBus, log.child('api'), WORKSPACE, stateStore, gc, secrets, gateways, ragService, memoryStore, chatMemory, learningCore, skillEvolution, operatorProfile, cronService, pluginManager);
+  const app = createServer(projectEngine, aiRouter, eventBus, log.child('api'), WORKSPACE, stateStore, gc, secrets, gateways, ragService, memoryStore, chatMemory, learningCore, abilityEvolution, operatorProfile, cronService, pluginManager);
 
   const PORT = process.env.PORT || 4000;
   app.listen(PORT, () => {

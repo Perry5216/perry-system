@@ -23,9 +23,9 @@ export { AGENT_REGISTRY, getAgent, listAgents, listDelegatableAgents } from './a
 export { AgentRunner } from './agents/runner.js';
 export { DomainRegistry } from './services/domain-registry.js';
 export type { DomainDefinition } from './services/domain-registry.js';
-export { LibrarianService } from './services/librarian-service.js';
-export type { LibrarianPassResult } from './services/librarian-service.js';
-export { SkillOptimizerService } from './services/skill-optimizer.js';
-export type { MutationCandidate } from './services/skill-optimizer.js';
+export { CuratorService } from './services/curator-service.js';
+export type { CuratorPassResult } from './services/curator-service.js';
+export { AbilityOptimizerService } from './services/ability-optimizer.js';
+export type { MutationCandidate } from './services/ability-optimizer.js';
 
 

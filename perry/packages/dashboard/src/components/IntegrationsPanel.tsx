@@ -11,7 +11,7 @@
  *   - Cron (count summary; link out to dedicated tab)
  */
 import { useEffect, useState } from 'react';
-import { Heart, Cpu, ExternalLink, Activity, Server } from 'lucide-react';
+import { Cpu, Activity } from 'lucide-react';
 import { PanelHeader } from './PanelHeader';
 
 interface GatewayStatus {
@@ -62,7 +62,6 @@ export function IntegrationsPanel({ contextStats }: { contextStats: ContextStats
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16, marginTop: 16 }}>
         <HardwareStatsCard contextStats={contextStats} />
-        <SponsorsCard />
         <GatewaysCard />
         <VoiceCard />
         <SearchCard />
@@ -191,146 +190,6 @@ function HardwareStatsCard({ contextStats }: { contextStats: ContextStats | null
     </Card>
   );
 }
-
-function SponsorsCard() {
-  return (
-    <Card title="Sponsors & Partner Integrations" eyebrow="Community Support">
-      <div style={{ marginBottom: 12 }}>
-        <a
-          href="https://github.com/sponsors/perry-system"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-            padding: '10px 16px',
-            borderRadius: 6,
-            background: 'linear-gradient(135deg, #db2777 0%, #7c3aed 100%)',
-            color: '#ffffff',
-            fontWeight: 600,
-            textDecoration: 'none',
-            fontSize: '0.85rem',
-            border: '1px solid rgba(255,255,255,0.1)',
-            boxShadow: '0 4px 12px rgba(124, 58, 237, 0.25)',
-            transition: 'all 0.25s ease'
-          }}
-          onMouseEnter={(e: any) => {
-            e.currentTarget.style.transform = 'translateY(-1px)';
-            e.currentTarget.style.boxShadow = '0 6px 16px rgba(124, 58, 237, 0.4)';
-          }}
-          onMouseLeave={(e: any) => {
-            e.currentTarget.style.transform = 'translateY(0)';
-            e.currentTarget.style.boxShadow = '0 4px 12px rgba(124, 58, 237, 0.25)';
-          }}
-        >
-          <Heart size={16} fill="currentColor" style={{ color: '#ffffff' }} />
-          <span>Sponsor Perry on GitHub</span>
-          <ExternalLink size={12} />
-        </a>
-      </div>
-
-      <div style={{ marginBottom: 14 }}>
-        <label style={lbl}>Support Local Development Hosting</label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 4 }}>
-          <a
-            href="https://runpod.io?ref=perry"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              ...affiliateBtnStyle,
-              background: 'rgba(244,63,94,0.06)',
-              borderColor: 'rgba(244,63,94,0.2)',
-              color: '#f43f5e'
-            }}
-            onMouseEnter={(e: any) => {
-              e.currentTarget.style.background = 'rgba(244,63,94,0.1)';
-              e.currentTarget.style.borderColor = 'rgba(244,63,94,0.4)';
-              e.currentTarget.style.boxShadow = '0 0 10px rgba(244,63,94,0.15)';
-            }}
-            onMouseLeave={(e: any) => {
-              e.currentTarget.style.background = 'rgba(244,63,94,0.06)';
-              e.currentTarget.style.borderColor = 'rgba(244,63,94,0.2)';
-              e.currentTarget.style.boxShadow = 'none';
-            }}
-          >
-            <Server size={12} />
-            <span>RunPod GPU</span>
-            <ExternalLink size={10} />
-          </a>
-          <a
-            href="https://lambdalabs.com?ref=perry"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              ...affiliateBtnStyle,
-              background: 'rgba(168,85,247,0.06)',
-              borderColor: 'rgba(168,85,247,0.2)',
-              color: '#a855f7'
-            }}
-            onMouseEnter={(e: any) => {
-              e.currentTarget.style.background = 'rgba(168,85,247,0.1)';
-              e.currentTarget.style.borderColor = 'rgba(168,85,247,0.4)';
-              e.currentTarget.style.boxShadow = '0 0 10px rgba(168,85,247,0.15)';
-            }}
-            onMouseLeave={(e: any) => {
-              e.currentTarget.style.background = 'rgba(168,85,247,0.06)';
-              e.currentTarget.style.borderColor = 'rgba(168,85,247,0.2)';
-              e.currentTarget.style.boxShadow = 'none';
-            }}
-          >
-            <Server size={12} />
-            <span>Lambda Labs</span>
-            <ExternalLink size={10} />
-          </a>
-        </div>
-      </div>
-
-      <div>
-        <label style={lbl}>Ecosystem Partners</label>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-          <span style={{ ...partnerChipStyle, color: '#f59e0b', borderColor: 'rgba(245,158,11,0.25)', background: 'rgba(245,158,11,0.06)' }}>
-            Ollama substrate
-          </span>
-          <span style={{ ...partnerChipStyle, color: '#06b6d4', borderColor: 'rgba(6,182,212,0.25)', background: 'rgba(6,182,212,0.06)' }}>
-            Unbounded AI
-          </span>
-          <span style={{ ...partnerChipStyle, color: '#38bdf8', borderColor: 'rgba(56,189,248,0.25)', background: 'rgba(56,189,248,0.06)' }}>
-            OpenRouter unified
-          </span>
-        </div>
-      </div>
-
-      <Help>
-        Perry is open-source. Supporting our cloud partners and GitHub sponsors keeps development funded, enabling better local models and features.
-      </Help>
-    </Card>
-  );
-}
-
-const affiliateBtnStyle: any = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: 6,
-  padding: '6px 8px',
-  borderRadius: 4,
-  fontSize: '0.72rem',
-  fontWeight: 600,
-  textDecoration: 'none',
-  border: '1px solid',
-  transition: 'all 0.25s ease'
-};
-
-const partnerChipStyle: any = {
-  padding: '2px 8px',
-  fontSize: '0.7rem',
-  fontWeight: 600,
-  border: '1px solid',
-  borderRadius: 12,
-  letterSpacing: '0.02em'
-};
 
 // ─── Gateways ────────────────────────────────────────────────────────────
 

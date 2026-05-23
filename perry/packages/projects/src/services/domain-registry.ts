@@ -19,10 +19,11 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, unlink
 import { join } from 'path';
 import type { Logger } from '@perry/core';
 
-export interface DomainSkillRef {
+export interface DomainAbilityRef {
   service: string;
   name: string;
 }
+export type DomainSkillRef = DomainAbilityRef;
 
 export interface DomainDefinition {
   /** Slug identifier — lowercase-kebab. Used as the `domain` field on projects. */
@@ -37,9 +38,11 @@ export interface DomainDefinition {
   icon: string;
   /** Plugin contract (C): which dashboard panel keys this domain wants surfaced. */
   dashboardPanels: string[];
-  /** Default installed skills the domain wants active. Each entry references
-   *  a skill by service + name. Consumers can read this list when initialising
+  /** Default installed abilities the domain wants active. Each entry references
+   *  an ability by service + name. Consumers can read this list when initialising
    *  domain-specific behavior. Empty array if none configured. */
+  defaultAbilities: DomainAbilityRef[];
+  /** @deprecated use defaultAbilities */
   defaultSkills: DomainSkillRef[];
   /** Allowed MCP servers for this domain. If empty, no MCP servers are allowed.
    *  If undefined/null, all MCP servers are allowed (legacy behavior). */
@@ -67,6 +70,7 @@ const BUILTIN_CODE: DomainDefinition = {
   color: '#3b82f6',
   icon: 'code',
   dashboardPanels: ['projects', 'self-learning', 'trajectories', 'analytics', 'models'],
+  defaultAbilities: [],
   defaultSkills: [],
   baseModel: 'workers',
   builtin: true,
@@ -81,6 +85,7 @@ const BUILTIN_BOOKS: DomainDefinition = {
   color: '#22d3ee',
   icon: 'book-open',
   dashboardPanels: ['projects', 'self-learning', 'trajectories', 'analytics', 'models'],
+  defaultAbilities: [],
   defaultSkills: [],
   baseModel: 'workers',
   builtin: true,
@@ -95,6 +100,7 @@ const BUILTIN_DND: DomainDefinition = {
   color: '#ef4444',
   icon: 'swords',
   dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultAbilities: [],
   defaultSkills: [],
   baseModel: 'workers',
   builtin: true,
@@ -109,6 +115,7 @@ const BUILTIN_META: DomainDefinition = {
   color: '#e2e8f0',
   icon: 'settings',
   dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultAbilities: [],
   defaultSkills: [],
   baseModel: 'workers',
   builtin: true,
@@ -123,6 +130,7 @@ const BUILTIN_EMAIL: DomainDefinition = {
   color: '#06b6d4',
   icon: 'mail',
   dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultAbilities: [],
   defaultSkills: [],
   baseModel: 'workers',
   builtin: true,
@@ -137,6 +145,7 @@ const BUILTIN_HACKING: DomainDefinition = {
   color: '#a855f7',
   icon: 'terminal',
   dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultAbilities: [],
   defaultSkills: [],
   baseModel: 'workers',
   builtin: true,
@@ -183,7 +192,12 @@ export class DomainRegistry {
         .map(f => {
           try {
             const d = JSON.parse(readFileSync(join(this.dir, f), 'utf-8')) as DomainDefinition;
-            if (d && !d.baseModel) d.baseModel = 'workers';
+            if (d) {
+              if (!d.baseModel) d.baseModel = 'workers';
+              const abs = d.defaultAbilities || d.defaultSkills || [];
+              d.defaultAbilities = abs;
+              d.defaultSkills = abs;
+            }
             return d;
           }
           catch { return null; }
@@ -202,7 +216,12 @@ export class DomainRegistry {
     if (!existsSync(p)) return null;
     try {
       const d = JSON.parse(readFileSync(p, 'utf-8')) as DomainDefinition;
-      if (d && !d.baseModel) d.baseModel = 'workers';
+      if (d) {
+        if (!d.baseModel) d.baseModel = 'workers';
+        const abs = d.defaultAbilities || d.defaultSkills || [];
+        d.defaultAbilities = abs;
+        d.defaultSkills = abs;
+      }
       return d;
     }
     catch { return null; }
@@ -215,6 +234,10 @@ export class DomainRegistry {
     if (this.get(id)) return { error: `domain "${id}" already exists` };
 
     const now = new Date().toISOString();
+    const defaultAbilities = Array.isArray(input.defaultAbilities)
+      ? input.defaultAbilities
+      : (Array.isArray(input.defaultSkills) ? input.defaultSkills : []);
+
     const def: DomainDefinition = {
       id,
       label: input.label,
@@ -224,7 +247,8 @@ export class DomainRegistry {
       dashboardPanels: input.dashboardPanels && input.dashboardPanels.length > 0
         ? input.dashboardPanels
         : ['projects', 'self-learning', 'trajectories'],
-      defaultSkills: Array.isArray(input.defaultSkills) ? input.defaultSkills : [],
+      defaultAbilities,
+      defaultSkills: defaultAbilities,
       allowedMcpServers: Array.isArray(input.allowedMcpServers) ? input.allowedMcpServers : undefined,
       baseModel: input.baseModel ?? 'workers',
       modelParameters: input.modelParameters,
@@ -242,11 +266,15 @@ export class DomainRegistry {
     if (!existing) return { error: `domain "${id}" not found` };
     if (existing.builtin && patch.id && patch.id !== id) return { error: 'cannot rename builtin domain' };
 
+    const defaultAbilities = patch.defaultAbilities || patch.defaultSkills || existing.defaultAbilities || existing.defaultSkills || [];
+
     const merged: DomainDefinition = {
       ...existing,
       ...patch,
       id: existing.id,           // immutable
       builtin: existing.builtin, // immutable
+      defaultAbilities,
+      defaultSkills: defaultAbilities,
       createdAt: existing.createdAt,
       updatedAt: new Date().toISOString(),
     };

@@ -3,14 +3,14 @@ import type { ContextCompressor, BaseProvider } from '@perry/ai';
 import type { ContextEngine } from '@perry/rag';
 
 /**
- * @perry/projects — Librarian Agent
+ * @perry/projects — Curator Agent
  *
  * Implements the "Pull Paradigm" (MCP Architecture).
  * Instead of PromptBuilder pushing 50k tokens of raw context onto the Writer,
- * the Librarian Agent uses Tool Calling to query the ContextEngine and
+ * the Curator Agent uses direct context queries against ContextEngine and
  * synthesizes a highly condensed Scene Briefing.
  */
-export class LibrarianAgent {
+export class CuratorAgent {
   private compressor: ContextCompressor;
   private contextEngine: ContextEngine;
   private log: Logger;
@@ -18,18 +18,18 @@ export class LibrarianAgent {
   constructor(compressor: ContextCompressor, contextEngine: ContextEngine, log: Logger) {
     this.compressor = compressor;
     this.contextEngine = contextEngine;
-    this.log = log.child('librarian-agent');
+    this.log = log.child('curator-agent');
   }
 
   /**
    * Builds a tightly scoped Scene Briefing using direct context lookups.
-   * Previously used Tool Calling but Gemma3:12b (Librarian GPU) does not support tools,
+   * Previously used Tool Calling but Gemma3:12b (Curator GPU) does not support tools,
    * causing a 400 error on every call. Since the "tools" were just thin wrappers around
    * ContextEngine methods we already have access to, we now call them directly and skip
    * the provider round-trip for the data-gathering phase entirely.
    */
   async buildBriefing(project: Project, step: ProjectStep, provider: BaseProvider): Promise<string> {
-    this.log.info('Librarian Agent building Scene Briefing (direct lookup)', { step: step.label });
+    this.log.info('Curator Agent building Scene Briefing (direct lookup)', { step: step.label });
 
     // ── Step 1: Gather data directly from the context engine (no tool calls needed) ──
     const characters = this.contextEngine.getCharacters(project.id);
@@ -56,7 +56,7 @@ export class LibrarianAgent {
     const synopsis = `Synopsis: ${project.description?.slice(0, 300) || 'Not defined'}\nWorldbuilding: ${project.context.planning?.slice(0, 300) || 'Not defined'}`;
 
     // ── Step 2: Ask the provider to synthesize a Scene Briefing from gathered data ──
-    const systemPrompt = `You are the Librarian Agent. Synthesize the following raw data into a tightly scoped Scene Briefing (max 400 words) for the Writer model who is about to perform this task:
+    const systemPrompt = `You are the Curator Agent. Synthesize the following raw data into a tightly scoped Scene Briefing (max 400 words) for the Writer model who is about to perform this task:
 
 TASK: "${step.prompt.slice(0, 300)}"
 
@@ -73,11 +73,11 @@ Use ONLY the data provided below. Do not invent details. Output ONLY the briefin
         temperature: 0.1,
         // NO tools — Gemma3 and many local models do not support tool calling
       });
-      return response.text || '[Librarian: empty briefing returned]';
+      return response.text || '[Curator: empty briefing returned]';
     } catch (err: any) {
-      this.log.error('Librarian Agent failed', { error: err.message });
+      this.log.error('Curator Agent failed', { error: err.message });
       // Non-fatal: return empty so the writer gets no briefing rather than crashing
-      return `[Librarian briefing unavailable: ${err.message}]`;
+      return `[Curator briefing unavailable: ${err.message}]`;
     }
   }
 }

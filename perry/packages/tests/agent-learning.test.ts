@@ -10,7 +10,7 @@
 import { rmSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { StateStore, DirectorAgent, LibrarianService, AGENT_REGISTRY } from '../projects/src/index.js';
+import { StateStore, DirectorAgent, CuratorService, AGENT_REGISTRY } from '../projects/src/index.js';
 
 // Force meta.director to use librarian provider during tests instead of workers to run local LLM loop
 if (AGENT_REGISTRY['meta.director']) {
@@ -58,9 +58,9 @@ const mockLog = {
 function createTempWorkspace(): string {
   const systemTemp = tmpdir();
   const dir = mkdtempSync(join(systemTemp, 'perry-learning-test-'));
-  mkdirSync(join(dir, 'skills-installed'), { recursive: true });
-  mkdirSync(join(dir, 'skills-pending'), { recursive: true });
-  mkdirSync(join(dir, 'skills-archived'), { recursive: true });
+  mkdirSync(join(dir, 'abilities-installed'), { recursive: true });
+  mkdirSync(join(dir, 'abilities-pending'), { recursive: true });
+  mkdirSync(join(dir, 'abilities-archived'), { recursive: true });
   return dir;
 }
 
@@ -117,16 +117,16 @@ class MockAIRouter {
     }
     
     // Skill Curation review request
-    if (system.includes('skill database librarian') && !system.includes('merge two overlapping procedural skills')) {
+    if (system.includes('ability database curator') && !system.includes('merge two overlapping procedural abilities')) {
       return {
         text: JSON.stringify({
-          redundantSkillNames: ['redundant']
+          redundantAbilityNames: ['redundant']
         })
       };
     }
     
     // Skill merge synthesis request
-    if (system.includes('skill database librarian') && system.includes('merge two overlapping procedural skills')) {
+    if (system.includes('ability database curator') && system.includes('merge two overlapping procedural abilities')) {
       return {
         text: JSON.stringify({
           description: 'Synthesized skill that merges A and B capabilities.',
@@ -309,20 +309,20 @@ service: scout
 This is the skill body. It does something cool.
 `;
 
-await test('LibrarianService proposals creation and human approval flow', async () => {
+await test('CuratorService proposals creation and human approval flow', async () => {
   const workspaceDir = createTempWorkspace();
   try {
     const store = new StateStore(workspaceDir, mockLog);
     await store.initialize();
     
     // Mark initialized so we proceed directly to review/proposal generation
-    store.setMeta('librarian_initialized', '1');
+    store.setMeta('curator_initialized', '1');
 
     const router = new MockAIRouter() as any;
-    const librarian = new LibrarianService(workspaceDir, store, router, mockLog);
+    const curator = new CuratorService(workspaceDir, store, router, mockLog);
 
     // Write two skills: "keep-me" and "redundant"
-    const scoutDir = join(workspaceDir, 'skills-installed', 'scout');
+    const scoutDir = join(workspaceDir, 'abilities-installed', 'scout');
     mkdirSync(scoutDir, { recursive: true });
 
     writeFileSync(join(scoutDir, 'keep-me.md'), `---
@@ -343,37 +343,37 @@ status: installed
 Redundant body.
 `, 'utf-8');
 
-    // Run librarian pass in live mode (dryRun: false)
-    const passResult = await librarian.runLibrarianPass({ dryRun: false, runLlmReview: true });
+    // Run curator pass in live mode (dryRun: false)
+    const passResult = await curator.runCuratorPass({ dryRun: false, runLlmReview: true });
     
     // In our live mode with proposals enabled, it creates a proposal instead of immediately archiving
     assertEqual(passResult.seeded.length, 1, 'should seed 1 proposal');
     assertEqual(passResult.seeded[0], 'scout/redundant (proposed)', 'proposed naming matches');
     
-    // Active skill is still in skills-installed
+    // Active skill is still in abilities-installed
     assert(existsSync(join(scoutDir, 'redundant.md')), 'redundant skill should not be deleted yet');
     
     // Let's verify proposal was written to store
-    const proposals = store.listLibrarianProposals();
+    const proposals = store.listCuratorProposals();
     assertEqual(proposals.length, 1, 'should have 1 proposal in database');
-    assertEqual(proposals[0].skill_name, 'redundant', 'proposed skill name');
+    assertEqual(proposals[0].ability_name, 'redundant', 'proposed skill name');
     assertEqual(proposals[0].action, 'archive', 'proposed action');
     assertEqual(proposals[0].status, 'pending', 'initial status');
 
     // Operator approves the proposal (triggers actual archive)
     const proposalId = proposals[0].id;
-    await librarian.applyProposal(proposalId);
+    await curator.applyProposal(proposalId);
 
-    // Verify it is moved to skills-archived and has status: archived
+    // Verify it is moved to abilities-archived and has status: archived
     assert(!existsSync(join(scoutDir, 'redundant.md')), 'removed from active after approval');
-    const archivedPath = join(workspaceDir, 'skills-archived', 'scout', 'redundant.md');
+    const archivedPath = join(workspaceDir, 'abilities-archived', 'scout', 'redundant.md');
     assert(existsSync(archivedPath), 'exists in archived directory');
     
     const archivedContent = readFileSync(archivedPath, 'utf-8');
     assert(archivedContent.includes('status: archived'), 'updated status in archived file');
 
     // Verify proposal status in database updated to executed
-    const updatedProps = store.listLibrarianProposals();
+    const updatedProps = store.listCuratorProposals();
     assertEqual(updatedProps[0].status, 'executed', 'proposal status executed');
 
   } finally {
@@ -383,16 +383,16 @@ Redundant body.
 
 console.log('\n─── 3. Skill Merge/Synthesis Tests ───');
 
-await test('LibrarianService skill merge/synthesis process', async () => {
+await test('CuratorService ability merge/synthesis process', async () => {
   const workspaceDir = createTempWorkspace();
   try {
     const store = new StateStore(workspaceDir, mockLog);
     await store.initialize();
 
     const router = new MockAIRouter() as any;
-    const librarian = new LibrarianService(workspaceDir, store, router, mockLog);
+    const curator = new CuratorService(workspaceDir, store, router, mockLog);
 
-    const scoutDir = join(workspaceDir, 'skills-installed', 'scout');
+    const scoutDir = join(workspaceDir, 'abilities-installed', 'scout');
     mkdirSync(scoutDir, { recursive: true });
     
     const pathA = join(scoutDir, 'skillA.md');
@@ -417,7 +417,7 @@ Body B
 `, 'utf-8');
 
     // Run merge
-    await librarian.mergeSkills('scout', 'skillA', 'skillB', 'mergedSkill');
+    await curator.mergeAbilities('scout', 'skillA', 'skillB', 'mergedSkill');
 
     // Verify original files deleted
     assert(!existsSync(pathA), 'skillA file should be deleted');
@@ -433,10 +433,10 @@ Body B
     assert(mergedContent.includes('This is the body of the new merged skill.'), 'merged body');
 
     // Verify backup was created
-    const backups = await librarian.listBackups();
+    const backups = await curator.listBackups();
     assertEqual(backups.length, 1, '1 backup should be created');
-    assertEqual(backups[0].action, 'librarian_merge', 'backup action matches');
-    assertEqual(backups[0].skills.length, 2, 'backup covers both merged skills');
+    assertEqual(backups[0].action, 'curator_merge', 'backup action matches');
+    assertEqual(backups[0].abilities.length, 2, 'backup covers both merged skills');
 
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
@@ -452,26 +452,26 @@ await test('StateStore telemetry logging and aggregated stats queries', async ()
     await store.initialize();
 
     // Log some telemetry records
-    store.logSkillExecution('scout', 'search-patterns', true, 120);
-    store.logSkillExecution('scout', 'search-patterns', true, 80);
-    store.logSkillExecution('scout', 'search-patterns', false, 250, 'Timeout occurred');
-    store.logSkillExecution('scout', 'extract-data', true, 50);
+    store.logAbilityExecution('scout', 'search-patterns', true, 120);
+    store.logAbilityExecution('scout', 'search-patterns', true, 80);
+    store.logAbilityExecution('scout', 'search-patterns', false, 250, 'Timeout occurred');
+    store.logAbilityExecution('scout', 'extract-data', true, 50);
 
     // List telemetry history
-    const history = store.listSkillTelemetry(50);
+    const history = store.listAbilityTelemetry(50);
     assertEqual(history.length, 4, 'should return all 4 items');
-    assertEqual(history[0].skill_name, 'extract-data', 'most recent first');
+    assertEqual(history[0].ability_name, 'extract-data', 'most recent first');
     assertEqual(history[0].success, 1, 'success representation');
     assertEqual(history[1].error, 'Timeout occurred', 'error saved');
 
     // Query success rate for search-patterns
-    const statsPatterns = store.getSkillSuccessRate('scout', 'search-patterns');
+    const statsPatterns = store.getAbilitySuccessRate('scout', 'search-patterns');
     assertEqual(statsPatterns.total, 3, 'total runs for search-patterns');
     assert(Math.abs(statsPatterns.successRate - 0.6666) < 0.01, `success rate should be 2/3, got ${statsPatterns.successRate}`);
     assertEqual(statsPatterns.avgDurationMs, 150, 'average duration (120+80+250)/3 = 150');
 
     // Query success rate for non-existent skill
-    const statsNone = store.getSkillSuccessRate('scout', 'unknown');
+    const statsNone = store.getAbilitySuccessRate('scout', 'unknown');
     assertEqual(statsNone.total, 0, 'zero runs for unknown');
     assertEqual(statsNone.successRate, 0, 'zero success rate');
 

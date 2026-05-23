@@ -1,4 +1,4 @@
-import { SkillEvaluator } from '@perry/core';
+import { AbilityEvaluator } from '@perry/core';
 import type { Project, ProjectStep, CompletionResponse } from '@perry/core';
 import { getGateFor } from '../services/quality-gates.js';
 import { generateCalibrationPassSteps } from '../templates.js';
@@ -68,7 +68,7 @@ export class StandardLlmRunner implements StepRunnerStrategy {
 
   async execute(project: Project, step: ProjectStep, runner: StepRunner): Promise<string> {
     const startTime = Date.now();
-    const appliedSkills = runner.directorSkills.filter(s => {
+    const appliedAbilities = runner.directorAbilities.filter(s => {
       const w = s.appliesWhen;
       if (!w) return false;
       return !w.task_type || w.task_type === '*' || w.task_type === step.taskType;
@@ -684,17 +684,17 @@ export class StandardLlmRunner implements StepRunnerStrategy {
           runner.log.warn(`Attempt ${attempt} failed`, { error: err.message });
           
           try {
-            const matched = SkillEvaluator.evaluate(runner.directorSkills, {
+            const matched = AbilityEvaluator.evaluate(runner.directorAbilities, {
               task_type: step.taskType,
               error_fingerprint: err.message,
             });
             if (matched.length > 0) {
-              const skill = matched[0];
-              if (skill.frontmatter.retry_override !== undefined) {
-                const parsedOverride = parseInt(skill.frontmatter.retry_override, 10);
+              const ability = matched[0];
+              if (ability.frontmatter.retry_override !== undefined) {
+                const parsedOverride = parseInt(ability.frontmatter.retry_override, 10);
                 if (!isNaN(parsedOverride) && parsedOverride > maxAttempts) {
-                  runner.log.info('Applying director skill retry override', {
-                    skill: skill.name,
+                  runner.log.info('Applying director ability retry override', {
+                    ability: ability.name,
                     oldMaxAttempts: maxAttempts,
                     newMaxAttempts: parsedOverride,
                   });
@@ -703,8 +703,8 @@ export class StandardLlmRunner implements StepRunnerStrategy {
                 }
               }
             }
-          } catch (skillErr: any) {
-            runner.log.warn('Failed to evaluate director skills for retry override', { error: skillErr.message });
+          } catch (abilityErr: any) {
+            runner.log.warn('Failed to evaluate director abilities for retry override', { error: abilityErr.message });
           }
           
           if (err.message.startsWith('[AUDITOR REJECTION]:')) {
@@ -1042,15 +1042,15 @@ export class StandardLlmRunner implements StepRunnerStrategy {
       }
 
       const duration = Date.now() - startTime;
-      for (const skill of appliedSkills) {
-        runner.stateStore.logSkillExecution('director', skill.name, true, duration);
+      for (const ability of appliedAbilities) {
+        runner.stateStore.logAbilityExecution('director', ability.name, true, duration);
       }
 
       return result;
     } catch (err: any) {
       const duration = Date.now() - startTime;
-      for (const skill of appliedSkills) {
-        runner.stateStore.logSkillExecution('director', skill.name, false, duration, err.message || String(err));
+      for (const ability of appliedAbilities) {
+        runner.stateStore.logAbilityExecution('director', ability.name, false, duration, err.message || String(err));
       }
       throw err;
     }

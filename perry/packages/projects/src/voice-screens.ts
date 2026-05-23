@@ -1,4 +1,4 @@
-import { loadInstalledSkills, SkillEvaluator } from '@perry/core';
+import { loadInstalledAbilities, AbilityEvaluator } from '@perry/core';
 
 /**
  * voice-screens — shared regex bank for filter-word / named-emotion /
@@ -113,21 +113,21 @@ export function scanLeaks(text: string, workspaceDir?: string, penSlug?: string)
   const narration = stripDialogue(text);
   const found = new Map<string, string[]>();
 
-  let skills: any[] = [];
+  let abilities: any[] = [];
   if (workspaceDir && penSlug) {
     try {
-      skills = loadInstalledSkills(workspaceDir, 'audit');
+      abilities = loadInstalledAbilities(workspaceDir, 'audit');
     } catch { /* ignore load failures */ }
   }
 
   const add = (tag: string, m: string) => {
-    if (workspaceDir && penSlug && skills.length > 0) {
-      const matched = SkillEvaluator.evaluate(skills, {
+    if (workspaceDir && penSlug && abilities.length > 0) {
+      const matched = AbilityEvaluator.evaluate(abilities, {
         pen_slug: penSlug,
         leak_tag: tag,
       });
-      const ignored = matched.some(skill => 
-        skill.frontmatter.action === 'ignore' || skill.frontmatter.action === 'skip'
+      const ignored = matched.some((ability: any) => 
+        ability.frontmatter.action === 'ignore' || ability.frontmatter.action === 'skip'
       );
       if (ignored) return;
     }

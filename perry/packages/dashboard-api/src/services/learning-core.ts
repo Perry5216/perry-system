@@ -38,7 +38,7 @@
 
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
-import type { EventBus, Logger, SkillProposer, TrajectorySkillWriter } from '@perry/core';
+import type { EventBus, Logger, AbilityProposer, TrajectoryAbilityWriter } from '@perry/core';
 import type { StateStore } from '@perry/projects';
 
 const META_KEY = 'learning_state';
@@ -60,11 +60,11 @@ interface LearningEntry {
   lastDurationMs?: number;
   /** Last error string when failures > 0. */
   lastError?: string;
-  /** Last metadata block — folded into the skill body when threshold fires. */
+  /** Last metadata block — folded into the ability body when threshold fires. */
   lastMetadata?: Record<string, any>;
   firstSeen: string;
   lastSeen: string;
-  /** Set true once SkillProposer fired for this (source, kind, fingerprint). */
+  /** Set true once AbilityProposer fired for this (source, kind, fingerprint). */
   proposed: boolean;
 }
 
@@ -131,10 +131,10 @@ export class LearningCore {
   constructor(
     private eventBus: EventBus,
     private stateStore: StateStore,
-    private skillProposer: SkillProposer,
+    private abilityProposer: AbilityProposer,
     private log: Logger,
     private workspaceDir: string,
-    private trajectoryWriter?: TrajectorySkillWriter,
+    private trajectoryWriter?: TrajectoryAbilityWriter,
   ) {
     this.loadState();
     this.subscribe();
@@ -274,15 +274,15 @@ export class LearningCore {
   // ─── Skill rendering ───────────────────────────────────────────────────
 
   private proposeFor(e: LearningEntry): boolean {
-    const skillName = `${e.source}-${e.kind}-${e.fingerprint}`
+    const abilityName = `${e.source}-${e.kind}-${e.fingerprint}`
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, '-')
       .replace(/-+/g, '-')
       .slice(0, 40);
     const body = this.renderBody(e);
     const description = this.renderDescription(e);
-    const file = this.skillProposer.propose({
-      name: skillName,
+    const file = this.abilityProposer.propose({
+      name: abilityName,
       description,
       service: e.source,
       body,
@@ -299,7 +299,7 @@ export class LearningCore {
       },
     });
     if (file) {
-      this.log.info('LearningCore proposed skill', { source: e.source, kind: e.kind, fingerprint: e.fingerprint, file });
+      this.log.info('LearningCore proposed ability', { source: e.source, kind: e.kind, fingerprint: e.fingerprint, file });
       return true;
     }
     return false;
@@ -332,11 +332,11 @@ export class LearningCore {
       '## Suggested response',
       `LearningCore raised this because \`${e.source}\` saw the same \`${e.kind}\` pattern enough times to suggest it\'s a stable signal — not a one-off.`,
       'Options:',
-      '- **Promote** if the pattern is real and the suggested response is correct. Promoted skills auto-load on the consumer side (where wired) or surface as documentation for operators.',
+      '- **Promote** if the pattern is real and the suggested response is correct. Promoted abilities auto-load on the consumer side (where wired) or surface as documentation for operators.',
       '- **Reject** if this was noise (an outage, a debugging session, a one-time data quality issue).',
       '- **Edit** the markdown before promoting if the auto-rendered body needs tightening — your edits stick.',
       '',
-      'When promoted, this skill becomes visible to any consumer reading `workspace/skills-installed/' + e.source + '/`.',
+      'When promoted, this ability becomes visible to any consumer reading `workspace/abilities-installed/' + e.source + '/`.',
     );
     return lines.filter(l => l !== '').join('\n');
   }

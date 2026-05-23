@@ -13,8 +13,8 @@ import type {
   Project, ProjectStep, ContextBudget, ContextSlot, SlotPriority,
   BudgetReport, AIProvider, Logger,
 } from '@perry/core';
-import { ContextBudgetManager, ConfigService, loadInstalledSkills } from '@perry/core';
-import type { EventBus, LoadedSkill } from '@perry/core';
+import { ContextBudgetManager, ConfigService, loadInstalledAbilities } from '@perry/core';
+import type { EventBus, LoadedAbility } from '@perry/core';
 import type { ContextCompressor } from '@perry/ai';
 import type { ContextEngine } from '@perry/rag';
 import { readFileSync, existsSync } from 'fs';
@@ -42,7 +42,7 @@ const DEFAULT_INJURY_WORDS = [
   'burn', 'scorch', 'gash', 'wound', 'slash', 'pierce', 'sting', 'swel', 'scar'
 ];
 
-import { LibrarianAgent } from './librarian-agent.js';
+import { CuratorAgent } from './curator-agent.js';
 
 export class PromptBuilder {
   private budgetManager: ContextBudgetManager;
@@ -52,7 +52,7 @@ export class PromptBuilder {
   private log: Logger;
   private workspaceDir: string;
   private config: ConfigService;
-  private librarianAgent: LibrarianAgent | null = null;
+  private curatorAgent: CuratorAgent | null = null;
   /** Optional RAG service for bible-aware retrieval. Injected post-construction
    *  (avoid circular deps via the @perry/rag package). When set, the chapter-
    *  write path pulls only the most relevant bible chunks instead of injecting
@@ -93,26 +93,26 @@ export class PromptBuilder {
     this.config = config;
     this.log = log;
     if (this.compressor) {
-      this.librarianAgent = new LibrarianAgent(this.compressor, this.contextEngine, this.log);
+      this.curatorAgent = new CuratorAgent(this.compressor, this.contextEngine, this.log);
     }
-    this.refreshSkipSkills();   // initial load — populates from any previously-promoted skills
+    this.refreshSkipAbilities();   // initial load — populates from any previously-promoted abilities
   }
 
   /**
-   * Skip-rules loaded from `workspace/skills-installed/prompt-builder/` —
-   * promoted skills with `applies_when: { query_kind, topic_fingerprint, action: 'skip' }`
+   * Skip-rules loaded from `workspace/abilities-installed/prompt-builder/` —
+   * promoted abilities with `applies_when: { query_kind, topic_fingerprint, action: 'skip' }`
    * tell us to short-circuit specific RAG queries that have proven useless.
    * Reloaded periodically (cheap fs read of a small dir) so newly-promoted
-   * skills become active without a restart.
+   * abilities become active without a restart.
    */
   private skipRules: Array<{ name: string; queryKind: string; topicFingerprint: string }> = [];
   private skipRulesLoadedAt = 0;
   private readonly SKIP_RULES_TTL_MS = 60_000;
 
-  private refreshSkipSkills(): void {
+  private refreshSkipAbilities(): void {
     try {
-      const skills: LoadedSkill[] = loadInstalledSkills(this.workspaceDir, 'prompt-builder');
-      this.skipRules = skills
+      const abilities: LoadedAbility[] = loadInstalledAbilities(this.workspaceDir, 'prompt-builder');
+      this.skipRules = abilities
         .filter(s => s.appliesWhen?.action === 'skip')
         .map(s => ({
           name: s.name,
@@ -122,21 +122,21 @@ export class PromptBuilder {
         .filter(r => r.queryKind && r.topicFingerprint);
       this.skipRulesLoadedAt = Date.now();
       if (this.skipRules.length > 0) {
-        this.log.info('prompt-builder skip skills loaded', { count: this.skipRules.length });
+        this.log.info('prompt-builder skip abilities loaded', { count: this.skipRules.length });
       }
     } catch (err: any) {
-      this.log.warn('prompt-builder skill load failed (non-fatal)', { error: err.message });
+      this.log.warn('prompt-builder ability load failed (non-fatal)', { error: err.message });
     }
   }
 
   /**
-   * Public gate: returns true if a promoted skill says we should skip this
+   * Public gate: returns true if a promoted ability says we should skip this
    * RAG query entirely (saves the embedding call + DB roundtrip). Called by
    * the retrieval sites before they fire.
    */
   protected shouldSkipRagQuery(queryKind: string, queryTopic: string): boolean {
     if (Date.now() - this.skipRulesLoadedAt > this.SKIP_RULES_TTL_MS) {
-      this.refreshSkipSkills();
+      this.refreshSkipAbilities();
     }
     if (this.skipRules.length === 0) return false;
     const topicKey = require('crypto').createHash('sha1')
@@ -144,7 +144,7 @@ export class PromptBuilder {
     
     const matched = this.skipRules.find(r => r.queryKind === queryKind && r.topicFingerprint === topicKey);
     if (matched) {
-      this.stateStore.logSkillExecution('prompt-builder', matched.name, true, 0);
+      this.stateStore.logAbilityExecution('prompt-builder', matched.name, true, 0);
       return true;
     }
     return false;
@@ -152,7 +152,7 @@ export class PromptBuilder {
 
   /**
    * Emit a RAG query outcome event. LearningCore aggregates across many
-   * prompt builds and proposes a "skip this query" skill once the
+   * prompt builds and proposes a "skip this query" ability once the
    * (queryKind, topic) pair has missed enough times. Hit vs miss is
    * encoded as success vs observation so LearningCore can read both.
    */
@@ -677,15 +677,15 @@ export class PromptBuilder {
       slots.push(...manuscriptSlots);
     } else if (step.phase === 'writing' || step.taskType === 'pov_check' || step.taskType === 'stat_update' || (step.taskType === 'book_bible' && step.label.includes('Stat'))) {
       
-      const librarianProvider = this.compressor?.getProvider();
+      const curatorProvider = this.compressor?.getProvider();
       
       // ── THE PULL PARADIGM (MCP ARCHITECTURE) ──
-      // If we have a Librarian Agent configured, and this is a creative writing step,
-      // DO NOT push 50,000 tokens of raw context. Ask the Librarian to pull only what is needed.
-      if (step.taskType === 'creative_writing' && this.librarianAgent && librarianProvider) {
-        const briefing = await this.librarianAgent.buildBriefing(project, step, librarianProvider);
+      // If we have a Curator Agent configured, and this is a creative writing step,
+      // DO NOT push 50,000 tokens of raw context. Ask the Curator to pull only what is needed.
+      if (step.taskType === 'creative_writing' && this.curatorAgent && curatorProvider) {
+        const briefing = await this.curatorAgent.buildBriefing(project, step, curatorProvider);
         slots.push({
-          label: 'Librarian Scene Briefing',
+          label: 'Curator Scene Briefing',
           content: `## Scene Briefing\n\n${briefing}`,
           priority: 2,
           tokenCount: 0,
@@ -1202,23 +1202,23 @@ export class PromptBuilder {
       }
     }
 
-    // Librarian fallback: if regex extraction failed and the Librarian is available,
+    // Curator fallback: if regex extraction failed and the Curator is available,
     // ask it to extract the chapter section from the full outline.
     // Skipped for worker-routed steps — workers can swallow the whole outline.
     if (!this.skipCompressionFlag && this.compressor && this.compressor.isAvailable()) {
       try {
-        this.log.info('Outline regex extraction failed — falling back to Librarian', { chapterNumber });
+        this.log.info('Outline regex extraction failed — falling back to Curator', { chapterNumber });
         const result = await this.compressor.buildBriefing(
           fullOutline,
           `Extract ONLY the outline section for Chapter ${chapterNumber}. Include all plot points, character arcs, and scene details for this chapter only. Do not include other chapters.`,
           2048,
         );
         if (result.compressed && result.compressed.trim().length > 50) {
-          this.log.info('Librarian outline extraction succeeded', { chapterNumber, tokens: result.compressedTokens });
+          this.log.info('Curator outline extraction succeeded', { chapterNumber, tokens: result.compressedTokens });
           return result.compressed.trim();
         }
       } catch (err: any) {
-        this.log.warn('Librarian outline extraction failed', { chapterNumber, error: err.message });
+        this.log.warn('Curator outline extraction failed', { chapterNumber, error: err.message });
       }
     }
 
@@ -2569,7 +2569,7 @@ export class PromptBuilder {
   }
 
   /**
-   * Attempt to compress content using the Librarian.
+   * Attempt to compress content using the Curator.
    * Returns null if compression fails (the system continues without it).
    */
   private async tryCompress(

@@ -39,16 +39,24 @@ export class StateStore {
     const configDir = join(workspaceDir, '.config');
     mkdirSync(configDir, { recursive: true });
     this.jsonPath = join(configDir, 'projects.json');
-    const oldProposalsJsonPath = join(configDir, 'curator_proposals.json');
-    this.proposalsJsonPath = join(configDir, 'librarian_proposals.json');
+    const oldProposalsJsonPath = join(configDir, 'librarian_proposals.json');
+    this.proposalsJsonPath = join(configDir, 'curator_proposals.json');
     if (existsSync(oldProposalsJsonPath) && !existsSync(this.proposalsJsonPath)) {
       try {
         renameSync(oldProposalsJsonPath, this.proposalsJsonPath);
       } catch (err: any) {
-        log.warn('Failed to rename curator_proposals.json', { error: err.message });
+        log.warn('Failed to rename librarian_proposals.json', { error: err.message });
       }
     }
-    this.telemetryJsonPath = join(configDir, 'skill_telemetry.json');
+    const oldTelemetryJsonPath = join(configDir, 'skill_telemetry.json');
+    this.telemetryJsonPath = join(configDir, 'ability_telemetry.json');
+    if (existsSync(oldTelemetryJsonPath) && !existsSync(this.telemetryJsonPath)) {
+      try {
+        renameSync(oldTelemetryJsonPath, this.telemetryJsonPath);
+      } catch (err: any) {
+        log.warn('Failed to rename skill_telemetry.json', { error: err.message });
+      }
+    }
     this.log = log;
   }
 
@@ -63,6 +71,7 @@ export class StateStore {
       this.db.pragma('synchronous = NORMAL');
       this.db.pragma('temp_store = MEMORY');
       this.db.pragma('cache_size = -16000');
+      this.db.pragma('journal_size_limit = 67108864');
 
       // Wrap prepare to transparently cache prepared statements
       const originalPrepare = this.db.prepare.bind(this.db);
@@ -460,6 +469,85 @@ export class StateStore {
         this.log.error('Migration 11 -> 12 failed', { error: err.message });
       }
       currentVersion = 12;
+    }
+
+    // Migration 12 → 13: Rename librarian_proposals to curator_proposals, rename skill_name to ability_name, and skill_telemetry to ability_telemetry
+    if (currentVersion < 13) {
+      try {
+        // 1. Migrate proposals table
+        const tableLibrarianCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='librarian_proposals'").get();
+        if (tableLibrarianCheck) {
+          this.db.exec(`
+            ALTER TABLE librarian_proposals RENAME TO curator_proposals;
+            DROP INDEX IF EXISTS idx_librarian_proposals_status;
+            CREATE INDEX IF NOT EXISTS idx_curator_proposals_status ON curator_proposals(status);
+          `);
+          this.log.info('Renamed librarian_proposals to curator_proposals');
+        } else {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS curator_proposals (
+              id TEXT PRIMARY KEY,
+              service TEXT NOT NULL,
+              ability_name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              action TEXT NOT NULL,
+              details TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_curator_proposals_status ON curator_proposals(status);
+          `);
+        }
+
+        const infoProposals = this.db.prepare("PRAGMA table_info(curator_proposals)").all() as any[];
+        const hasSkillNameProp = infoProposals.some(col => col.name === 'skill_name');
+        if (hasSkillNameProp) {
+          this.db.exec(`
+            ALTER TABLE curator_proposals RENAME COLUMN skill_name TO ability_name;
+          `);
+          this.log.info('Renamed skill_name to ability_name in curator_proposals');
+        }
+
+        // 2. Migrate telemetry table
+        const tableSkillTelemCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='skill_telemetry'").get();
+        if (tableSkillTelemCheck) {
+          this.db.exec(`
+            ALTER TABLE skill_telemetry RENAME TO ability_telemetry;
+            DROP INDEX IF EXISTS idx_skill_telemetry_name;
+          `);
+          this.log.info('Renamed skill_telemetry to ability_telemetry');
+        }
+
+        const tableAbilityTelemCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ability_telemetry'").get();
+        if (tableAbilityTelemCheck) {
+          const infoTelem = this.db.prepare("PRAGMA table_info(ability_telemetry)").all() as any[];
+          const hasSkillNameTelem = infoTelem.some(col => col.name === 'skill_name');
+          if (hasSkillNameTelem) {
+            this.db.exec(`
+              ALTER TABLE ability_telemetry RENAME COLUMN skill_name TO ability_name;
+            `);
+            this.log.info('Renamed skill_name to ability_name in ability_telemetry');
+          }
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_ability_telemetry_name ON ability_telemetry(service, ability_name);
+          `);
+        } else {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS ability_telemetry (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              service TEXT NOT NULL,
+              ability_name TEXT NOT NULL,
+              success INTEGER NOT NULL,
+              duration_ms INTEGER NOT NULL,
+              error TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ability_telemetry_name ON ability_telemetry(service, ability_name);
+          `);
+        }
+      } catch (err: any) {
+        this.log.error('Migration 12 -> 13 failed', { error: err.message });
+      }
+      currentVersion = 13;
     }
 
     // Persist current schema version
@@ -1263,7 +1351,7 @@ export class StateStore {
     if (opts.penSlug) { conds.push('pen_slug = ?'); params.push(opts.penSlug); }
     // Find the oldest matching row's id, then UPDATE only if still 'open'.
     const pick = this.db.prepare(
-      `SELECT id FROM task_pool WHERE ${conds.join(' AND ')} ORDER BY created_at LIMIT 1`
+      `SELECT id FROM task_pool WHERE ${conds.join(' AND ')} ORDER BY created_at ASC, id ASC LIMIT 1`
     ).get(...params) as any;
     if (!pick) return null;
     const upd = this.db.prepare(
@@ -1455,7 +1543,7 @@ export class StateStore {
         LEFT JOIN projects p ON p.id = s.project_id
         WHERE s.status = 'completed' AND s.completed_at >= @cutoff
         GROUP BY s.project_id
-        ORDER BY completed DESC
+        ORDER BY completed DESC, lastActivity DESC, projectId DESC
         LIMIT 25
       `).all({ cutoff }) as any[];
 
@@ -1477,7 +1565,7 @@ export class StateStore {
         loraCadence = this.db.prepare(`
           SELECT pen_slug AS penSlug, version, trained_at AS trainedAt, promoted
           FROM lora_versions
-          ORDER BY trained_at DESC
+          ORDER BY trained_at DESC, pen_slug DESC, version DESC
           LIMIT 20
         `).all() as any[];
         loraCadence = loraCadence.map(r => ({ ...r, promoted: !!r.promoted }));
@@ -1544,7 +1632,7 @@ export class StateStore {
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const limit = Math.min(Math.max(1, opts.limit || 50), 500);
     const rows = this.db.prepare(
-      `SELECT * FROM task_pool ${where} ORDER BY created_at DESC LIMIT ?`
+      `SELECT * FROM task_pool ${where} ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(...params, limit) as any[];
     return rows.map(rowToTask);
   }
@@ -1652,7 +1740,7 @@ export class StateStore {
     if (opts.domain) { conds.push('domain = ?'); params.push(opts.domain); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     return this.db.prepare(
-      `SELECT * FROM agent_sessions ${where} ORDER BY created_at DESC LIMIT ?`
+      `SELECT * FROM agent_sessions ${where} ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(...params, Math.min(opts.limit || 50, 500));
   }
 
@@ -1726,7 +1814,7 @@ export class StateStore {
     if (opts.status)    { conds.push('status = ?');     params.push(opts.status); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     return this.db.prepare(
-      `SELECT * FROM agent_invocations ${where} ORDER BY created_at DESC LIMIT ?`
+      `SELECT * FROM agent_invocations ${where} ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(...params, Math.min(opts.limit || 100, 1000));
   }
 
@@ -1818,7 +1906,7 @@ export class StateStore {
       `SELECT id, invocation_id, agent_id, domain, pen_slug, worker_class, model,
               messages, tool_calls, outcome, quality_score, rated_by, created_at
        FROM agent_trajectories ${where}
-       ORDER BY created_at DESC
+       ORDER BY created_at DESC, id DESC
        LIMIT ?`
     ).all(...params, limit) as any[];
     return rows.map(r => ({
@@ -1842,12 +1930,12 @@ export class StateStore {
     return row?.n || 0;
   }
 
-  // ── Librarian Proposals CRUD ───────────────────────────────────────────
+  // ── Curator Proposals CRUD ─────────────────────────────────────────────
 
-  addLibrarianProposal(proposal: {
+  addCuratorProposal(proposal: {
     id: string;
     service: string;
-    skill_name: string;
+    ability_name: string;
     status: 'pending' | 'approved' | 'rejected' | 'executed';
     action: 'archive' | 'merge' | 'optimize';
     details: any;
@@ -1857,19 +1945,19 @@ export class StateStore {
     if (this.usingSqlite && this.db) {
       try {
         this.db.prepare(`
-          INSERT INTO librarian_proposals (id, service, skill_name, status, action, details, created_at)
+          INSERT INTO curator_proposals (id, service, ability_name, status, action, details, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)
         `).run(
           proposal.id,
           proposal.service,
-          proposal.skill_name,
+          proposal.ability_name,
           proposal.status,
           proposal.action,
           JSON.stringify(proposal.details),
           createdAt
         );
       } catch (err: any) {
-        this.log.error('Failed to add librarian proposal', { error: err.message });
+        this.log.error('Failed to add curator proposal', { error: err.message });
       }
     } else {
       this.proposalsCache.push({
@@ -1880,14 +1968,14 @@ export class StateStore {
     }
   }
 
-  listLibrarianProposals(): any[] {
+  listCuratorProposals(): any[] {
     if (this.usingSqlite && this.db) {
       try {
-        const rows = this.db.prepare('SELECT * FROM librarian_proposals ORDER BY created_at DESC').all() as any[];
+        const rows = this.db.prepare('SELECT * FROM curator_proposals ORDER BY created_at DESC, id DESC').all() as any[];
         return rows.map(r => ({
           id: r.id,
           service: r.service,
-          skill_name: r.skill_name,
+          ability_name: r.ability_name,
           status: r.status,
           action: r.action,
           details: safeParse(r.details),
@@ -1898,12 +1986,12 @@ export class StateStore {
     return this.proposalsCache;
   }
 
-  updateLibrarianProposalStatus(id: string, status: 'pending' | 'approved' | 'rejected' | 'executed'): void {
+  updateCuratorProposalStatus(id: string, status: 'pending' | 'approved' | 'rejected' | 'executed'): void {
     if (this.usingSqlite && this.db) {
       try {
-        this.db.prepare('UPDATE librarian_proposals SET status = ? WHERE id = ?').run(status, id);
+        this.db.prepare('UPDATE curator_proposals SET status = ? WHERE id = ?').run(status, id);
       } catch (err: any) {
-        this.log.error('Failed to update librarian proposal status', { error: err.message });
+        this.log.error('Failed to update curator proposal status', { error: err.message });
       }
     } else {
       const prop = this.proposalsCache.find(p => p.id === id);
@@ -1914,24 +2002,24 @@ export class StateStore {
     }
   }
 
-  // ── Skill Performance Telemetry CRUD ───────────────────────────────────
+  // ── Ability Performance Telemetry CRUD ─────────────────────────────────────
 
-  logSkillExecution(service: string, name: string, success: boolean, durationMs: number, error?: string): void {
+  logAbilityExecution(service: string, name: string, success: boolean, durationMs: number, error?: string): void {
     const createdAt = new Date().toISOString();
     const successVal = success ? 1 : 0;
     if (this.usingSqlite && this.db) {
       try {
         this.db.prepare(`
-          INSERT INTO skill_telemetry (service, skill_name, success, duration_ms, error, created_at)
+          INSERT INTO ability_telemetry (service, ability_name, success, duration_ms, error, created_at)
           VALUES (?, ?, ?, ?, ?, ?)
         `).run(service, name, successVal, durationMs, error || null, createdAt);
       } catch (err: any) {
-        this.log.error('Failed to log skill execution telemetry', { error: err.message });
+        this.log.error('Failed to log ability execution telemetry', { error: err.message });
       }
     } else {
       this.telemetryCache.push({
         service,
-        skill_name: name,
+        ability_name: name,
         success: successVal,
         duration_ms: durationMs,
         error: error || null,
@@ -1941,7 +2029,7 @@ export class StateStore {
     }
 
     if (this.eventBus) {
-      this.eventBus.emit('skill:execution', {
+      this.eventBus.emit('ability:execution', {
         service,
         name,
         success,
@@ -1951,15 +2039,15 @@ export class StateStore {
     }
   }
 
-  getSkillSuccessRate(service: string, name: string): { total: number; successRate: number; avgDurationMs: number } {
+  getAbilitySuccessRate(service: string, name: string): { total: number; successRate: number; avgDurationMs: number } {
     if (this.usingSqlite && this.db) {
       try {
         const row = this.db.prepare(`
           SELECT COUNT(*) as total,
                  SUM(success) as successful,
                  AVG(duration_ms) as avg_duration
-          FROM skill_telemetry
-          WHERE service = ? AND skill_name = ?
+          FROM ability_telemetry
+          WHERE service = ? AND ability_name = ?
         `).get(service, name) as any;
         if (!row || row.total === 0) {
           return { total: 0, successRate: 0, avgDurationMs: 0 };
@@ -1973,7 +2061,7 @@ export class StateStore {
         return { total: 0, successRate: 0, avgDurationMs: 0 };
       }
     }
-    const filtered = this.telemetryCache.filter(t => t.service === service && t.skill_name === name);
+    const filtered = this.telemetryCache.filter(t => t.service === service && t.ability_name === name);
     if (filtered.length === 0) {
       return { total: 0, successRate: 0, avgDurationMs: 0 };
     }
@@ -1986,27 +2074,27 @@ export class StateStore {
     };
   }
 
-  listSkillTelemetry(limit = 100): any[] {
+  listAbilityTelemetry(limit = 100): any[] {
     if (this.usingSqlite && this.db) {
       try {
-        return this.db.prepare('SELECT * FROM skill_telemetry ORDER BY created_at DESC, id DESC LIMIT ?').all(limit);
+        return this.db.prepare('SELECT * FROM ability_telemetry ORDER BY created_at DESC, id DESC LIMIT ?').all(limit);
       } catch { return []; }
     }
     return this.telemetryCache.slice(-limit).reverse();
   }
 
-  getTrajectoriesForSkill(service: string, skillName: string): { success: any[]; failure: any[] } {
+  getTrajectoriesForAbility(service: string, abilityName: string): { success: any[]; failure: any[] } {
     if (!this.usingSqlite || !this.db) {
       return { success: [], failure: [] };
     }
     try {
-      // 1. Search for trajectories containing the skillName in their messages or tool_calls
+      // 1. Search for trajectories containing the abilityName in their messages or tool_calls
       const matches = this.db.prepare(`
         SELECT * FROM agent_trajectories
         WHERE messages LIKE ? OR tool_calls LIKE ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 50
-      `).all(`%${skillName}%`, `%${skillName}%`) as any[];
+      `).all(`%${abilityName}%`, `%${abilityName}%`) as any[];
 
       const parseRow = (r: any) => ({
         ...r,
@@ -2022,7 +2110,7 @@ export class StateStore {
         const fallback = this.db.prepare(`
           SELECT * FROM agent_trajectories
           WHERE agent_id = ? OR domain = ? OR worker_class = ?
-          ORDER BY created_at DESC
+          ORDER BY created_at DESC, id DESC
           LIMIT 50
         `).all(service, service, service) as any[];
 
@@ -2048,7 +2136,7 @@ export class StateStore {
         failure: failure.slice(0, 10)
       };
     } catch (err: any) {
-      this.log.error('Failed to get trajectories for skill', { skillName, service, error: err.message });
+      this.log.error('Failed to get trajectories for ability', { abilityName, service, error: err.message });
       return { success: [], failure: [] };
     }
   }

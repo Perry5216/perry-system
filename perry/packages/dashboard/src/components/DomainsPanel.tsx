@@ -36,7 +36,9 @@ import {
   Info,
   DownloadCloud,
   Mail,
-  Swords
+  Swords,
+  Users,
+  Loader2
 } from 'lucide-react';
 
 interface Domain {
@@ -228,6 +230,8 @@ export function DomainsPanel() {
     recommendedSkills?: { name: string; reason: string }[];
     suggestedNewSkills?: { name: string; description: string; body: string }[];
   } | null>(() => getSavedDraftValue('assessmentResults', null));
+  const [isProvisioningTeam, setIsProvisioningTeam] = useState<boolean>(false);
+
   const [isAssessing, setIsAssessing] = useState<boolean>(false);
   const [assessmentError, setAssessmentError] = useState<string | null>(null);
   const [assessmentStatus, setAssessmentStatus] = useState<string>('');
@@ -544,7 +548,7 @@ export function DomainsPanel() {
       setError(null);
       const [dRes, sRes, mRes, mcpRes] = await Promise.all([
         fetch('/api/domains', { credentials: 'include' }),
-        fetch('/api/skills', { credentials: 'include' }),
+        fetch('/api/abilities', { credentials: 'include' }),
         fetch('/api/models', { credentials: 'include' }),
         fetch('/api/domains/mcp-servers', { credentials: 'include' }),
       ]);
@@ -806,6 +810,63 @@ export function DomainsPanel() {
     }
   }
 
+  async function provisionTeam() {
+    if (!assessmentResults || !assessmentResults.domainAnalysis || !assessmentResults.domainAnalysis.suggestedTeamRoles) return;
+    try {
+      setIsProvisioningTeam(true);
+      setError(null);
+      
+      // 1. Save or Update the domain definition first so it exists in the registry!
+      const isEdit = mode === 'edit' && editingId;
+      const url = isEdit ? `/api/domains/${editingId}` : '/api/domains';
+      const method = isEdit ? 'PATCH' : 'POST';
+      const payload = {
+        ...draft,
+        allowedMcpServers: draft.allowedMcpServers === undefined ? null : draft.allowedMcpServers
+      };
+      const r = await fetch(url, {
+        method,
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+        throw new Error(err.error || 'Failed to save domain definition before provisioning team');
+      }
+
+      // 2. Call the provision-team API
+      const provResponse = await fetch('/api/domains/provision-team', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domainId: draft.id,
+          teamRoles: assessmentResults.domainAnalysis.suggestedTeamRoles,
+          recommendedAbilities: assessmentResults.recommendedSkills || [],
+          suggestedNewAbilities: assessmentResults.suggestedNewSkills || [],
+        }),
+      });
+
+      if (!provResponse.ok) {
+        const errData = await provResponse.json().catch(() => ({ error: `HTTP ${provResponse.status}` }));
+        throw new Error(errData.error || 'Failed to provision team');
+      }
+
+      const provData = await provResponse.json();
+
+      alert(`Successfully provisioned team for domain "${draft.label}"!\nCreated agents:\n${provData.agentsCreated.join('\n')}\nSoul files initialized under workspace/souls/agents/`);
+      
+      // Refresh domain list
+      refresh();
+      cancelForm();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setIsProvisioningTeam(false);
+    }
+  }
+
   async function deleteDomain(id: string) {
     if (!confirm(`Delete domain "${id}"? This is not reversible.`)) return;
     try {
@@ -827,7 +888,7 @@ export function DomainsPanel() {
       if (skillDraft.appliesWhen.trim()) {
         try { appliesWhen = JSON.parse(skillDraft.appliesWhen); } catch { throw new Error('appliesWhen must be valid JSON or empty'); }
       }
-      const r = await fetch('/api/skills', {
+      const r = await fetch('/api/abilities', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -1943,6 +2004,33 @@ export function DomainsPanel() {
                                 </span>
                               )}
                             </div>
+                            
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+                              <button
+                                onClick={provisionTeam}
+                                disabled={isProvisioningTeam}
+                                style={{
+                                  background: 'rgba(124, 58, 237, 0.15)',
+                                  border: '1px solid #a78bfa',
+                                  borderRadius: 4,
+                                  color: '#f3f4f6',
+                                  padding: '6px 12px',
+                                  fontSize: '0.68rem',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                {isProvisioningTeam ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : (
+                                  <Users size={12} color="#a78bfa" />
+                                )}
+                                {isProvisioningTeam ? 'Provisioning Domain Team...' : 'Provision Team & Souls'}
+                              </button>
+                            </div>
+
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                               {assessmentResults.domainAnalysis.suggestedTeamRoles.map((roleInfo, rIdx) => (
                                 <div key={rIdx} style={{

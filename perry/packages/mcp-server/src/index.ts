@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { ConfigService, EventBus, Logger, Vault } from '@perry/core';
 import { AIRouter } from '@perry/ai';
 import { MemoryStore, ContextEngine, RagService } from '@perry/rag';
-import { ProjectEngine, StateStore, LibrarianService } from '@perry/projects';
+import { ProjectEngine, StateStore, CuratorService } from '@perry/projects';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync, mkdirSync } from 'fs';
@@ -1854,7 +1854,7 @@ When this skill is activated:
         if (typeof service !== 'string' || typeof name !== 'string') {
           throw new McpError(ErrorCode.InvalidParams, 'service and name must be strings');
         }
-        stateStore.setMeta(`librarian_pin:${service}:${name}`, '1');
+        stateStore.setMeta(`curator_pin:${service}:${name}`, '1');
         return {
           content: [{
             type: 'text',
@@ -1868,7 +1868,7 @@ When this skill is activated:
         if (typeof service !== 'string' || typeof name !== 'string') {
           throw new McpError(ErrorCode.InvalidParams, 'service and name must be strings');
         }
-        stateStore.removeMeta(`librarian_pin:${service}:${name}`);
+        stateStore.removeMeta(`curator_pin:${service}:${name}`);
         return {
           content: [{
             type: 'text',
@@ -1880,8 +1880,8 @@ When this skill is activated:
       case 'librarian_run_pass': {
         const { dryRun, runLlmReview } = request.params.arguments as any;
         try {
-          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
-          const result = await librarian.runLibrarianPass({ dryRun, runLlmReview });
+          const curator = new CuratorService(WORKSPACE, stateStore, aiRouter, log);
+          const result = await curator.runCuratorPass({ dryRun, runLlmReview });
           return {
             content: [{
               type: 'text',
@@ -1895,8 +1895,8 @@ When this skill is activated:
 
       case 'librarian_list_backups': {
         try {
-          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
-          const backups = await librarian.listBackups();
+          const curator = new CuratorService(WORKSPACE, stateStore, aiRouter, log);
+          const backups = await curator.listBackups();
           return {
             content: [{
               type: 'text',
@@ -1914,8 +1914,8 @@ When this skill is activated:
           throw new McpError(ErrorCode.InvalidParams, 'timestamp must be a string');
         }
         try {
-          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
-          const result = await librarian.rollback(timestamp);
+          const curator = new CuratorService(WORKSPACE, stateStore, aiRouter, log);
+          const result = await curator.rollback(timestamp);
           return {
             content: [{
               type: 'text',
@@ -1929,8 +1929,8 @@ When this skill is activated:
 
       case 'librarian_status': {
         try {
-          const installedDir = join(WORKSPACE, 'skills-installed');
-          const pendingDir = join(WORKSPACE, 'skills-pending');
+          const installedDir = join(WORKSPACE, 'abilities-installed');
+          const pendingDir = join(WORKSPACE, 'abilities-pending');
           const legacyInstalledDir = '/app/.claude/commands';
 
           const scan = (dir: string): Array<{ name: string; service: string; isPinned: boolean; path: string }> => {
@@ -1943,12 +1943,12 @@ When this skill is activated:
                 const subFiles = readdirSync(subDir).filter(f => f.endsWith('.md'));
                 for (const file of subFiles) {
                   const name = file.replace(/\.md$/, '');
-                  const isPinned = stateStore.getMeta(`librarian_pin:${ent.name}:${name}`) === '1';
+                  const isPinned = stateStore.getMeta(`curator_pin:${ent.name}:${name}`) === '1';
                   out.push({ name, service: ent.name, isPinned, path: join(subDir, file) });
                 }
               } else if (ent.isFile() && ent.name.endsWith('.md')) {
                 const name = ent.name.replace(/\.md$/, '');
-                const isPinned = stateStore.getMeta(`librarian_pin:worker:${name}`) === '1';
+                const isPinned = stateStore.getMeta(`curator_pin:worker:${name}`) === '1';
                 out.push({ name, service: 'worker', isPinned, path: join(dir, ent.name) });
               }
             }
@@ -1974,7 +1974,7 @@ When this skill is activated:
 
       case 'librarian_list_proposals': {
         try {
-          const proposals = stateStore.listLibrarianProposals();
+          const proposals = stateStore.listCuratorProposals();
           return {
             content: [{
               type: 'text',
@@ -1992,8 +1992,8 @@ When this skill is activated:
           throw new McpError(ErrorCode.InvalidParams, 'id must be a string');
         }
         try {
-          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
-          await librarian.applyProposal(id);
+          const curator = new CuratorService(WORKSPACE, stateStore, aiRouter, log);
+          await curator.applyProposal(id);
           return {
             content: [{
               type: 'text',
@@ -2011,7 +2011,7 @@ When this skill is activated:
           throw new McpError(ErrorCode.InvalidParams, 'id must be a string');
         }
         try {
-          stateStore.updateLibrarianProposalStatus(id, 'rejected');
+          stateStore.updateCuratorProposalStatus(id, 'rejected');
           return {
             content: [{
               type: 'text',
@@ -2029,8 +2029,8 @@ When this skill is activated:
           throw new McpError(ErrorCode.InvalidParams, 'service, skillA, skillB, and newSkillName must be strings');
         }
         try {
-          const librarian = new LibrarianService(WORKSPACE, stateStore, aiRouter, log);
-          await librarian.mergeSkills(service, skillA, skillB, newSkillName);
+          const curator = new CuratorService(WORKSPACE, stateStore, aiRouter, log);
+          await curator.mergeAbilities(service, skillA, skillB, newSkillName);
           return {
             content: [{
               type: 'text',
@@ -2046,15 +2046,15 @@ When this skill is activated:
         const { limit } = request.params.arguments as any;
         const limitVal = typeof limit === 'number' ? limit : 100;
         try {
-          const history = stateStore.listSkillTelemetry(limitVal);
+          const history = stateStore.listAbilityTelemetry(limitVal);
           
-          const allTelemetry = stateStore.listSkillTelemetry(1000);
+          const allTelemetry = stateStore.listAbilityTelemetry(1000);
           const statsMap = new Map<string, { service: string; name: string; total: number; successful: number; totalDuration: number }>();
           for (const item of allTelemetry) {
-            const key = `${item.service}:${item.skill_name}`;
+            const key = `${item.service}:${item.ability_name}`;
             let stat = statsMap.get(key);
             if (!stat) {
-              stat = { service: item.service, name: item.skill_name, total: 0, successful: 0, totalDuration: 0 };
+              stat = { service: item.service, name: item.ability_name, total: 0, successful: 0, totalDuration: 0 };
               statsMap.set(key, stat);
             }
             stat.total += 1;

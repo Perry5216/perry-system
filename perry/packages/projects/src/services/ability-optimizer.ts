@@ -12,7 +12,7 @@ export interface MutationCandidate {
   successPreservationScore?: number;
 }
 
-export class SkillOptimizerService {
+export class AbilityOptimizerService {
   constructor(
     private workspaceDir: string,
     private stateStore: StateStore,
@@ -21,34 +21,34 @@ export class SkillOptimizerService {
   ) {}
 
   /**
-   * Run the GEPA prompt optimization loop for a given skill.
+   * Run the GEPA prompt optimization loop for a given ability.
    */
   async runOptimization(
     service: string,
-    skillName: string,
+    abilityName: string,
     opts?: { provider?: string }
   ): Promise<{ success: boolean; proposalId?: string; reason?: string }> {
-    this.log.info('Starting skill optimization loop', { service, skillName });
+    this.log.info('Starting ability optimization loop', { service, abilityName });
 
-    // 1. Resolve skill path and load content
-    const skillPath = this.resolveSkillPath(service, skillName);
-    if (!skillPath) {
-      return { success: false, reason: `Skill file for "${skillName}" under service "${service}" not found.` };
+    // 1. Resolve ability path and load content
+    const abilityPath = this.resolveAbilityPath(service, abilityName);
+    if (!abilityPath) {
+      return { success: false, reason: `Ability file for "${abilityName}" under service "${service}" not found.` };
     }
 
     let rawContent: string;
     try {
-      rawContent = readFileSync(skillPath, 'utf-8');
+      rawContent = readFileSync(abilityPath, 'utf-8');
     } catch (err: any) {
-      return { success: false, reason: `Failed to read skill file: ${err.message}` };
+      return { success: false, reason: `Failed to read ability file: ${err.message}` };
     }
 
-    const { frontmatter, body: originalBody } = this.parseSkillFile(rawContent);
+    const { frontmatter, body: originalBody } = this.parseAbilityFile(rawContent);
 
     // 2. Query historical trajectories
-    const { success: successTraces, failure: failureTraces } = this.stateStore.getTrajectoriesForSkill(service, skillName);
-    this.log.info('Retrieved trajectories for skill', {
-      skillName,
+    const { success: successTraces, failure: failureTraces } = this.stateStore.getTrajectoriesForAbility(service, abilityName);
+    this.log.info('Retrieved trajectories for ability', {
+      abilityName,
       successCount: successTraces.length,
       failureCount: failureTraces.length,
     });
@@ -56,11 +56,11 @@ export class SkillOptimizerService {
     if (successTraces.length === 0 && failureTraces.length === 0) {
       return {
         success: false,
-        reason: 'No historical execution traces found for this skill in agent_trajectories. Execute some tasks first.'
+        reason: 'No historical execution traces found for this ability in agent_trajectories. Execute some tasks first.'
       };
     }
 
-    const provider = opts?.provider || 'librarian';
+    const provider = opts?.provider || 'curator';
 
     // 3. Critique Phase: Analyze failures
     let critique = 'No failures available to critique.';
@@ -78,15 +78,15 @@ ${conversationSnippet}
 `;
       }).join('\n---\n');
 
-      const systemCritique = `You are an expert prompt auditor. Analyze the following procedural skill instructions and the execution traces where it failed.
+      const systemCritique = `You are an expert prompt auditor. Analyze the following procedural ability instructions and the execution traces where it failed.
 Identify:
-1. Which specific instruction in the skill was violated or failed to prevent the error?
+1. Which specific instruction in the ability was violated or failed to prevent the error?
 2. What missing instruction, warning, or safeguard would have guided the agent to complete the task successfully?
 3. Propose a short corrective guideline.
 
 Provide your critique in clear, concise points.`;
 
-      const userCritique = `Current Skill Instructions:
+      const userCritique = `Current Ability Instructions:
 ${originalBody}
 
 Failure Traces:
@@ -116,28 +116,28 @@ ${failureSummary}`;
 `;
     }).join('\n---\n');
 
-    const systemMutation = `You are a genetic prompt mutator. Your goal is to evolve the current skill instructions to prevent the identified failure modes while preserving successful behaviors.
-You must output a JSON object containing exactly 3 mutated variations of the skill instructions.
+    const systemMutation = `You are a genetic prompt mutator. Your goal is to evolve the current ability instructions to prevent the identified failure modes while preserving successful behaviors.
+You must output a JSON object containing exactly 3 mutated variations of the ability instructions.
 
 Respond ONLY with a JSON object matching this schema:
 {
   "mutations": [
     {
-      "body": "complete revised skill instructions",
+      "body": "complete revised ability instructions",
       "reason": "short explanation of the changes made in this mutation"
     }
   ]
 }
 Do not output any reasoning outside the JSON block.`;
 
-    const userMutation = `Current Skill Instructions:
+    const userMutation = `Current Ability Instructions:
 ${originalBody}
 
 Failed Trace Critique:
 ${critique}
 
 ${successSummary ? `Successful Trace Anchors (Do not break this behavior):\n${successSummary}\n` : ''}
-Generate 3 unique, mutated variations of the skill instructions. For each, optimize for clear, concise imperative guidelines.`;
+Generate 3 unique, mutated variations of the ability instructions. For each, optimize for clear, concise imperative guidelines.`;
 
     const formatSchema = {
       type: "object",
@@ -192,7 +192,7 @@ Generate 3 unique, mutated variations of the skill instructions. For each, optim
 
     // 5. Fitness Evaluation (LLM Judge)
     this.log.info('Running LLM Fitness Judge backtesting');
-    const systemJudge = `You are a strict QA evaluator judge. Your task is to evaluate if a revised set of skill instructions would have prevented a past execution error.
+    const systemJudge = `You are a strict QA evaluator judge. Your task is to evaluate if a revised set of ability instructions would have prevented a past execution error.
 Analyze the past task input, the original error, and the mutated instructions.
 Decide if the mutated instructions successfully prevent the error.
 Rate from 0.0 (Failed/Inadequate) to 1.0 (Completely Solved).
@@ -227,7 +227,7 @@ Do not output any reasoning outside the JSON block.`;
           const error = t.outcome === 'failed' ? (lastMsg?.content || '') : '';
           const userJudge = `Task Input: ${t.input || '(none)'}
 Original Error: ${error || t.outcome}
-Mutated Skill Instructions:
+Mutated Ability Instructions:
 ${cand.body}
 
 Would this mutated instruction guide the agent to successfully complete the task and prevent the error?`;
@@ -269,7 +269,7 @@ Would this mutated instruction guide the agent to successfully complete the task
         for (const t of testSuccesses) {
           const userJudge = `Task Input: ${t.input || '(none)'}
 Expected Output Summary: ${t.output || '(none)'}
-Mutated Skill Instructions:
+Mutated Ability Instructions:
 ${cand.body}
 
 Would this mutated instruction still allow the agent to successfully complete the task without regression?`;
@@ -331,8 +331,8 @@ Would this mutated instruction still allow the agent to successfully complete th
     const winner = improved[0];
     this.log.info('Winning candidate selected', { fitness: winner.fitness, baseline: baselineFitness });
 
-    // 7. Write proposal to librarian_proposals
-    const proposalId = `prop-opt-${skillName}-${Date.now().toString(36)}`;
+    // 7. Write proposal to curator_proposals
+    const proposalId = `prop-opt-${abilityName}-${Date.now().toString(36)}`;
     const improvementPct = Math.round(((winner.fitness || 0) - baselineFitness) * 100);
 
     // Formulate final mutated content with original frontmatter
@@ -356,15 +356,15 @@ ${winner.body.trim()}
     };
 
     try {
-      this.stateStore.addLibrarianProposal({
+      this.stateStore.addCuratorProposal({
         id: proposalId,
         service,
-        skill_name: skillName,
+        ability_name: abilityName,
         status: 'pending',
         action: 'optimize',
         details
       });
-      this.log.info('Successfully wrote librarian optimization proposal', { proposalId });
+      this.log.info('Successfully wrote curator optimization proposal', { proposalId });
       return { success: true, proposalId };
     } catch (err: any) {
       return { success: false, reason: `Failed to save proposal: ${err.message}` };
@@ -373,25 +373,25 @@ ${winner.body.trim()}
 
   // ── Internals ──────────────────────────────────────────────────────────
 
-  private resolveSkillPath(service: string, skillName: string): string | null {
+  private resolveAbilityPath(service: string, abilityName: string): string | null {
     const paths = [
-      join('/app/.claude/commands', `${skillName}.md`),
-      join(this.workspaceDir, '.claude', 'commands', `${skillName}.md`),
-      join(this.workspaceDir, 'skills-installed', service, `${skillName}.md`),
-      join(this.workspaceDir, 'skills-installed', 'global', `${skillName}.md`),
+      join('/app/.claude/commands', `${abilityName}.md`),
+      join(this.workspaceDir, '.claude', 'commands', `${abilityName}.md`),
+      join(this.workspaceDir, 'abilities-installed', service, `${abilityName}.md`),
+      join(this.workspaceDir, 'abilities-installed', 'global', `${abilityName}.md`),
     ];
     for (const p of paths) {
       if (existsSync(p)) return p;
     }
-    // Search in all other subdirs of skills-installed
+    // Search in all other subdirs of abilities-installed
     try {
       const { readdirSync } = require('fs');
-      const root = join(this.workspaceDir, 'skills-installed');
+      const root = join(this.workspaceDir, 'abilities-installed');
       if (existsSync(root)) {
         const subdirs = readdirSync(root, { withFileTypes: true });
         for (const s of subdirs) {
           if (s.isDirectory() && s.name !== service && s.name !== 'global') {
-            const p = join(root, s.name, `${skillName}.md`);
+            const p = join(root, s.name, `${abilityName}.md`);
             if (existsSync(p)) return p;
           }
         }
@@ -400,7 +400,7 @@ ${winner.body.trim()}
     return null;
   }
 
-  private parseSkillFile(raw: string): { frontmatter: Record<string, string>; body: string } {
+  private parseAbilityFile(raw: string): { frontmatter: Record<string, string>; body: string } {
     const normalized = raw.replace(/\r\n/g, '\n');
     const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
     if (!m) return { frontmatter: {}, body: normalized };
@@ -420,3 +420,4 @@ ${winner.body.trim()}
     return { frontmatter, body };
   }
 }
+

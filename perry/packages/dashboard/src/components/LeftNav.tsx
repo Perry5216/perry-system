@@ -20,7 +20,7 @@
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import {
-  Cpu, MessageSquare, FolderOpen, BarChart3, LineChart, ArrowDownToLine, Settings, Users, GitBranch, Sparkles, Layers, UserCircle2, Clock, Plug, ChevronsLeft, ChevronsRight, Target,
+  Cpu, MessageSquare, FolderOpen, BarChart3, LineChart, ArrowDownToLine, Settings, Users, GitBranch, Sparkles, Layers, UserCircle2, Clock, Plug, ChevronsLeft, ChevronsRight, Target, Heart,
 } from 'lucide-react';
 import { playHoverSound, playSelectSound } from '../utils/audio';
 
@@ -161,6 +161,49 @@ export function LeftNav({
           </div>
         ))}
       </div>
+
+      {/* Support / Sponsor button */}
+      <a
+        href="https://github.com/sponsors/Perry5216"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Support & Sponsor Perry"
+        style={{
+          margin: '4px 10px 4px',
+          padding: '8px',
+          background: 'rgba(219, 39, 119, 0.08)',
+          border: '1px solid rgba(219, 39, 119, 0.2)',
+          borderRadius: 6,
+          color: '#f472b6',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          fontFamily: 'inherit',
+          fontSize: '0.7rem',
+          fontWeight: 600,
+          letterSpacing: '0.05em',
+          textDecoration: 'none',
+          flexShrink: 0,
+          transition: 'all 0.2s ease',
+        }}
+        onMouseEnter={(e: any) => {
+          e.currentTarget.style.background = 'rgba(219, 39, 119, 0.15)';
+          e.currentTarget.style.borderColor = 'rgba(219, 39, 119, 0.4)';
+          e.currentTarget.style.color = '#f472b6';
+          e.currentTarget.style.boxShadow = '0 0 8px rgba(219, 39, 119, 0.25)';
+        }}
+        onMouseLeave={(e: any) => {
+          e.currentTarget.style.background = 'rgba(219, 39, 119, 0.08)';
+          e.currentTarget.style.borderColor = 'rgba(219, 39, 119, 0.2)';
+          e.currentTarget.style.color = '#f472b6';
+          e.currentTarget.style.boxShadow = 'none';
+        }}
+      >
+        <Heart size={16} fill="#db2777" style={{ color: '#db2777' }} />
+        {!collapsed && <span>SUPPORT PERRY</span>}
+      </a>
 
       {/* Pinned collapse toggle */}
       <button

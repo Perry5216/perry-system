@@ -1,17 +1,17 @@
 /**
- * @perry/core — TrajectorySkillWriter
+ * @perry/core — TrajectoryAbilityWriter
  *
- * Companion to SkillProposer + verified-patterns. Writes a "trajectory skill"
+ * Companion to AbilityProposer + verified-patterns. Writes a "trajectory ability"
  * markdown file for every first-time-seen (source, kind, fingerprint) tuple
  * that flows through LearningCore. The aim: build a comprehensive record of
  * everything the system has done, browsable and mineable, without polluting
- * the curated skills-pending queue.
+ * the curated abilities-pending queue.
  *
  * Design:
  *   - One file per unique fingerprint, written on FIRST occurrence
- *   - Lives at `workspace/trajectory-skills/{source}/`
- *   - Each file is hand-promotable: copy to `workspace/skills-installed/{source}/`
- *     to make it a curated skill that consumers actually load and apply
+ *   - Lives at `workspace/trajectory-abilities/{source}/`
+ *   - Each file is hand-promotable: copy to `workspace/abilities-installed/{source}/`
+ *     to make it a curated ability that consumers actually load and apply
  *   - Capped per source (rolling — oldest dropped) to keep the dir manageable
  *
  * NEVER throws — best-effort, can't break the caller.
@@ -40,7 +40,7 @@ export interface TrajectoryRecord {
   error?: string;
 }
 
-export class TrajectorySkillWriter {
+export class TrajectoryAbilityWriter {
   private readonly workspaceDir: string;
   private readonly log: Logger;
   private readonly capPerSource: number;
@@ -52,7 +52,7 @@ export class TrajectorySkillWriter {
   }
 
   /**
-   * Write a trajectory-skill for a first-time-seen fingerprint. Returns the
+   * Write a trajectory-ability for a first-time-seen fingerprint. Returns the
    * destination path on success, `null` on failure or skip.
    */
   write(rec: TrajectoryRecord): string | null {
@@ -60,7 +60,7 @@ export class TrajectorySkillWriter {
       if (!/^[a-z][a-z0-9-]{1,20}$/.test(rec.source)) {
         return null;
       }
-      const dir = join(this.workspaceDir, 'trajectory-skills', rec.source);
+      const dir = join(this.workspaceDir, 'trajectory-abilities', rec.source);
       mkdirSync(dir, { recursive: true });
 
       const stamp = rec.firstSeen.replace(/[:.]/g, '-').slice(0, 19);
@@ -76,7 +76,7 @@ export class TrajectorySkillWriter {
 
       return fullPath;
     } catch (err: any) {
-      this.log.warn('TrajectorySkillWriter.write failed (non-fatal)', { source: rec.source, error: err.message });
+      this.log.warn('TrajectoryAbilityWriter.write failed (non-fatal)', { source: rec.source, error: err.message });
       return null;
     }
   }
@@ -95,7 +95,7 @@ export class TrajectorySkillWriter {
       `# Trajectory: ${rec.source} / ${rec.kind} / \`${rec.fingerprint}\``,
       '',
       'First observation of this action variant. Hand-promote to ' +
-        `\`workspace/skills-installed/${rec.source}/\` to make it an active curated skill.`,
+        `\`workspace/abilities-installed/${rec.source}/\` to make it an active curated ability.`,
       '',
     ];
     if (rec.error) {
@@ -131,15 +131,15 @@ export class TrajectorySkillWriter {
 }
 
 /**
- * Read trajectory-skill files for a source. Returns metadata-only (filename,
+ * Read trajectory-ability files for a source. Returns metadata-only (filename,
  * size, mtime) so callers can render lists without paying for full content.
  */
-export function listTrajectorySkills(workspaceDir: string, source: string): Array<{
+export function listTrajectoryAbilities(workspaceDir: string, source: string): Array<{
   filename: string;
   bytes: number;
   mtime: string;
 }> {
-  const dir = join(workspaceDir, 'trajectory-skills', source);
+  const dir = join(workspaceDir, 'trajectory-abilities', source);
   try {
     return readdirSync(dir)
       .filter(f => f.endsWith('.md'))
@@ -154,11 +154,11 @@ export function listTrajectorySkills(workspaceDir: string, source: string): Arra
 }
 
 /**
- * List all sources that have trajectory-skill files. Used by the dashboard
+ * List all sources that have trajectory-ability files. Used by the dashboard
  * to render the per-source counts tile.
  */
 export function listTrajectorySources(workspaceDir: string): string[] {
-  const root = join(workspaceDir, 'trajectory-skills');
+  const root = join(workspaceDir, 'trajectory-abilities');
   try {
     return readdirSync(root, { withFileTypes: true })
       .filter(e => e.isDirectory())

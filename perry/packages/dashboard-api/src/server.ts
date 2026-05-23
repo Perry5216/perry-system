@@ -16,7 +16,7 @@ import { setupAgentRoutes } from './routes/agents.js';
 import { setupSecretsRoutes } from './routes/secrets.js';
 import { setupModelsRoutes } from './routes/models.js';
 import { setupSessionsRoutes } from './routes/sessions.js';
-import { setupSkillsRoutes } from './routes/skills.js';
+import { setupAbilitiesRoutes } from './routes/abilities.js';
 import { setupAnalyticsRoutes } from './routes/analytics.js';
 import { setupLearningRoutes } from './routes/learning.js';
 import { setupDomainsRoutes } from './routes/domains.js';
@@ -45,7 +45,7 @@ export function createServer(
   memoryStore?: MemoryStore,
   chatMemory?: import('./services/chat-memory-service.js').ChatMemoryService,
   learningCore?: import('./services/learning-core.js').LearningCore,
-  skillEvolution?: import('./services/skill-evolution.js').SkillEvolution,
+  abilityEvolution?: import('./services/ability-evolution.js').AbilityEvolution,
   operatorProfile?: import('./services/operator-profile-service.js').OperatorProfileService,
   cronService?: import('./services/cron-service.js').CronService,
   pluginManager?: import('./services/plugin-manager.js').PluginManager,
@@ -119,14 +119,16 @@ export function createServer(
   app.use('/api/integration', setupIntegrationRoutes(projectEngine, log.child('integration')));
   // Sessions browser — FTS5 keyword search over completed step outputs.
   app.use('/api/sessions', setupSessionsRoutes(stateStore, log.child('sessions')));
-  // Skills librarian — list installed + pending, promote, reject.
-  app.use('/api/skills', setupSkillsRoutes(log.child('skills'), workspaceDir, stateStore, aiRouter));
+  // Abilities curator — list installed + pending, promote, reject.
+  const abilitiesRouter = setupAbilitiesRoutes(log.child('abilities'), workspaceDir, stateStore, aiRouter);
+  app.use('/api/abilities', abilitiesRouter);
+  app.use('/api/skills', abilitiesRouter);
   // Analytics — step volume, success rate, prompt sizes, audit health,
   // and learning-corpus snapshot (chunk counts by kind).
   app.use('/api/analytics', setupAnalyticsRoutes(stateStore, log.child('analytics'), memoryStore));
   // Surface per-producer learning telemetry counters so the dashboard can
   // show "the system is actually observing" before the first skill fires.
-  app.use('/api/learning', setupLearningRoutes(stateStore, workspaceDir, log.child('learning'), aiRouter, learningCore, skillEvolution));
+  app.use('/api/learning', setupLearningRoutes(stateStore, workspaceDir, log.child('learning'), aiRouter, learningCore, abilityEvolution));
   // Domain registry — define new task verticals (code-review, security-research,
   // etc.) and configure which dashboard panels each surfaces.
   const domainRegistry = new DomainRegistry({ workspaceDir, log: log.child('domains') });

@@ -102,6 +102,7 @@ export class MemoryStore {
       this.db.pragma('synchronous = NORMAL');
       this.db.pragma('temp_store = MEMORY');
       this.db.pragma('cache_size = -16000');
+      this.db.pragma('journal_size_limit = 67108864');
       this.db.pragma('mmap_size = 268435456');
 
       // Wrap prepare to transparently cache prepared statements
@@ -654,7 +655,7 @@ export class MemoryStore {
         const res = this.db.prepare(`
           DELETE FROM chunks WHERE id IN (
             SELECT id FROM chunks WHERE kind = ?
-            ORDER BY indexed_at ASC LIMIT ?
+            ORDER BY indexed_at ASC, id ASC LIMIT ?
           )
         `).run(kind, toDelete);
         byKind[kind] = res.changes;
@@ -910,7 +911,7 @@ export class MemoryStore {
   getProjectEntries(projectId: string): MemoryEntry[] {
     if (!this.db) return [];
     return this.db.prepare(
-      'SELECT * FROM entries WHERE project_id = @projectId ORDER BY timestamp'
+      'SELECT * FROM entries WHERE project_id = @projectId ORDER BY timestamp ASC, id ASC'
     ).all({ projectId }).map((r: any) => ({
       source: r.source,
       sourceRef: r.source_ref,

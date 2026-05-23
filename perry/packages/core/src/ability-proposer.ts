@@ -1,15 +1,15 @@
 /**
- * @perry/core — SkillProposer
+ * @perry/core — AbilityProposer
  *
- * Service-internal counterpart to the worker-facing `mcp__perry__propose_skill`
+ * Service-internal counterpart to the worker-facing `mcp__perry__propose_ability`
  * MCP tool. Lets non-LLM services (director, audit, GC, prompt-builder)
- * propose skills directly without going through the MCP protocol.
+ * propose abilities directly without going through the MCP protocol.
  *
  * File format and storage layout MATCH the MCP version exactly so the
- * dashboard's per-service filter, the skills route, and the SkillLoader all
+ * dashboard's per-service filter, the abilities route, and the AbilityLoader all
  * see identical proposals regardless of which producer emitted them.
  *
- *   workspace/skills-pending/{service}/{stamp}__{name}.md
+ *   workspace/abilities-pending/{service}/{stamp}__{name}.md
  *
  * Throttling: a service that observes the same pattern every minute would
  * otherwise flood the queue. We track a (service, name) tuple in-memory and
@@ -24,12 +24,12 @@ import type { Logger } from './logger.js';
 
 const DEFAULT_THROTTLE_MS = 60 * 60 * 1000; // 1h between proposals of the same (service, name)
 
-export interface SkillProposal {
+export interface AbilityProposal {
   /** Lowercase-kebab-case, 3-40 chars. Becomes the filename + frontmatter `name`. */
   name: string;
   /** One-line summary, 10-200 chars. */
   description: string;
-  /** Which subsystem this skill is for. Determines storage subdir + consumer. */
+  /** Which subsystem this ability is for. Determines storage subdir + consumer. */
   service: string;
   /** Markdown procedure body. Min 100 chars. */
   body: string;
@@ -39,7 +39,7 @@ export interface SkillProposal {
   evidence?: Record<string, unknown>;
 }
 
-export class SkillProposer {
+export class AbilityProposer {
   private readonly workspaceDir: string;
   private readonly log: Logger;
   private readonly throttleMs: number;
@@ -52,28 +52,28 @@ export class SkillProposer {
   }
 
   /**
-   * Write a proposal to `workspace/skills-pending/{service}/`. Returns the
+   * Write a proposal to `workspace/abilities-pending/{service}/`. Returns the
    * destination path on success, `null` if throttled or already exists.
    *
    * NEVER throws — caller services should treat proposal as best-effort
    * background activity that must not break their primary work.
    */
-  propose(p: SkillProposal): string | null {
+  propose(p: AbilityProposal): string | null {
     try {
       if (!/^[a-z][a-z0-9-]{2,39}$/.test(p.name)) {
-        this.log.warn('skill name rejected (kebab-case, 3-40 chars)', { name: p.name, service: p.service });
+        this.log.warn('ability name rejected (kebab-case, 3-40 chars)', { name: p.name, service: p.service });
         return null;
       }
       if (p.description.length < 10 || p.description.length > 200) {
-        this.log.warn('skill description rejected (10-200 chars)', { length: p.description.length, service: p.service });
+        this.log.warn('ability description rejected (10-200 chars)', { length: p.description.length, service: p.service });
         return null;
       }
       if (p.body.length < 100) {
-        this.log.warn('skill body rejected (<100 chars)', { length: p.body.length, name: p.name, service: p.service });
+        this.log.warn('ability body rejected (<100 chars)', { length: p.body.length, name: p.name, service: p.service });
         return null;
       }
       if (!/^[a-z][a-z0-9-]{1,20}$/.test(p.service)) {
-        this.log.warn('skill service rejected (kebab-case)', { service: p.service });
+        this.log.warn('ability service rejected (kebab-case)', { service: p.service });
         return null;
       }
 
@@ -84,7 +84,7 @@ export class SkillProposer {
         return null;
       }
 
-      const dir = join(this.workspaceDir, 'skills-pending', p.service);
+      const dir = join(this.workspaceDir, 'abilities-pending', p.service);
       mkdirSync(dir, { recursive: true });
 
       // De-dup: if any pending file in this service already proposes the same
@@ -102,8 +102,8 @@ export class SkillProposer {
       const filename = `${stamp}__${p.name}.md`;
       const fullPath = join(dir, filename);
 
-      // Frontmatter mirrors the MCP propose_skill format exactly. applies_when
-      // is serialised as nested YAML so SkillLoader (non-LLM consumers) can
+      // Frontmatter mirrors the MCP propose_ability format exactly. applies_when
+      // is serialised as nested YAML so AbilityLoader (non-LLM consumers) can
       // parse it mechanically.
       let appliesBlock = '';
       if (p.appliesWhen && Object.keys(p.appliesWhen).length > 0) {
@@ -122,22 +122,22 @@ export class SkillProposer {
 
       writeFileSync(fullPath, content, 'utf-8');
       this.lastProposed.set(throttleKey, Date.now());
-      this.log.info('skill proposed', { service: p.service, name: p.name, path: fullPath });
+      this.log.info('ability proposed', { service: p.service, name: p.name, path: fullPath });
       return fullPath;
     } catch (err: any) {
-      this.log.warn('SkillProposer.propose failed (non-fatal)', { service: p.service, name: p.name, error: err.message });
+      this.log.warn('AbilityProposer.propose failed (non-fatal)', { service: p.service, name: p.name, error: err.message });
       return null;
     }
   }
 
-  /** Test/inspection helper — number of skills currently throttled in-memory. */
+  /** Test/inspection helper — number of abilities currently throttled in-memory. */
   throttledCount(): number {
     return this.lastProposed.size;
   }
 }
 
-/** Shape that any service's SkillLoader returns when reading installed skills. */
-export interface LoadedSkill {
+/** Shape that any service's AbilityLoader returns when reading installed abilities. */
+export interface LoadedAbility {
   name: string;
   description: string;
   service: string;
@@ -148,15 +148,15 @@ export interface LoadedSkill {
 }
 
 /**
- * Read all installed skills for a given service from
- * `workspace/skills-installed/{service}/*.md`. Returns parsed frontmatter +
+ * Read all installed abilities for a given service from
+ * `workspace/abilities-installed/{service}/*.md`. Returns parsed frontmatter +
  * body for each. Used by non-LLM consumers.
  *
  * Stateless / fs-driven — re-call on a timer or via fs.watch if you want
  * hot-reload. Cheap (single dir read, small files).
  */
-export function loadInstalledSkills(workspaceDir: string, service: string): LoadedSkill[] {
-  const out: LoadedSkill[] = [];
+export function loadInstalledAbilities(workspaceDir: string, service: string): LoadedAbility[] {
+  const out: LoadedAbility[] = [];
   const loadedPaths = new Set<string>();
 
   const loadFromDir = (dir: string, svc: string) => {
@@ -213,18 +213,18 @@ export function loadInstalledSkills(workspaceDir: string, service: string): Load
   };
 
   // 1. Primary: load from the requested service folder
-  const primaryDir = join(workspaceDir, 'skills-installed', service);
+  const primaryDir = join(workspaceDir, 'abilities-installed', service);
   loadFromDir(primaryDir, service);
 
   // 2. Load from global service folder (if not already loaded)
   if (service !== 'global') {
-    const globalDir = join(workspaceDir, 'skills-installed', 'global');
+    const globalDir = join(workspaceDir, 'abilities-installed', 'global');
     loadFromDir(globalDir, 'global');
   }
 
-  // 3. Fallback: Load from ALL subdirectories in skills-installed
+  // 3. Fallback: Load from ALL subdirectories in abilities-installed
   try {
-    const root = join(workspaceDir, 'skills-installed');
+    const root = join(workspaceDir, 'abilities-installed');
     if (existsSync(root)) {
       const entries = readdirSync(root, { withFileTypes: true });
       for (const ent of entries) {

@@ -28,18 +28,18 @@ import { Router } from 'express';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { Logger } from '@perry/core';
-import { listTrajectorySkills, listTrajectorySources } from '@perry/core';
+import { listTrajectoryAbilities, listTrajectorySources } from '@perry/core';
 import type { StateStore } from '@perry/projects';
 import type { AIRouter } from '@perry/ai';
 import type { LearningCore } from '../services/learning-core.js';
-import type { SkillEvolution } from '../services/skill-evolution.js';
+import type { AbilityEvolution } from '../services/ability-evolution.js';
 
-export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string, log: Logger, aiRouter: AIRouter, learningCore?: LearningCore, skillEvolution?: SkillEvolution) {
+export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string, log: Logger, aiRouter: AIRouter, learningCore?: LearningCore, abilityEvolution?: AbilityEvolution) {
   const router = Router();
 
-  // SkillEvolution — scoring, evolution timeline, suggestions, transfer.
+  // AbilityEvolution — scoring, evolution timeline, suggestions, transfer.
   router.get('/scores', (_req, res) => {
-    try { res.json({ scores: skillEvolution?.getAllScores() || [] }); }
+    try { res.json({ scores: abilityEvolution?.getAllScores() || [] }); }
     catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -47,26 +47,26 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
     try {
       const limit = req.query.limit ? Math.min(500, Math.max(1, parseInt(String(req.query.limit), 10) || 100)) : 100;
       const since = req.query.since ? String(req.query.since) : undefined;
-      res.json({ events: skillEvolution?.getEvolutionLog({ limit, since }) || [] });
+      res.json({ events: abilityEvolution?.getEvolutionLog({ limit, since }) || [] });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
-  router.get('/suggested-skills', (req, res) => {
+  router.get('/suggested-abilities', (req, res) => {
     try {
       const source = req.query.source ? String(req.query.source) : undefined;
       const limit = req.query.limit ? Math.min(50, parseInt(String(req.query.limit), 10) || 10) : 10;
-      const installable = skillEvolution?.getInstallableSuggestions({ source, limit }) || [];
-      const transfer = skillEvolution?.getTransferCandidates({ limit }) || [];
+      const installable = abilityEvolution?.getInstallableSuggestions({ source, limit }) || [];
+      const transfer = abilityEvolution?.getTransferCandidates({ limit }) || [];
       res.json({ installable, transfer });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   router.post('/auto-evaluate', async (req, res) => {
     try {
-      let promotedSkillsCount = 0;
+      let promotedAbilitiesCount = 0;
       
-      // 1. Promote all pending skills from skills-pending
-      const pendingDir = join(workspaceDir, 'skills-pending');
+      // 1. Promote all pending abilities from abilities-pending
+      const pendingDir = join(workspaceDir, 'abilities-pending');
       if (existsSync(pendingDir)) {
         const parseFM = (raw: string) => {
           const normalized = raw.replace(/\r\n/g, '\n');
@@ -107,7 +107,7 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
                   const isWorker = service === 'worker';
                   const dstDir = isWorker
                     ? '/app/.claude/commands'
-                    : join(workspaceDir, 'skills-installed', service);
+                    : join(workspaceDir, 'abilities-installed', service);
                   
                   if (!existsSync(dstDir)) await mkdir(dstDir, { recursive: true });
                   const dst = join(dstDir, `${fm.name}.md`);
@@ -118,19 +118,19 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
                   }
                   await writeFile(dst, promoted, 'utf-8');
                   await unlink(filePath);
-                  promotedSkillsCount++;
+                  promotedAbilitiesCount++;
                   
                   // Log evolution event
-                  skillEvolution?.recordEvolutionEvent({
+                  abilityEvolution?.recordEvolutionEvent({
                     ts: new Date().toISOString(),
-                    kind: 'skill-promoted',
+                    kind: 'ability-promoted',
                     service,
                     name: fm.name,
                     metadata: { autoAligned: true }
                   });
                 }
               } catch (err: any) {
-                log.error(`Auto-evaluate failed to promote pending skill: ${ent.name}`, { error: err.message });
+                log.error(`Auto-evaluate failed to promote pending ability: ${ent.name}`, { error: err.message });
               }
             }
           }
@@ -139,7 +139,7 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
       }
 
       // 2. Run auto-promotion pass on verified patterns
-      const promoResult = await skillEvolution?.runAutoPromotionPass() || { scanned: 0, promoted: 0 };
+      const promoResult = await abilityEvolution?.runAutoPromotionPass() || { scanned: 0, promoted: 0 };
 
       // 3. Sync and initialize all Pens/Souls on disk
       const pens = stateStore.getPenNames();
@@ -229,17 +229,17 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
       stateStore.setMeta('agent_souls', JSON.stringify(mapping));
 
       // Log a general evolution event for workspace auto-alignment
-      skillEvolution?.recordEvolutionEvent({
+      abilityEvolution?.recordEvolutionEvent({
         ts: new Date().toISOString(),
-        kind: 'skill-promoted',
+        kind: 'ability-promoted',
         metadata: {
-          message: `Workspace auto-aligned: promoted ${promotedSkillsCount} pending skills, auto-promoted ${promoResult.promoted} verified patterns, and generated dedicated souls for ${autoGeneratedCount} agents.`
+          message: `Workspace auto-aligned: promoted ${promotedAbilitiesCount} pending abilities, auto-promoted ${promoResult.promoted} verified patterns, and generated dedicated souls for ${autoGeneratedCount} agents.`
         }
       });
 
       res.json({
         success: true,
-        promotedPendingSkills: promotedSkillsCount,
+        promotedPendingAbilities: promotedAbilitiesCount,
         autoPromotedPatterns: promoResult.promoted,
         scannedPatterns: promoResult.scanned,
         initializedPens: pens.length,
@@ -254,7 +254,7 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
 
   router.post('/auto-promote/run', async (_req, res) => {
     try {
-      const result = await skillEvolution?.runAutoPromotionPass() || { scanned: 0, promoted: 0 };
+      const result = await abilityEvolution?.runAutoPromotionPass() || { scanned: 0, promoted: 0 };
       res.json(result);
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -297,8 +297,8 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
       } catch {}
       const cmDistilledKeys = stateStore.listMetaKeysByPrefix('chat_memory_last_distilled_', 200);
 
-      // Skill artifacts on disk — installed (worker → .claude/commands, others → workspace).
-      const countSkills = (root: string) => {
+      // Ability artifacts on disk — installed (worker → .claude/commands, others → workspace).
+      const countAbilities = (root: string) => {
         const out: Record<string, number> = {};
         if (!existsSync(root)) return out;
         try {
@@ -309,8 +309,8 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
         } catch {}
         return out;
       };
-      const pendingBySvc = countSkills(join(workspaceDir, 'skills-pending'));
-      const installedBySvc = countSkills(join(workspaceDir, 'skills-installed'));
+      const pendingBySvc = countAbilities(join(workspaceDir, 'abilities-pending'));
+      const installedBySvc = countAbilities(join(workspaceDir, 'abilities-installed'));
       let workerInstalled = 0;
       try { workerInstalled = readdirSync('/app/.claude/commands').filter((f: string) => f.endsWith('.md')).length; }
       catch {}
@@ -327,9 +327,9 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
           file_chars: cmFileChars,
           entries_in_file: cmEntries,
         },
-        pending_skills_total: pendingTotal,
-        pending_skills_by_service: pendingBySvc,
-        installed_skills_by_service: installedBySvc,
+        pending_abilities_total: pendingTotal,
+        pending_abilities_by_service: pendingBySvc,
+        installed_abilities_by_service: installedBySvc,
       });
     } catch (err: any) {
       log.error('GET /learning/state failed', { error: err.message });
@@ -337,14 +337,14 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
     }
   });
 
-  router.get('/trajectory-skills', (req, res) => {
+  router.get('/trajectory-abilities', (req, res) => {
     try {
       const sourceFilter = req.query.source ? String(req.query.source) : null;
       const sources = listTrajectorySources(workspaceDir);
       const result: Record<string, any> = { sources: [] as any[], total: 0 };
       const targets = sourceFilter ? [sourceFilter] : sources;
       for (const src of targets) {
-        const files = listTrajectorySkills(workspaceDir, src);
+        const files = listTrajectoryAbilities(workspaceDir, src);
         result.sources.push({
           source: src,
           count: files.length,
@@ -357,13 +357,13 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
       if (sourceFilter && req.query.file) {
         const safeFile = String(req.query.file).replace(/[^a-zA-Z0-9_.\-]/g, '');
         if (safeFile) {
-          const filePath = join(workspaceDir, 'trajectory-skills', sourceFilter, safeFile);
+          const filePath = join(workspaceDir, 'trajectory-abilities', sourceFilter, safeFile);
           try { result.content = readFileSync(filePath, 'utf-8'); } catch {}
         }
       }
       res.json(result);
     } catch (err: any) {
-      log.error('GET /learning/trajectory-skills failed', { error: err.message });
+      log.error('GET /learning/trajectory-abilities failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

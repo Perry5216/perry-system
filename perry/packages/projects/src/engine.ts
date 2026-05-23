@@ -1244,7 +1244,7 @@ export class ProjectEngine {
       const metaParent = this.createProject({
         type: 'system-evolution',
         title: 'Workspace Observation & Tuning',
-        description: 'Observe agent interactions across domains, detect optimization areas, and auto-apply refined skills.'
+        description: 'Observe agent interactions across domains, detect optimization areas, and auto-apply refined abilities.'
       });
 
       this.createProject({

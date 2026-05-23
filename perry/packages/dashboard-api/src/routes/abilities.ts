@@ -23,7 +23,7 @@ import { Logger } from '@perry/core';
 import { readdir, readFile, unlink, mkdir, writeFile, rename } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { StateStore, LibrarianService, SkillOptimizerService } from '@perry/projects';
+import { StateStore, CuratorService, AbilityOptimizerService } from '@perry/projects';
 import { AIRouter } from '@perry/ai';
 
 
@@ -96,18 +96,18 @@ async function listMarkdownSkills(dir: string, defaultService = 'worker'): Promi
   return out;
 }
 
-export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore: StateStore, aiRouter: AIRouter) {
+export function setupAbilitiesRoutes(log: Logger, workspaceDir: string, stateStore: StateStore, aiRouter: AIRouter) {
   const router = Router();
 
   // In the container, .claude/commands is mounted RO at /app/.claude/commands.
-  // skills-pending lives under workspace (writable). skills-installed is our
-  // own writable mirror — operators promote from skills-pending to here,
+  // abilities-pending lives under workspace (writable). abilities-installed is our
+  // own writable mirror — operators promote from abilities-pending to here,
   // then move on the host to the real .claude/commands/ directory.
   const installedDirs = [
     '/app/.claude/commands',
-    join(workspaceDir, 'skills-installed'),
+    join(workspaceDir, 'abilities-installed'),
   ];
-  const pendingDir = join(workspaceDir, 'skills-pending');
+  const pendingDir = join(workspaceDir, 'abilities-pending');
 
   // Resolve a pending skill filename to its actual on-disk path, regardless of
   // whether it sits at the top level (legacy worker-only layout) or inside a
@@ -195,14 +195,14 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
         return res.status(400).json({ error: 'skill is missing the `name` frontmatter field' });
       }
       const service = fm.service || resolved.service;
-      // Worker skills go into .claude/commands/ (CLI-visible slash commands).
-      // Non-worker skills (scout, audit, director, etc.) go into
-      // workspace/skills-installed/{service}/ — each service's SkillLoader
+      // Worker abilities go into .claude/commands/ (CLI-visible slash commands).
+      // Non-worker abilities (scout, audit, director, etc.) go into
+      // workspace/abilities-installed/{service}/ — each service's AbilityLoader
       // watches its own subdir.
       const isWorker = service === 'worker';
       const dstDir = isWorker
         ? '/app/.claude/commands'
-        : join(workspaceDir, 'skills-installed', service);
+        : join(workspaceDir, 'abilities-installed', service);
       if (!existsSync(dstDir)) await mkdir(dstDir, { recursive: true });
       const dst = join(dstDir, `${fm.name}.md`);
       let promoted = normalized.replace(/status:\s*pending/, 'status: installed');
@@ -252,7 +252,7 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
 
       const dstDir = service === 'worker'
         ? '/app/.claude/commands'
-        : join(workspaceDir, 'skills-installed', service);
+        : join(workspaceDir, 'abilities-installed', service);
       if (!existsSync(dstDir)) await mkdir(dstDir, { recursive: true });
       const dst = join(dstDir, `${name}.md`);
       if (existsSync(dst)) {
@@ -295,7 +295,7 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
       }
       const candidates = service === 'worker'
         ? ['/app/.claude/commands']
-        : [join(workspaceDir, 'skills-installed', service)];
+        : [join(workspaceDir, 'abilities-installed', service)];
       let deleted = false;
       for (const dir of candidates) {
         const path = join(dir, `${name}.md`);
@@ -383,25 +383,25 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
     }
   });
 
-  router.post('/librarian-pass', async (req, res) => {
+  router.post('/curator-pass', async (req, res) => {
     try {
       const { dryRun, runLlmReview } = req.body || {};
-      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
-      const result = await librarian.runLibrarianPass({ dryRun, runLlmReview });
+      const curator = new CuratorService(workspaceDir, stateStore, aiRouter, log);
+      const result = await curator.runCuratorPass({ dryRun, runLlmReview });
       res.json(result);
     } catch (err: any) {
-      log.error('POST /skills/librarian-pass failed', { error: err.message });
+      log.error('POST /abilities/curator-pass failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
 
   router.get('/backups', async (req, res) => {
     try {
-      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
-      const backups = await librarian.listBackups();
+      const curator = new CuratorService(workspaceDir, stateStore, aiRouter, log);
+      const backups = await curator.listBackups();
       res.json({ backups });
     } catch (err: any) {
-      log.error('GET /skills/backups failed', { error: err.message });
+      log.error('GET /abilities/backups failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -412,43 +412,43 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
       if (!timestamp) {
         return res.status(400).json({ error: 'timestamp is required' });
       }
-      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
-      const result = await librarian.rollback(timestamp);
+      const curator = new CuratorService(workspaceDir, stateStore, aiRouter, log);
+      const result = await curator.rollback(timestamp);
       res.json(result);
     } catch (err: any) {
-      log.error('POST /skills/rollback failed', { error: err.message });
+      log.error('POST /abilities/rollback failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
 
-  // Librarian Proposals API
+  // Curator Proposals API
   router.get('/proposals', async (req, res) => {
     try {
-      const proposals = stateStore.listLibrarianProposals();
+      const proposals = stateStore.listCuratorProposals();
       res.json({ proposals });
     } catch (err: any) {
-      log.error('GET /skills/proposals failed', { error: err.message });
+      log.error('GET /abilities/proposals failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
 
   router.post('/proposals/:id/approve', async (req, res) => {
     try {
-      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
-      await librarian.applyProposal(req.params.id);
+      const curator = new CuratorService(workspaceDir, stateStore, aiRouter, log);
+      await curator.applyProposal(req.params.id);
       res.json({ success: true });
     } catch (err: any) {
-      log.error('POST /skills/proposals/:id/approve failed', { error: err.message });
+      log.error('POST /abilities/proposals/:id/approve failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
 
   router.post('/proposals/:id/reject', async (req, res) => {
     try {
-      stateStore.updateLibrarianProposalStatus(req.params.id, 'rejected');
+      stateStore.updateCuratorProposalStatus(req.params.id, 'rejected');
       res.json({ success: true });
     } catch (err: any) {
-      log.error('POST /skills/proposals/:id/reject failed', { error: err.message });
+      log.error('POST /abilities/proposals/:id/reject failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -459,11 +459,11 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
       if (!service || !skillA || !skillB || !newSkillName) {
         return res.status(400).json({ error: 'service, skillA, skillB, and newSkillName are required' });
       }
-      const librarian = new LibrarianService(workspaceDir, stateStore, aiRouter, log);
-      await librarian.mergeSkills(service, skillA, skillB, newSkillName);
+      const curator = new CuratorService(workspaceDir, stateStore, aiRouter, log);
+      await curator.mergeAbilities(service, skillA, skillB, newSkillName);
       res.json({ success: true });
     } catch (err: any) {
-      log.error('POST /skills/merge failed', { error: err.message });
+      log.error('POST /abilities/merge failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -472,18 +472,18 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
   router.get('/telemetry', async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
-      const history = stateStore.listSkillTelemetry(limit);
+      const history = stateStore.listAbilityTelemetry(limit);
       
-      const allTelemetry = stateStore.listSkillTelemetry(1000);
+      const allTelemetry = stateStore.listAbilityTelemetry(1000);
       const statsMap = new Map<string, { service: string; name: string; total: number; successful: number; totalDuration: number }>();
       
       for (const item of allTelemetry) {
-        const key = `${item.service}:${item.skill_name}`;
+        const key = `${item.service}:${item.ability_name}`;
         let stat = statsMap.get(key);
         if (!stat) {
           stat = {
             service: item.service,
-            name: item.skill_name,
+            name: item.ability_name,
             total: 0,
             successful: 0,
             totalDuration: 0
@@ -507,7 +507,7 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
 
       res.json({ history, stats });
     } catch (err: any) {
-      log.error('GET /skills/telemetry failed', { error: err.message });
+      log.error('GET /abilities/telemetry failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });
@@ -518,11 +518,11 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
       if (!service || !name) {
         return res.status(400).json({ error: 'service and name are required' });
       }
-      const optimizer = new SkillOptimizerService(workspaceDir, stateStore, aiRouter, log);
+      const optimizer = new AbilityOptimizerService(workspaceDir, stateStore, aiRouter, log);
       const result = await optimizer.runOptimization(service, name);
       res.json(result);
     } catch (err: any) {
-      log.error('POST /skills/optimize failed', { error: err.message });
+      log.error('POST /abilities/optimize failed', { error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

@@ -5,10 +5,10 @@
  *   - Sessions  → FTS5 keyword search over completed step outputs.
  *                 Expand a row to read the full prose. Backed by
  *                 GET /api/sessions/search + GET /api/sessions/:stepId.
- *   - Skills    → list installed + pending slash commands, with
+ *   - Abilities → list installed + pending slash commands, with
  *                 approve/reject buttons on pending ones. Backed by
- *                 GET /api/skills, POST /api/skills/promote,
- *                 DELETE /api/skills/pending/:filename.
+ *                 GET /api/abilities, POST /api/abilities/promote,
+ *                 DELETE /api/abilities/pending/:filename.
  *   - Pens      → per-pen SOUL.md + LESSONS.md viewer with a "Refresh"
  *                 button that runs the audit-style profile rebuild.
  *                 Backed by GET /api/pens, GET /api/pens/:slug/profile,
@@ -26,7 +26,7 @@ import { DiffViewer } from './DiffViewer';
 const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV)
   ? 'http://localhost:4000/api' : '/api';
 
-type SubTab = 'sessions' | 'skills' | 'pens' | 'evolution' | 'souls';
+type SubTab = 'sessions' | 'abilities' | 'pens' | 'evolution' | 'souls';
 
 export function SelfLearningPanel() {
   const [tab, setTab] = useState<SubTab>('sessions');
@@ -34,7 +34,7 @@ export function SelfLearningPanel() {
   const [evaluating, setEvaluating] = useState(false);
 
   const handleAutoEvaluate = async () => {
-    if (!confirm('Run Workspace Alignment? This will promote pending skills, initialize/sync character soul files on disk, and match active agents to matching souls.')) return;
+    if (!confirm('Run Workspace Alignment? This will promote pending abilities, initialize/sync character soul files on disk, and match active agents to matching souls.')) return;
     try {
       setEvaluating(true);
       const r = await fetch(`${API_BASE}/learning/auto-evaluate`, {
@@ -43,7 +43,7 @@ export function SelfLearningPanel() {
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
-      alert(`Workspace alignment completed!\n\nPromoted pending skills: ${data.promotedPendingSkills}\nAuto-promoted patterns: ${data.autoPromotedPatterns}\nInitialized pens: ${data.initializedPens}\nAssigned agent souls: ${Object.keys(data.assignedSouls || {}).length}`);
+      alert(`Workspace alignment completed!\n\nPromoted pending abilities: ${data.promotedPendingAbilities}\nAuto-promoted patterns: ${data.autoPromotedPatterns}\nInitialized pens: ${data.initializedPens}\nAssigned agent souls: ${Object.keys(data.assignedSouls || {}).length}`);
       setReloadKey(prev => prev + 1);
     } catch (e: any) {
       alert(`Workspace alignment failed: ${e.message}`);
@@ -73,14 +73,14 @@ export function SelfLearningPanel() {
       <PanelHeader
         eyebrow="SELF-LEARNING"
         title="Self-Learning"
-        subtitle="Sessions · Skills · Pens · Evolution · Souls"
+        subtitle="Sessions · Abilities · Pens · Evolution · Souls"
         actions={evalButton}
       />
       <LearningActivity />
       <SubTabs current={tab} onChange={setTab} />
       <div style={{ flex: 1, overflowY: 'auto', marginTop: 12 }}>
         {tab === 'sessions' && <SessionsTab key={reloadKey} />}
-        {tab === 'skills' && <SkillsTab key={reloadKey} />}
+        {tab === 'abilities' && <AbilitiesTab key={reloadKey} />}
         {tab === 'pens' && <PensTab key={reloadKey} />}
         {tab === 'evolution' && <EvolutionTab key={reloadKey} />}
         {tab === 'souls' && <SoulsTab key={reloadKey} />}
@@ -90,7 +90,7 @@ export function SelfLearningPanel() {
 }
 
 // ─── Evolution tab ─────────────────────────────────────────────────────────
-// Chronological view of how Perry is evolving: skill-applied events,
+// Chronological view of how Perry is evolving: ability-applied events,
 // auto-promotions, manual promotions/deletions, verified-pattern flips.
 // Sourced from workspace/evolution-log.jsonl via /api/learning/evolution.
 function EvolutionTab() {
@@ -106,7 +106,7 @@ function EvolutionTab() {
         const [eRes, sRes, sgRes] = await Promise.all([
           fetch(`${API_BASE}/learning/evolution?limit=100`),
           fetch(`${API_BASE}/learning/scores`),
-          fetch(`${API_BASE}/learning/suggested-skills?limit=10`),
+          fetch(`${API_BASE}/learning/suggested-abilities?limit=10`),
         ]);
         if (!eRes.ok) throw new Error(`evolution HTTP ${eRes.status}`);
         const ej = await eRes.json();
@@ -123,11 +123,11 @@ function EvolutionTab() {
   if (err) return <div style={{ color: '#fca5a5' }}>error: {err}</div>;
 
   const kindColor = (k: string) => ({
-    'skill-applied': '#22d3ee',
-    'skill-promoted': '#a855f7',
-    'skill-auto-promoted': '#fbbf24',
-    'skill-created': '#34d399',
-    'skill-deleted': '#fca5a5',
+    'ability-applied': '#22d3ee',
+    'ability-promoted': '#a855f7',
+    'ability-auto-promoted': '#fbbf24',
+    'ability-created': '#34d399',
+    'ability-deleted': '#fca5a5',
     'verified-pattern': '#94a3b8',
     'pattern-retired': '#fca5a5',
   } as Record<string, string>)[k] || '#94a3b8';
@@ -137,7 +137,7 @@ function EvolutionTab() {
       <div>
         <h3 style={{ color: 'var(--secondary)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 8px' }}>Timeline ({events.length})</h3>
         <div style={{ maxHeight: 600, overflowY: 'auto', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6 }}>
-          {events.length === 0 && <div style={{ padding: 12, color: 'var(--text-muted)', fontSize: '0.85rem' }}>No evolution events yet. Will populate as skills are applied / promoted.</div>}
+          {events.length === 0 && <div style={{ padding: 12, color: 'var(--text-muted)', fontSize: '0.85rem' }}>No evolution events yet. Will populate as abilities are applied / promoted.</div>}
           {events.map((e, i) => (
             <div key={i} style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '0.8rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -152,8 +152,8 @@ function EvolutionTab() {
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div>
-          <h3 style={{ color: 'var(--secondary)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 8px' }}>Skill confidence ({scores.length})</h3>
-          {scores.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No skill applications recorded yet.</div>}
+          <h3 style={{ color: 'var(--secondary)', fontSize: '0.9rem', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 8px' }}>Ability confidence ({scores.length})</h3>
+          {scores.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No ability applications recorded yet.</div>}
           {scores.slice(0, 12).map(s => (
             <div key={`${s.service}::${s.name}`} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '0.8rem', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
               <span><span style={{ color: 'var(--text-muted)' }}>{s.service}/</span>{s.name}</span>
@@ -193,9 +193,9 @@ interface LearningState {
   sources: SourceSummary[];
   entries: Array<{ source: string; kind: string; fingerprint: string; count: number; failures: number; successes: number; proposed: boolean }>;
   chat_memory: { sessions_distilled: number; file_chars: number; entries_in_file: number };
-  pending_skills_total: number;
-  pending_skills_by_service: Record<string, number>;
-  installed_skills_by_service: Record<string, number>;
+  pending_abilities_total: number;
+  pending_abilities_by_service: Record<string, number>;
+  installed_abilities_by_service: Record<string, number>;
 }
 
 function LearningActivity() {
@@ -252,7 +252,7 @@ function LearningActivity() {
       <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 6 }}>
         <span style={{ fontSize: '0.72rem', color: 'var(--secondary)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: 1 }}>Learning Activity</span>
         <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-          {state.pending_skills_total} pending · {Object.values(state.installed_skills_by_service).reduce((a, b) => a + b, 0)} installed · {state.sources.length} active source(s)
+          {state.pending_abilities_total} pending · {Object.values(state.installed_abilities_by_service).reduce((a, b) => a + b, 0)} installed · {state.sources.length} active source(s)
         </span>
       </div>
       {cards.length === 1 && (
@@ -287,7 +287,7 @@ function LearningActivity() {
 function SubTabs({ current, onChange }: { current: SubTab; onChange: (t: SubTab) => void }) {
   const tabs: Array<{ key: SubTab; label: string; icon: any }> = [
     { key: 'sessions', label: 'Sessions',  icon: <Search size={14} /> },
-    { key: 'skills',   label: 'Skills',    icon: <Sparkles size={14} /> },
+    { key: 'abilities', label: 'Abilities', icon: <Sparkles size={14} /> },
     { key: 'pens',     label: 'Pens',      icon: <BookOpen size={14} /> },
     { key: 'evolution', label: 'Evolution', icon: <Sparkles size={14} /> },
     { key: 'souls',     label: 'Souls',     icon: <UserCircle2 size={14} /> },
@@ -431,9 +431,9 @@ function SessionsTab() {
   );
 }
 
-// ─── Skills tab ─────────────────────────────────────────────────────────────
+// ─── Abilities tab ──────────────────────────────────────────────────────────
 
-interface SkillSummary {
+interface AbilitySummary {
   filename: string;
   name: string;
   description: string;
@@ -442,9 +442,9 @@ interface SkillSummary {
   bodyLength: number;
 }
 
-function SkillsTab() {
-  const [installed, setInstalled] = useState<SkillSummary[]>([]);
-  const [pending, setPending] = useState<SkillSummary[]>([]);
+function AbilitiesTab() {
+  const [installed, setInstalled] = useState<AbilitySummary[]>([]);
+  const [pending, setPending] = useState<AbilitySummary[]>([]);
   const [services, setServices] = useState<Array<{ service: string; installed: number; pending: number }>>([]);
   const [serviceFilter, setServiceFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -453,16 +453,16 @@ function SkillsTab() {
   const [optimizing, setOptimizing] = useState<string | null>(null);
   const [diffingProposal, setDiffingProposal] = useState<any | null>(null);
 
-  // Librarian states
+  // Curator states
   const [pins, setPins] = useState<Array<{ service: string; name: string }>>([]);
-  const [proposals, setProposals] = useState<Array<{ id: string; skill_name: string; service: string; action: string; status: string; details: any }>>([]);
+  const [proposals, setProposals] = useState<Array<{ id: string; ability_name: string; service: string; action: string; status: string; details: any }>>([]);
   const [telemetry, setTelemetry] = useState<{
     stats: Array<{ service: string; name: string; total: number; successRate: number; avgDurationMs: number }>;
-    history: Array<{ id: string; service: string; skill_name: string; timestamp: string; success: number; duration_ms: number; error: string | null }>;
+    history: Array<{ id: string; service: string; ability_name: string; timestamp: string; success: number; duration_ms: number; error: string | null }>;
   }>({ stats: [], history: [] });
   const [backups, setBackups] = useState<string[]>([]);
   
-  // Librarian pass states
+  // Curator pass states
   const [runningPass, setRunningPass] = useState(false);
   const [passResults, setPassResults] = useState<any>(null);
   const [dryRun, setDryRun] = useState(true);
@@ -474,8 +474,8 @@ function SkillsTab() {
   
   // Merge states
   const [mergeService, setMergeService] = useState('');
-  const [mergeSkillA, setMergeSkillA] = useState('');
-  const [mergeSkillB, setMergeSkillB] = useState('');
+  const [mergeAbilityA, setMergeAbilityA] = useState('');
+  const [mergeAbilityB, setMergeAbilityB] = useState('');
   const [mergeNewName, setMergeNewName] = useState('');
   const [merging, setMerging] = useState(false);
 
@@ -483,27 +483,27 @@ function SkillsTab() {
     setLoading(true); setErr(null);
     try {
       const qs = svc ? `?service=${encodeURIComponent(svc)}` : '';
-      const [rSkills, rPins, rProposals, rTelemetry, rBackups] = await Promise.all([
-        fetch(`${API_BASE}/skills${qs}`),
-        fetch(`${API_BASE}/skills/pins`),
-        fetch(`${API_BASE}/skills/proposals`),
-        fetch(`${API_BASE}/skills/telemetry`),
-        fetch(`${API_BASE}/skills/backups`),
+      const [rAbilities, rPins, rProposals, rTelemetry, rBackups] = await Promise.all([
+        fetch(`${API_BASE}/abilities${qs}`),
+        fetch(`${API_BASE}/abilities/pins`),
+        fetch(`${API_BASE}/abilities/proposals`),
+        fetch(`${API_BASE}/abilities/telemetry`),
+        fetch(`${API_BASE}/abilities/backups`),
       ]);
 
-      if (!rSkills.ok) throw new Error(`Skills fetch failed: ${rSkills.statusText}`);
+      if (!rAbilities.ok) throw new Error(`Abilities fetch failed: ${rAbilities.statusText}`);
       
-      const [jSkills, jPins, jProposals, jTelemetry, jBackups] = await Promise.all([
-        rSkills.json(),
+      const [jAbilities, jPins, jProposals, jTelemetry, jBackups] = await Promise.all([
+        rAbilities.json(),
         rPins.ok ? rPins.json() : { pins: [] },
         rProposals.ok ? rProposals.json() : { proposals: [] },
         rTelemetry.ok ? rTelemetry.json() : { stats: [], history: [] },
         rBackups.ok ? rBackups.json() : { backups: [] },
       ]);
 
-      setInstalled(jSkills.installed || []);
-      setPending(jSkills.pending || []);
-      setServices(jSkills.services || []);
+      setInstalled(jAbilities.installed || []);
+      setPending(jAbilities.pending || []);
+      setServices(jAbilities.services || []);
       setPins(jPins.pins || []);
       setProposals(jProposals.proposals || []);
       setTelemetry({
@@ -520,12 +520,12 @@ function SkillsTab() {
 
   useEffect(() => { refresh(serviceFilter); }, [serviceFilter]);
 
-  const optimizeSkill = async (service: string, name: string) => {
-    if (!confirm(`Run GEPA Prompt Optimization for skill "${service}/${name}"?\nThis will analyze past failures, generate mutations, backtest them, and propose improvements.`)) return;
+  const optimizeAbility = async (service: string, name: string) => {
+    if (!confirm(`Run GEPA Prompt Optimization for ability "${service}/${name}"?\nThis will analyze past failures, generate mutations, backtest them, and propose improvements.`)) return;
     setOptimizing(`${service}/${name}`);
     setErr(null);
     try {
-      const r = await fetch(`${API_BASE}/skills/optimize`, {
+      const r = await fetch(`${API_BASE}/abilities/optimize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ service, name }),
@@ -547,16 +547,16 @@ function SkillsTab() {
 
   const preview = async (filename: string) => {
     try {
-      const r = await fetch(`${API_BASE}/skills/pending/${encodeURIComponent(filename)}/raw`);
+      const r = await fetch(`${API_BASE}/abilities/pending/${encodeURIComponent(filename)}/raw`);
       const j = await r.json();
       setPreviewing({ filename, raw: j.raw || '(empty)' });
     } catch (e: any) { setErr(e.message); }
   };
 
   const promote = async (filename: string) => {
-    if (!confirm(`Promote ${filename}? Worker skills land in .claude/commands/ (immediately active). Non-worker skills land in workspace/skills-installed/{service}/ (active on the next consumer reload).`)) return;
+    if (!confirm(`Promote ${filename}? Worker abilities land in .claude/commands/ (immediately active). Non-worker abilities land in workspace/abilities-installed/{service}/ (active on the next consumer reload).`)) return;
     try {
-      const r = await fetch(`${API_BASE}/skills/promote`, {
+      const r = await fetch(`${API_BASE}/abilities/promote`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename }),
       });
@@ -570,7 +570,7 @@ function SkillsTab() {
   const reject = async (filename: string) => {
     if (!confirm(`Reject ${filename}? This deletes the pending file.`)) return;
     try {
-      const r = await fetch(`${API_BASE}/skills/pending/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      const r = await fetch(`${API_BASE}/abilities/pending/${encodeURIComponent(filename)}`, { method: 'DELETE' });
       if (!r.ok) throw new Error(await r.text());
       refresh(serviceFilter);
     } catch (e: any) { setErr(e.message); }
@@ -580,14 +580,14 @@ function SkillsTab() {
     const isPinned = pins.some(p => p.service === service && p.name === name);
     try {
       const endpoint = isPinned ? 'unpin' : 'pin';
-      const r = await fetch(`${API_BASE}/skills/${endpoint}`, {
+      const r = await fetch(`${API_BASE}/abilities/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ service, name }),
       });
       if (!r.ok) throw new Error(await r.text());
       // Refresh pins
-      const pinRes = await fetch(`${API_BASE}/skills/pins`);
+      const pinRes = await fetch(`${API_BASE}/abilities/pins`);
       if (pinRes.ok) {
         const j = await pinRes.json();
         setPins(j.pins || []);
@@ -598,16 +598,16 @@ function SkillsTab() {
   };
 
   const deleteInstalled = async (service: string, name: string) => {
-    if (!confirm(`Are you sure you want to delete installed skill "${service}/${name}"?`)) return;
+    if (!confirm(`Are you sure you want to delete installed ability "${service}/${name}"?`)) return;
     try {
-      const r = await fetch(`${API_BASE}/skills/installed/${encodeURIComponent(service)}/${encodeURIComponent(name)}`, {
+      const r = await fetch(`${API_BASE}/abilities/installed/${encodeURIComponent(service)}/${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${r.status}`);
       }
-      alert(`Deleted installed skill ${service}/${name}.`);
+      alert(`Deleted installed ability ${service}/${name}.`);
       refresh(serviceFilter);
     } catch (e: any) {
       setErr(e.message);
@@ -616,7 +616,7 @@ function SkillsTab() {
 
   const approveProposal = async (id: string) => {
     try {
-      const r = await fetch(`${API_BASE}/skills/proposals/${encodeURIComponent(id)}/approve`, {
+      const r = await fetch(`${API_BASE}/abilities/proposals/${encodeURIComponent(id)}/approve`, {
         method: 'POST',
       });
       if (!r.ok) {
@@ -632,7 +632,7 @@ function SkillsTab() {
 
   const rejectProposal = async (id: string) => {
     try {
-      const r = await fetch(`${API_BASE}/skills/proposals/${encodeURIComponent(id)}/reject`, {
+      const r = await fetch(`${API_BASE}/abilities/proposals/${encodeURIComponent(id)}/reject`, {
         method: 'POST',
       });
       if (!r.ok) {
@@ -648,24 +648,28 @@ function SkillsTab() {
 
   const handleMerge = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mergeService || !mergeSkillA || !mergeSkillB || !mergeNewName) {
-      alert('All fields are required to merge skills.');
+    if (!mergeService || !mergeAbilityA || !mergeAbilityB || !mergeNewName) {
+      alert('All fields are required to merge abilities.');
       return;
     }
-    if (mergeSkillA === mergeSkillB) {
-      alert('Skill A and Skill B must be different.');
+    if (mergeAbilityA === mergeAbilityB) {
+      alert('Ability A and Ability B must be different.');
       return;
     }
     setMerging(true);
     setErr(null);
     try {
-      const r = await fetch(`${API_BASE}/skills/merge`, {
+      const r = await fetch(`${API_BASE}/abilities/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           service: mergeService,
-          skillA: mergeSkillA,
-          skillB: mergeSkillB,
+          abilityA: mergeAbilityA,
+          abilityB: mergeAbilityB,
+          newAbilityName: mergeNewName,
+          // Backward compatibility:
+          skillA: mergeAbilityA,
+          skillB: mergeAbilityB,
           newSkillName: mergeNewName,
         }),
       });
@@ -673,9 +677,9 @@ function SkillsTab() {
         const body = await r.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${r.status}`);
       }
-      alert(`Merged skills into "${mergeNewName}".`);
-      setMergeSkillA('');
-      setMergeSkillB('');
+      alert(`Merged abilities into "${mergeNewName}".`);
+      setMergeAbilityA('');
+      setMergeAbilityB('');
       setMergeNewName('');
       refresh(serviceFilter);
     } catch (e: any) {
@@ -685,12 +689,12 @@ function SkillsTab() {
     }
   };
 
-  const triggerLibrarianPass = async () => {
+  const triggerCuratorPass = async () => {
     setRunningPass(true);
     setErr(null);
     setPassResults(null);
     try {
-      const r = await fetch(`${API_BASE}/skills/librarian-pass`, {
+      const r = await fetch(`${API_BASE}/abilities/curator-pass`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dryRun, runLlmReview }),
@@ -714,11 +718,11 @@ function SkillsTab() {
       alert('Please select a backup snapshot to rollback.');
       return;
     }
-    if (!confirm(`Are you sure you want to rollback skills to snapshot "${rollbackSelected}"?`)) return;
+    if (!confirm(`Are you sure you want to rollback abilities to snapshot "${rollbackSelected}"?`)) return;
     setRollingBack(true);
     setErr(null);
     try {
-      const r = await fetch(`${API_BASE}/skills/rollback`, {
+      const r = await fetch(`${API_BASE}/abilities/rollback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ timestamp: rollbackSelected }),
@@ -737,7 +741,7 @@ function SkillsTab() {
     }
   };
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 12 }}>Loading skills…</div>;
+  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 12 }}>Loading abilities…</div>;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -765,7 +769,7 @@ function SkillsTab() {
 
       {/* Two Column Layout Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 1.2fr) minmax(320px, 1fr)', gap: 20, alignItems: 'start' }}>
-        {/* Left Column: Skills Curation & Merge */}
+        {/* Left Column: Abilities Curation & Merge */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           {/* Pending Review Section */}
           <section style={cardPanelStyle}>
@@ -775,19 +779,19 @@ function SkillsTab() {
             </h3>
             {pending.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
-                No pending skills awaiting review.
+                No pending abilities awaiting review.
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {pending.map(s => (
-                  <div key={`${s.service}::${s.filename}`} style={skillRow}>
+                  <div key={`${s.service}::${s.filename}`} style={abilityRow}>
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span style={serviceBadge}>{s.service}</span>
-                        <span style={skillName}>{s.name}</span>
+                        <span style={abilityName}>{s.name}</span>
                       </div>
-                      <div style={skillDesc}>{s.description}</div>
-                      <div style={skillMeta}>
+                      <div style={abilityDesc}>{s.description}</div>
+                      <div style={abilityMeta}>
                         {s.proposedAt && `proposed ${new Date(s.proposedAt).toLocaleString()} · `}
                         {s.bodyLength} chars · <code>{s.filename}</code>
                       </div>
@@ -809,15 +813,15 @@ function SkillsTab() {
             )}
           </section>
 
-          {/* Installed Skills Section */}
+          {/* Installed Abilities Section */}
           <section style={cardPanelStyle}>
             <h3 style={sectionHeadingWithIcon}>
               <BookOpen size={16} style={{ color: 'var(--secondary)' }} />
-              Installed Skills ({installed.length})
+              Installed Abilities ({installed.length})
             </h3>
             {installed.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
-                No installed skills found.
+                No installed abilities found.
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 380, overflowY: 'auto' }}>
@@ -828,11 +832,11 @@ function SkillsTab() {
                   const isSvcName = `${s.service}/${s.name}`;
                   const isCurrentlyOptimizing = optimizing === isSvcName;
                   return (
-                    <div key={`${s.service}::${s.filename}`} style={skillRow}>
+                    <div key={`${s.service}::${s.filename}`} style={abilityRow}>
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           <span style={serviceBadge}>{s.service}</span>
-                          <span style={skillName}>{s.name}</span>
+                          <span style={abilityName}>{s.name}</span>
                           {isPinned && (
                             <span style={pinnedBadge}>
                               <Pin size={10} style={{ fill: '#c4a8ff' }} /> PINNED
@@ -844,15 +848,15 @@ function SkillsTab() {
                             </span>
                           )}
                         </div>
-                        <div style={skillDesc}>{s.description}</div>
-                        <div style={skillMeta}>
+                        <div style={abilityDesc}>{s.description}</div>
+                        <div style={abilityMeta}>
                           <code>{s.filename}</code> · {s.bodyLength} chars
                           {stat && ` · Runs: ${stat.total} · Success: ${(stat.successRate * 100).toFixed(0)}%`}
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         <button
-                          onClick={() => optimizeSkill(s.service, s.name)}
+                          onClick={() => optimizeAbility(s.service, s.name)}
                           disabled={isCurrentlyOptimizing}
                           style={isLowPerf ? btnOptimizeHighlight(isCurrentlyOptimizing) : btnGhost}
                           title="Run GEPA Prompt Optimization"
@@ -866,7 +870,7 @@ function SkillsTab() {
                         <button
                           onClick={() => togglePin(s.service, s.name)}
                           style={isPinned ? btnPinActive : btnGhost}
-                          title={isPinned ? 'Unpin skill' : 'Pin skill'}
+                          title={isPinned ? 'Unpin ability' : 'Pin ability'}
                         >
                           <Pin size={14} style={{ fill: isPinned ? '#c4a8ff' : 'none' }} />
                         </button>
@@ -874,7 +878,7 @@ function SkillsTab() {
                           onClick={() => deleteInstalled(s.service, s.name)}
                           disabled={isPinned}
                           style={isPinned ? btnDangerDisabled : btnDanger}
-                          title={isPinned ? 'Unpin to enable deletion' : 'Delete skill'}
+                          title={isPinned ? 'Unpin to enable deletion' : 'Delete ability'}
                         >
                           <Trash2 size={14} />
                         </button>
@@ -886,11 +890,11 @@ function SkillsTab() {
             )}
           </section>
 
-          {/* Merge Skills Section */}
+          {/* Merge Abilities Section */}
           <section style={cardPanelStyle}>
             <h3 style={sectionHeadingWithIcon}>
               <Layers size={16} style={{ color: 'var(--secondary)' }} />
-              Merge Skills / Synthesis
+              Merge Abilities / Synthesis
             </h3>
             <form onSubmit={handleMerge} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={formRow}>
@@ -899,8 +903,8 @@ function SkillsTab() {
                   value={mergeService}
                   onChange={e => {
                     setMergeService(e.target.value);
-                    setMergeSkillA('');
-                    setMergeSkillB('');
+                    setMergeAbilityA('');
+                    setMergeAbilityB('');
                   }}
                   style={formInput}
                 >
@@ -912,14 +916,14 @@ function SkillsTab() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                 <div style={formRow}>
-                  <label style={formLabel}>Skill A (Base)</label>
+                  <label style={formLabel}>Ability A (Base)</label>
                   <select
-                    value={mergeSkillA}
-                    onChange={e => setMergeSkillA(e.target.value)}
+                    value={mergeAbilityA}
+                    onChange={e => setMergeAbilityA(e.target.value)}
                     disabled={!mergeService}
                     style={formInput}
                   >
-                    <option value="">-- Skill A --</option>
+                    <option value="">-- Ability A --</option>
                     {installed
                       .filter(s => s.service === mergeService)
                       .map(s => (
@@ -928,16 +932,16 @@ function SkillsTab() {
                   </select>
                 </div>
                 <div style={formRow}>
-                  <label style={formLabel}>Skill B (Extension)</label>
+                  <label style={formLabel}>Ability B (Extension)</label>
                   <select
-                    value={mergeSkillB}
-                    onChange={e => setMergeSkillB(e.target.value)}
+                    value={mergeAbilityB}
+                    onChange={e => setMergeAbilityB(e.target.value)}
                     disabled={!mergeService}
                     style={formInput}
                   >
-                    <option value="">-- Skill B --</option>
+                    <option value="">-- Ability B --</option>
                     {installed
-                      .filter(s => s.service === mergeService && s.name !== mergeSkillA)
+                      .filter(s => s.service === mergeService && s.name !== mergeAbilityA)
                       .map(s => (
                         <option key={s.name} value={s.name}>{s.name}</option>
                       ))}
@@ -945,7 +949,7 @@ function SkillsTab() {
                 </div>
               </div>
               <div style={formRow}>
-                <label style={formLabel}>Synthesized Skill Name</label>
+                <label style={formLabel}>Synthesized Ability Name</label>
                 <input
                   type="text"
                   placeholder="e.g. unified-code-standards"
@@ -956,7 +960,7 @@ function SkillsTab() {
               </div>
               <button
                 type="submit"
-                disabled={merging || !mergeService || !mergeSkillA || !mergeSkillB || !mergeNewName}
+                disabled={merging || !mergeService || !mergeAbilityA || !mergeAbilityB || !mergeNewName}
                 style={btnPrimary(merging)}
               >
                 {merging ? <Loader2 size={12} className="animate-spin" /> : null}
@@ -966,18 +970,18 @@ function SkillsTab() {
           </section>
         </div>
 
-        {/* Right Column: Librarian Center, Proposals & Telemetry */}
+        {/* Right Column: Curator Center, Proposals & Telemetry */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          {/* Librarian Center controls */}
+          {/* Curator Center controls */}
           <section style={cardPanelStyle}>
             <h3 style={sectionHeadingWithIcon}>
               <Shield size={16} style={{ color: 'var(--secondary)' }} />
-              Librarian Center
+              Curator Center
             </h3>
             
             {/* Run Pass */}
             <div style={{ borderBottom: '1px solid rgba(34,211,238,0.1)', paddingBottom: 16, marginBottom: 16 }}>
-              <h4 style={subSectionTitle}>Librarian Pipeline Pass</h4>
+              <h4 style={subSectionTitle}>Curator Pipeline Pass</h4>
               <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: '0.78rem' }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--text-main)' }}>
                   <input
@@ -998,9 +1002,9 @@ function SkillsTab() {
                   Run LLM Review
                 </label>
               </div>
-              <button onClick={triggerLibrarianPass} disabled={runningPass} style={btnPrimary(runningPass)}>
+              <button onClick={triggerCuratorPass} disabled={runningPass} style={btnPrimary(runningPass)}>
                 {runningPass ? <Loader2 size={12} className="animate-spin" /> : null}
-                {runningPass ? 'Executing Librarian...' : 'Run Librarian Pass'}
+                {runningPass ? 'Executing Curator...' : 'Run Curator Pass'}
               </button>
               
               {passResults && (
@@ -1024,7 +1028,7 @@ function SkillsTab() {
               <h4 style={subSectionTitle}>System Restore & Rollback</h4>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>
-                  Select a past Librarian backup snapshot timestamp to restore skills to that point. Pinned skills are safe.
+                  Select a past Curator backup snapshot timestamp to restore abilities to that point. Pinned abilities are safe.
                 </div>
                 {backups.length === 0 ? (
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No backups found.</div>
@@ -1064,15 +1068,15 @@ function SkillsTab() {
             </div>
           </section>
 
-          {/* Librarian Proposals */}
+          {/* Curator Proposals */}
           <section style={cardPanelStyle}>
             <h3 style={sectionHeadingWithIcon}>
               <Layers size={16} style={{ color: 'var(--secondary)' }} />
-              Librarian Proposals ({proposals.length})
+              Curator Proposals ({proposals.length})
             </h3>
             {proposals.length === 0 ? (
               <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
-                No active librarian recommendations or curation proposals.
+                No active curator recommendations or curation proposals.
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
@@ -1081,7 +1085,7 @@ function SkillsTab() {
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={serviceBadge}>{p.service}</span>
-                        <span style={skillName}>{p.skill_name}</span>
+                        <span style={abilityName}>{p.ability_name}</span>
                       </div>
                       <div style={{ fontSize: '0.72rem', color: 'var(--text-main)', marginTop: 2 }}>
                         Action: <strong style={{ color: p.action === 'delete' ? '#FCA5A5' : '#86EFAC', textTransform: 'uppercase' }}>{p.action}</strong>
@@ -1131,24 +1135,24 @@ function SkillsTab() {
             )}
           </section>
 
-          {/* Skill Telemetry & Performance */}
+          {/* Ability Telemetry & Performance */}
           <section style={cardPanelStyle}>
             <h3 style={sectionHeadingWithIcon}>
               <Activity size={16} style={{ color: 'var(--secondary)' }} />
-              Skill Performance Telemetry
+              Ability Performance Telemetry
             </h3>
             
             {/* Aggregate table */}
             <div style={{ marginBottom: 16 }}>
               <h4 style={subSectionTitle}>Execution Aggregates</h4>
               {telemetry.stats.length === 0 ? (
-                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No skill execution stats recorded yet.</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>No ability execution stats recorded yet.</div>
               ) : (
                 <div style={{ overflowX: 'auto', maxHeight: 180, overflowY: 'auto', border: '1px solid rgba(34,211,238,0.1)', borderRadius: 4 }}>
                   <table style={telemetryTableStyle}>
                     <thead style={{ position: 'sticky', top: 0, background: 'rgba(10,15,25,0.98)', zIndex: 10 }}>
                       <tr>
-                        <th style={telemetryThStyle}>Skill</th>
+                        <th style={telemetryThStyle}>Ability</th>
                         <th style={telemetryThStyle}>Runs</th>
                         <th style={telemetryThStyle}>Success</th>
                         <th style={telemetryThStyle}>Avg Latency</th>
@@ -1184,7 +1188,7 @@ function SkillsTab() {
                     <div key={h.id} style={telemetryHistoryRowStyle}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                         <span style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 500 }}>
-                          <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>{h.service}/</span>{h.skill_name}
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>{h.service}/</span>{h.ability_name}
                         </span>
                         <span style={{
                           fontSize: '0.65rem',
@@ -1236,7 +1240,7 @@ function SkillsTab() {
         <DiffViewer
           before={diffingProposal.details.original}
           after={diffingProposal.details.mutated}
-          beforeLabel="Original Skill Instructions"
+          beforeLabel="Original Ability Instructions"
           afterLabel="Evolved Mutated Instructions (GEPA)"
           onClose={() => setDiffingProposal(null)}
         />
@@ -2094,7 +2098,7 @@ const sectionHeading: React.CSSProperties = {
   color: 'var(--secondary)',
 };
 
-const skillRow: React.CSSProperties = {
+const abilityRow: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 12,
@@ -2105,19 +2109,19 @@ const skillRow: React.CSSProperties = {
   marginBottom: 6,
 };
 
-const skillName: React.CSSProperties = {
+const abilityName: React.CSSProperties = {
   fontFamily: 'var(--font-mono)',
   fontSize: '0.88rem',
   color: 'var(--secondary)',
 };
 
-const skillDesc: React.CSSProperties = {
+const abilityDesc: React.CSSProperties = {
   fontSize: '0.8rem',
   color: 'var(--text-main)',
   marginTop: 2,
 };
 
-const skillMeta: React.CSSProperties = {
+const abilityMeta: React.CSSProperties = {
   fontSize: '0.7rem',
   color: 'var(--text-muted)',
   marginTop: 4,

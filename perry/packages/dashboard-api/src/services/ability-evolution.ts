@@ -1,22 +1,22 @@
 /**
- * SkillEvolution — the spine of "Perry evolves with the user."
+ * AbilityEvolution — the spine of "Perry evolves with the user."
  *
  * One service, five capabilities:
- *   B. Skill scoring          — counts skill-applied events per (service, name)
+ *   B. Ability scoring        — counts ability-applied events per (service, name)
  *   A. Auto-promotion          — verified-patterns crossing a stricter threshold
- *                                are auto-promoted to installed skills
+ *                                are auto-promoted to installed abilities
  *   D. Evolution log           — append-only JSONL of every evolution event
- *                                (skill applied, promoted, demoted, retired)
+ *                                (ability applied, promoted, demoted, retired)
  *   C. Cross-domain transfer   — derived from scores: suggest high-confidence
- *                                skills from other domains
- *   E. Suggestion engine       — surface trajectory-skills + verified-patterns
+ *                                abilities from other domains
+ *   E. Suggestion engine       — surface trajectory-abilities + verified-patterns
  *                                matching current context as installable
  *                                candidates
  *
  * Storage:
- *   workspace/skill-scores.json       — { "service::name": { applied, lastSeen } }
+ *   workspace/ability-scores.json     — { "service::name": { applied, lastSeen } }
  *   workspace/evolution-log.jsonl     — one JSON event per line, append-only
- *   workspace/skills-installed/{svc}/ — read for installed inventory
+ *   workspace/abilities-installed/{svc}/ — read for installed inventory
  *   workspace/verified-patterns/{svc}.md — read by auto-promoter
  */
 
@@ -24,16 +24,16 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, rea
 import { join } from 'path';
 import type { Logger, EventBus } from '@perry/core';
 import type { StateStore } from '@perry/projects';
-import { SkillOptimizerService } from '@perry/projects';
+import { AbilityOptimizerService } from '@perry/projects';
 import type { AIRouter } from '@perry/ai';
 
-const SCORES_FILE = 'skill-scores.json';
+const SCORES_FILE = 'ability-scores.json';
 const EVOLUTION_LOG = 'evolution-log.jsonl';
 const AUTO_PROMOTE_MIN_RECURRENCE = 10;   // verified-pattern count required
 const AUTO_PROMOTE_MIN_AGE_HOURS = 1;     // wait at least 1h since first-seen
 const EVOLUTION_LOG_MAX_LINES = 5000;
 
-export interface SkillScore {
+export interface AbilityScore {
   service: string;
   name: string;
   applied: number;
@@ -43,14 +43,14 @@ export interface SkillScore {
 
 export interface EvolutionEvent {
   ts: string;
-  kind: 'skill-applied' | 'skill-promoted' | 'skill-auto-promoted' | 'skill-created' | 'skill-deleted' | 'verified-pattern' | 'pattern-retired';
+  kind: 'ability-applied' | 'ability-promoted' | 'ability-auto-promoted' | 'ability-created' | 'ability-deleted' | 'verified-pattern' | 'pattern-retired';
   service?: string;
   name?: string;
   source?: string;
   metadata?: Record<string, any>;
 }
 
-export interface SuggestedSkill {
+export interface SuggestedAbility {
   service: string;
   name: string;
   description: string;
@@ -58,8 +58,8 @@ export interface SuggestedSkill {
   signal: { kind: string; value: number };
 }
 
-export class SkillEvolution {
-  private scores: Record<string, SkillScore> = {};
+export class AbilityEvolution {
+  private scores: Record<string, AbilityScore> = {};
   private readonly scoresPath: string;
   private readonly evolutionPath: string;
   private dirty = false;
@@ -93,21 +93,21 @@ export class SkillEvolution {
 
   private subscribe(): void {
     if (!this.eventBus) return;
-    // Skill-applied events flow from each consumer (audit, gc, director, …)
-    // via learning:observation with kind === 'skill-applied'. Recordable
+    // Ability-applied events flow from each consumer (audit, gc, director, …)
+    // via learning:observation with kind === 'ability-applied'. Recordable
     // signal that drives both B (scoring) and D (evolution log).
     this.eventBus.on('learning:observation', (p: any) => {
-      if (p?.kind === 'skill-applied' && p?.metadata?.skill) {
-        this.recordSkillApplied(p.source, p.metadata.skill, p.metadata);
+      if (p?.kind === 'ability-applied' && p?.metadata?.ability) {
+        this.recordAbilityApplied(p.source, p.metadata.ability, p.metadata);
       }
     });
 
-    this.eventBus.on('skill:execution', (p: { service: string; name: string; success: boolean; durationMs: number; error: string | null }) => {
-      void this.handleSkillExecution(p);
+    this.eventBus.on('ability:execution', (p: { service: string; name: string; success: boolean; durationMs: number; error: string | null }) => {
+      void this.handleAbilityExecution(p);
     });
   }
 
-  private async handleSkillExecution(p: { service: string; name: string; success: boolean; durationMs: number; error: string | null }): Promise<void> {
+  private async handleAbilityExecution(p: { service: string; name: string; success: boolean; durationMs: number; error: string | null }): Promise<void> {
     if (!this.stateStore || !this.aiRouter) {
       return;
     }
@@ -131,27 +131,27 @@ export class SkillEvolution {
     }
 
     this.lastOptimizedAt.set(key, now);
-    this.log.info('Triggering background skill auto-evolution', { service, name, success });
+    this.log.info('Triggering background ability auto-evolution', { service, name, success });
 
     // Run optimization asynchronously in the background so it doesn't block the execution pipeline.
     setTimeout(async () => {
       try {
-        const optimizer = new SkillOptimizerService(this.workspaceDir, this.stateStore!, this.aiRouter!, this.log);
+        const optimizer = new AbilityOptimizerService(this.workspaceDir, this.stateStore!, this.aiRouter!, this.log);
         const result = await optimizer.runOptimization(service, name);
         if (result.success) {
-          this.log.info('Background skill auto-evolution succeeded and staged a proposal', { service, name, proposalId: result.proposalId });
+          this.log.info('Background ability auto-evolution succeeded and staged a proposal', { service, name, proposalId: result.proposalId });
         } else {
-          this.log.info('Background skill auto-evolution completed without new proposals', { service, name, reason: result.reason });
+          this.log.info('Background ability auto-evolution completed without new proposals', { service, name, reason: result.reason });
         }
       } catch (err: any) {
-        this.log.error('Background skill auto-evolution failed', { service, name, error: err.message });
+        this.log.error('Background ability auto-evolution failed', { service, name, error: err.message });
       }
     }, 0);
   }
 
   // ─── B. Scoring ────────────────────────────────────────────────────────
 
-  recordSkillApplied(service: string, name: string, metadata?: Record<string, any>): void {
+  recordAbilityApplied(service: string, name: string, metadata?: Record<string, any>): void {
     const key = `${service}::${name}`;
     const now = new Date().toISOString();
     if (!this.scores[key]) {
@@ -163,18 +163,18 @@ export class SkillEvolution {
     this.dirty = true;
     this.recordEvolutionEvent({
       ts: now,
-      kind: 'skill-applied',
+      kind: 'ability-applied',
       service,
       name,
       metadata,
     });
   }
 
-  getScore(service: string, name: string): SkillScore | null {
+  getScore(service: string, name: string): AbilityScore | null {
     return this.scores[`${service}::${name}`] || null;
   }
 
-  getAllScores(): SkillScore[] {
+  getAllScores(): AbilityScore[] {
     return Object.values(this.scores).sort((a, b) => b.applied - a.applied);
   }
 
@@ -183,8 +183,8 @@ export class SkillEvolution {
   /**
    * Scan workspace/verified-patterns/{source}.md files. For each entry that
    * has reached `AUTO_PROMOTE_MIN_RECURRENCE` and is at least
-   * `AUTO_PROMOTE_MIN_AGE_HOURS` old, write a corresponding installed skill
-   * and emit an evolution event. Idempotent — skips if the skill already
+   * `AUTO_PROMOTE_MIN_AGE_HOURS` old, write a corresponding installed ability
+   * and emit an evolution event. Idempotent — skips if the ability already
    * exists.
    */
   async runAutoPromotionPass(): Promise<{ scanned: number; promoted: number }> {
@@ -206,26 +206,26 @@ export class SkillEvolution {
             const ageHrs = (Date.now() - new Date(e.firstSeenAt).getTime()) / 3_600_000;
             if (ageHrs < AUTO_PROMOTE_MIN_AGE_HOURS) continue;
           }
-          // Build skill name. Auto-promoted skills get an `auto-` prefix so
+          // Build ability name. Auto-promoted abilities get an `auto-` prefix so
           // operators can tell them apart from hand-curated ones at a glance.
           const safeFp = e.fingerprint.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30);
-          const skillName = `auto-${source}-${safeFp}`.slice(0, 40);
-          const skillPath = this.installedPathFor(source, skillName);
-          if (existsSync(skillPath)) continue; // already promoted
+          const abilityName = `auto-${source}-${safeFp}`.slice(0, 40);
+          const abilityPath = this.installedPathFor(source, abilityName);
+          if (existsSync(abilityPath)) continue; // already promoted
 
-          const content = this.renderAutoPromotedSkill(source, e, skillName);
-          mkdirSync(join(skillPath, '..'), { recursive: true });
-          writeFileSync(skillPath, content, 'utf-8');
+          const content = this.renderAutoPromotedAbility(source, e, abilityName);
+          mkdirSync(join(abilityPath, '..'), { recursive: true });
+          writeFileSync(abilityPath, content, 'utf-8');
           promoted += 1;
           this.recordEvolutionEvent({
             ts: new Date().toISOString(),
-            kind: 'skill-auto-promoted',
+            kind: 'ability-auto-promoted',
             source,
             service: source,
-            name: skillName,
+            name: abilityName,
             metadata: { fingerprint: e.fingerprint, count: e.count, kind: e.kind },
           });
-          this.log.info('Auto-promoted verified pattern to installed skill', { source, name: skillName, count: e.count });
+          this.log.info('Auto-promoted verified pattern to installed ability', { source, name: abilityName, count: e.count });
         }
       }
     } catch (err: any) {
@@ -252,10 +252,10 @@ export class SkillEvolution {
 
   private installedPathFor(service: string, name: string): string {
     if (service === 'worker') return join('/app/.claude/commands', `${name}.md`);
-    return join(this.workspaceDir, 'skills-installed', service, `${name}.md`);
+    return join(this.workspaceDir, 'abilities-installed', service, `${name}.md`);
   }
 
-  private renderAutoPromotedSkill(source: string, e: { kind: string; fingerprint: string; count: number; firstSeenAt: string }, name: string): string {
+  private renderAutoPromotedAbility(source: string, e: { kind: string; fingerprint: string; count: number; firstSeenAt: string }, name: string): string {
     const now = new Date().toISOString();
     return [
       '---',
@@ -278,7 +278,7 @@ export class SkillEvolution {
       '',
       'When this pattern recurs:',
       '- Treat as a verified-good behavior — replicate the conditions / decisions that produced these successes',
-      '- Demote (delete) this skill if it ever causes a failure — auto-promotion can over-trust correlation',
+      '- Demote (delete) this ability if it ever causes a failure — auto-promotion can over-trust correlation',
       '',
       '_Edit or delete this file to override auto-promotion._',
     ].join('\n');
@@ -328,15 +328,15 @@ export class SkillEvolution {
   // ─── C + E. Suggestion engine ─────────────────────────────────────────
 
   /**
-   * For domain `id`, return installed skills that:
-   *   - Are not currently in this domain's defaultSkills
+   * For domain `id`, return installed abilities that:
+   *   - Are not currently in this domain's defaultAbilities (or defaultSkills)
    *   - Have a non-zero applied count
    *   - Sorted by score (descending)
    *
    * Used by the Domains panel's "Suggested for this domain" tile to surface
-   * high-confidence skills from other contexts that might benefit this one.
+   * high-confidence abilities from other contexts that might benefit this one.
    */
-  getTransferCandidates(opts: { excludeNames?: Array<{ service: string; name: string }>; limit?: number } = {}): SuggestedSkill[] {
+  getTransferCandidates(opts: { excludeNames?: Array<{ service: string; name: string }>; limit?: number } = {}): SuggestedAbility[] {
     const excludeKey = new Set((opts.excludeNames || []).map(s => `${s.service}::${s.name}`));
     const scored = this.getAllScores().filter(s => s.applied > 0 && !excludeKey.has(`${s.service}::${s.name}`));
     const limit = opts.limit ?? 10;
@@ -350,15 +350,15 @@ export class SkillEvolution {
   }
 
   /**
-   * Suggest skills derivable from trajectory-skills + verified-patterns that
+   * Suggest abilities derivable from trajectory-abilities + verified-patterns that
    * AREN'T yet installed. Caller can pass a context object to bias (e.g.
    * `{ source: 'audit' }`). For now we surface any verified-patterns whose
-   * `kind`/`fingerprint` doesn't already correspond to an installed skill.
+   * `kind`/`fingerprint` doesn't already correspond to an installed ability.
    */
-  getInstallableSuggestions(opts: { source?: string; limit?: number } = {}): SuggestedSkill[] {
+  getInstallableSuggestions(opts: { source?: string; limit?: number } = {}): SuggestedAbility[] {
     const limit = opts.limit ?? 10;
-    const installedKeys = new Set(this.listInstalledSkillKeys());
-    const out: SuggestedSkill[] = [];
+    const installedKeys = new Set(this.listInstalledAbilityKeys());
+    const out: SuggestedAbility[] = [];
     try {
       const vpRoot = join(this.workspaceDir, 'verified-patterns');
       if (!existsSync(vpRoot)) return out;
@@ -390,10 +390,10 @@ export class SkillEvolution {
     return out;
   }
 
-  private listInstalledSkillKeys(): string[] {
+  private listInstalledAbilityKeys(): string[] {
     const out: string[] = [];
     try {
-      const root = join(this.workspaceDir, 'skills-installed');
+      const root = join(this.workspaceDir, 'abilities-installed');
       if (existsSync(root)) {
         for (const ent of readdirSync(root, { withFileTypes: true })) {
           if (!ent.isDirectory()) continue;
@@ -419,10 +419,10 @@ export class SkillEvolution {
     try {
       if (existsSync(this.scoresPath)) {
         this.scores = JSON.parse(readFileSync(this.scoresPath, 'utf-8'));
-        this.log.info('SkillEvolution loaded scores', { count: Object.keys(this.scores).length });
+        this.log.info('AbilityEvolution loaded scores', { count: Object.keys(this.scores).length });
       }
     } catch (err: any) {
-      this.log.warn('SkillEvolution failed to load scores', { error: err.message });
+      this.log.warn('AbilityEvolution failed to load scores', { error: err.message });
       this.scores = {};
     }
   }
@@ -433,7 +433,7 @@ export class SkillEvolution {
       writeFileSync(this.scoresPath, JSON.stringify(this.scores, null, 2), 'utf-8');
       this.dirty = false;
     } catch (err: any) {
-      this.log.warn('SkillEvolution flush failed', { error: err.message });
+      this.log.warn('AbilityEvolution flush failed', { error: err.message });
     }
   }
 }

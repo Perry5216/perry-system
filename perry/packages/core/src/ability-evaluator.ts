@@ -1,13 +1,13 @@
-import type { LoadedSkill } from './skill-proposer.js';
+import type { LoadedAbility } from './ability-proposer.js';
 
-export class SkillEvaluator {
+export class AbilityEvaluator {
   /**
-   * Evaluate a list of LoadedSkills against a context object.
-   * Returns skills where all conditions in appliesWhen match the context.
+   * Evaluate a list of LoadedAbilities against a context object.
+   * Returns abilities where all conditions in appliesWhen match the context.
    */
-  static evaluate(skills: LoadedSkill[], context: Record<string, any>): LoadedSkill[] {
-    return skills.filter(skill => {
-      const applies = skill.appliesWhen;
+  static evaluate(abilities: LoadedAbility[], context: Record<string, any>): LoadedAbility[] {
+    return abilities.filter(ability => {
+      const applies = ability.appliesWhen;
       if (!applies || Object.keys(applies).length === 0) return false;
 
       for (const [key, expected] of Object.entries(applies)) {

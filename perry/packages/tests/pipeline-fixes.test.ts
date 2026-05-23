@@ -3,16 +3,49 @@
  * Run: node --import tsx packages/tests/pipeline-fixes.test.ts
  */
 
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { PromptBuilder } from '../projects/src/prompt-builder.js';
+import { StandardLlmRunner } from '../projects/src/runners/StandardLlmRunner.js';
+import { CompileRunner } from '../projects/src/runners/CompileRunner.js';
+
 let passed = 0;
 let failed = 0;
 const failures: string[] = [];
 
-function test(name: string, fn: () => void) {
-  try { fn(); passed++; console.log(`  ✓ ${name}`); }
-  catch (err: any) { failed++; failures.push(`${name}: ${err.message}`); console.log(`  ✗ ${name}\n    ${err.message}`); }
+async function test(name: string, fn: () => void | Promise<void>) {
+  try {
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  } catch (err: any) {
+    failed++;
+    failures.push(`${name}: ${err.message}`);
+    console.log(`  ✗ ${name}\n    ${err.message}`);
+  }
 }
+
 function assert(cond: boolean, msg: string) { if (!cond) throw new Error(msg); }
 function assertEqual(a: any, b: any, label: string) { if (a !== b) throw new Error(`${label}: expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); }
+
+const mockLog = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  debug: () => {},
+  child: () => mockLog,
+} as any;
+
+const mockContextEngine = {
+  getContextSlots: async () => []
+} as any;
+const mockStateStore = {
+  get: () => null,
+  getPenNames: () => [],
+} as any;
+const mockConfig = {
+  workspaceDir: '/dummy',
+} as any;
 
 // ═══════════════════════════════════════════════════════════
 // Fix #2 — Narrative Directives regex: G not F
@@ -53,19 +86,19 @@ const mockStatUpdateOutput = `## A. Character Stats
 Kai (POV) — Sanity: 65/Stable. Write with mild paranoia undertone.
 Mara (supporting) — Trust toward Kai dropped to 6/10. She will be guarded.`;
 
-test('Old regex (## F.) does NOT match narrative directives', () => {
+await test('Old regex (## F.) does NOT match narrative directives', () => {
   const oldMatch = mockStatUpdateOutput.match(/## F\.\s*NARRATIVE DIRECTIVES[\s\S]*$/i);
   assertEqual(oldMatch, null, 'Old F. regex should return null (was broken)');
 });
 
-test('New regex (## G.) correctly matches narrative directives', () => {
+await test('New regex (## G.) correctly matches narrative directives', () => {
   const newMatch = mockStatUpdateOutput.match(/##\s*G\.?\s*NARRATIVE DIRECTIVES[\s\S]*$/i);
   assert(newMatch !== null, 'New G. regex must match');
   assert(newMatch![0].includes('Kai (POV)'), 'Must include POV directive content');
   assert(newMatch![0].includes('Sanity: 65/Stable'), 'Must include stat level');
 });
 
-test('Extracted directives do not include relationship section', () => {
+await test('Extracted directives do not include relationship section', () => {
   const match = mockStatUpdateOutput.match(/##\s*G\.?\s*NARRATIVE DIRECTIVES[\s\S]*$/i);
   assert(match !== null, 'Must match');
   assert(!match![0].includes('## F. Relationship'), 'Must not include Section F');
@@ -76,11 +109,7 @@ test('Extracted directives do not include relationship section', () => {
 // ═══════════════════════════════════════════════════════════
 console.log('\n─── Fix #2b: Faction Reputation regex anchored to Section B ───');
 
-test('Old reputation regex false-positive: matches bare FACTION REPUTATION header (proves the bug existed)', () => {
-  // The old regex /## (?:E\.\s*)?FACTION REPUTATION/i matched any section
-  // whose header contained those words — including prior stat update outputs
-  // injected into context where the header appeared without a section letter.
-  // This caused it to pick the wrong table when both were in the context window.
+await test('Old reputation regex false-positive: matches bare FACTION REPUTATION header (proves the bug existed)', () => {
   const oldStyleStatUpdate = `## FACTION REPUTATION
 | Character | Faction | Old Rep | New Rep | Label |
 |-----------|---------|---------|---------|-------|
@@ -91,7 +120,7 @@ test('Old reputation regex false-positive: matches bare FACTION REPUTATION heade
   assert(oldMatch !== null, 'Old regex matches the bare FACTION REPUTATION header — confirms the bug existed');
 });
 
-test('New reputation regex only matches Section B of stat updates', () => {
+await test('New reputation regex only matches Section B of stat updates', () => {
   const newRegex = /##\s*B\.?\s*Faction Reputation[\s\S]*?(?=##\s*[C-Z]\.?|$)/i;
   const match = mockStatUpdateOutput.match(newRegex);
   assert(match !== null, 'Must match Section B in stat update');
@@ -99,7 +128,7 @@ test('New reputation regex only matches Section B of stat updates', () => {
   assert(match![0].includes('Neutral→Distrusted'), 'Must contain threshold crossing flag');
 });
 
-test('New reputation regex does not match stat DEFINITION output section C', () => {
+await test('New reputation regex does not match stat DEFINITION output section C', () => {
   const statDefinitionOutput = `## C. Faction Reputation Tracker
 | Character | Faction | Starting Reputation | Label | Reason |`;
   const newRegex = /##\s*B\.?\s*Faction Reputation[\s\S]*?(?=##\s*[C-Z]\.?|$)/i;
@@ -112,24 +141,21 @@ test('New reputation regex does not match stat DEFINITION output section C', () 
 // ═══════════════════════════════════════════════════════════
 console.log('\n─── Fix #1: Section B Markdown table schema ───');
 
-import { readFileSync } from 'fs';
-import { join } from 'path';
-
 const projectRoot = join(import.meta.dirname, '..');
 const templatesSource = readFileSync(join(projectRoot, 'projects/src/templates.ts'), 'utf8');
 
-test('Section B no longer uses bullet-point format', () => {
+await test('Section B no longer uses bullet-point format', () => {
   assert(!templatesSource.includes('- **Pair**: Character A'), 'Old bullet-point Pair definition must be gone');
   assert(!templatesSource.includes('- **Starting Intensity**: 1-10 scale'), 'Old bullet-point Intensity must be gone');
 });
 
-test('Section B now defines a Markdown table header', () => {
+await test('Section B now defines a Markdown table header', () => {
   if (templatesSource.includes('novel-pipeline')) {
     assert(templatesSource.includes('| Character A | Character B | Starting Dynamic | Intensity (1-10) | Trajectory'), 'Table header must be present');
   }
 });
 
-test('Section B table schema is consistent with stat_update output columns', () => {
+await test('Section B table schema is consistent with stat_update output columns', () => {
   if (templatesSource.includes('novel-pipeline')) {
     assert(templatesSource.includes('Intensity (1-10)'), 'Must define Intensity column');
     assert(templatesSource.includes('Pressure Point'), 'Must define Pressure Point column');
@@ -141,19 +167,19 @@ test('Section B table schema is consistent with stat_update output columns', () 
 // ═══════════════════════════════════════════════════════════
 console.log('\n─── Fix #7: Task-aware minimum response length ───');
 
-test('Creative step word-count threshold: 30% of wordCountTarget', () => {
+await test('Creative step word-count threshold: 30% of wordCountTarget', () => {
   const wordCountTarget = 3000;
   const minWords = Math.floor(wordCountTarget * 0.3);
   assertEqual(minWords, 900, 'minWords for 3000-word chapter');
 });
 
-test('Creative step with no wordCountTarget defaults to 300 words', () => {
+await test('Creative step with no wordCountTarget defaults to 300 words', () => {
   const wordCountTarget = undefined;
   const minWords = wordCountTarget ? Math.floor(wordCountTarget * 0.3) : 300;
   assertEqual(minWords, 300, 'default minWords');
 });
 
-test('Short PASS verdict passes char-based check (analytical steps)', () => {
+await test('Short PASS verdict passes char-based check (analytical steps)', () => {
   const text = '- **POV Character**: Kai\n- **Outline Match**: YES\n- **Deep POV Score**: 8\n- **Verdict**: PASS';
   const minResponseLength = 50; // system default
   assert(text.length >= minResponseLength, 'Short analytical verdict should pass char check');
@@ -180,8 +206,7 @@ function runOutlineValidation(text: string, targetCh: number) {
   return { missing, thin };
 }
 
-test('Validator passes a well-formed outline', () => {
-  // Each chapter section must be >100 chars. Use realistic-length content.
+await test('Validator passes a well-formed outline', () => {
   const ch1 = 'POV: Kai. Scene: Kai wakes in the server farm to find the central AI has been compromised by an unknown intruder. Rising tension as he navigates the breach protocols alone. Ends with discovery of the mole identity buried in the access logs. Foreshadowing: the mirror motif.\n\n';
   const ch2 = 'POV: Mara. Scene: Mara is tailed through the night market district by a Nexus Corp operative. Subplot B advances as she makes contact with the resistance cell leader. Faction reputation shift: Mara drops from Neutral to Distrusted with Nexus Corp. Ends on a cliffhanger ambush.\n\n';
   const ch3 = 'POV: Kai. Scene: Confrontation with the faction representative in the abandoned relay tower. Character stats pushed to breaking point — Sanity threshold crossed. Subplot A resolved. Ends with an uneasy truce that neither party intends to honour.';
@@ -191,28 +216,21 @@ test('Validator passes a well-formed outline', () => {
   assertEqual(thin.length, 0, 'no thin chapters');
 });
 
-test('Validator detects missing chapter', () => {
+await test('Validator detects missing chapter', () => {
   const longContent = 'POV: Kai. Scene detail here with lots of content to fill the section past the 100-char threshold for the thin-chapter check. More content here.';
   const text = `## Chapter 1\n${longContent}\n\n## Chapter 3\n${longContent}`;
   const { missing } = runOutlineValidation(text, 3);
   assert(missing.includes(2), 'Chapter 2 must be flagged as missing');
 });
 
-test('Thin-content predicate: trimmed section < 100 chars flags chapter', () => {
-  // Direct unit test of the predicate used in the outline validator.
-  // We test the exact logic: substring(start, start+500).replace(/\s+/g,' ').trim().length < 100
-  // In production, the 500-char window stays within a single chapter because chapters are
-  // thousands of words long. Here we directly verify the predicate behaviour.
-  
+await test('Thin-content predicate: trimmed section < 100 chars flags chapter', () => {
   const trimmedLength = (section: string) => section.replace(/\s+/g, ' ').trim().length;
 
-  // Placeholders — should trigger thin flag (trimmed < 100)
   assert(trimmedLength('## Chapter 1 See above.') < 100, '"See above." placeholder is thin');
   assert(trimmedLength('## Chapter 3 Same.') < 100, '"Same." placeholder is thin');
   assert(trimmedLength('## Chapter 7') < 100, 'Header-only chapter is thin');
   assert(trimmedLength('## Chapter 2 [see above]') < 100, 'Bracket placeholder is thin');
 
-  // Real content — should NOT trigger thin flag (trimmed >= 100)
   const realSection = '## Chapter 2 POV: Kai. Full scene detail — the heist begins in earnest, Mara takes point while Kai holds the server room. Faction reps shift. Subplot resolved. Ends with explosion.';
   assert(trimmedLength(realSection) >= 100, 'Full scene content is NOT thin');
 });
@@ -245,25 +263,25 @@ Dark Night of the Soul approaching — do NOT resolve tension here. Let it linge
 | 3 | 9/10 | Climax | All-in confrontation |
 | 4 | 3/10 | Denouement | Aftermath, breathe |`;
 
-test('Extracts correct row for chapter 2', () => {
+await test('Extracts correct row for chapter 2', () => {
   const result = extractTensionRow(tensionBlueprint, 2);
   assert(result !== null, 'Must find chapter 2 row');
   assert(result!.includes('7/10'), 'Must include tension level');
   assert(result!.includes('Rising'), 'Must include beat type');
 });
 
-test('Captures prose annotation after chapter 2 row', () => {
+await test('Captures prose annotation after chapter 2 row', () => {
   const result = extractTensionRow(tensionBlueprint, 2);
   assert(result!.includes('Dark Night of the Soul'), 'Must capture structural note');
   assert(result!.includes('**Structural Note**'), 'Must use Structural Note prefix');
 });
 
-test('Does NOT add structural note when next line is another table row', () => {
+await test('Does NOT add structural note when next line is another table row', () => {
   const result = extractTensionRow(tensionBlueprint, 3);
   assert(!result!.includes('**Structural Note**'), 'Chapter 3 next line is a table row — no note');
 });
 
-test('Works for chapter with no annotation (chapter 4)', () => {
+await test('Works for chapter with no annotation (chapter 4)', () => {
   const result = extractTensionRow(tensionBlueprint, 4);
   assert(result !== null, 'Must find row');
   assert(result!.includes('3/10'), 'Must include tension level');
@@ -279,7 +297,7 @@ function sanitizeThinkBlocks(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, '');
 }
 
-test('Strips single <think> block from prose', () => {
+await test('Strips single <think> block from prose', () => {
   const input = 'The rain fell hard.\n<think>The user wants me to write about rain. I should use sensory detail.</think>\nKai pulled his jacket tighter.';
   const result = sanitizeThinkBlocks(input);
   assert(!result.includes('<think>'), 'Must remove opening tag');
@@ -287,7 +305,7 @@ test('Strips single <think> block from prose', () => {
   assert(result.includes('Kai pulled his jacket'), 'Must preserve prose');
 });
 
-test('Strips multiple <think> blocks', () => {
+await test('Strips multiple <think> blocks', () => {
   const input = '<think>First thought.</think>Prose here.<think>Second thought.</think>More prose.';
   const result = sanitizeThinkBlocks(input);
   assert(!result.includes('<think>'), 'No think tags remain');
@@ -295,14 +313,14 @@ test('Strips multiple <think> blocks', () => {
   assert(result.includes('More prose.'), 'Second prose preserved');
 });
 
-test('Case-insensitive: strips <THINK> uppercase variant', () => {
+await test('Case-insensitive: strips <THINK> uppercase variant', () => {
   const input = 'Start.<THINK>Reasoning block.</THINK>End.';
   const result = sanitizeThinkBlocks(input);
   assert(!result.includes('THINK'), 'Uppercase tags removed');
   assert(result.includes('Start.'), 'Content preserved');
 });
 
-test('Leaves clean prose untouched', () => {
+await test('Leaves clean prose untouched', () => {
   const input = 'The server room was cold. Kai exhaled, watching his breath mist.';
   const result = sanitizeThinkBlocks(input);
   assertEqual(result, input, 'Clean prose must be unchanged');
@@ -313,80 +331,345 @@ test('Leaves clean prose untouched', () => {
 // ═══════════════════════════════════════════════════════════
 console.log('\n─── Fix #6: Chapter echo 300 words ───');
 
-const promptBuilderSource = readFileSync(join(projectRoot, 'projects/src/prompt-builder.ts'), 'utf8');
+await test('prompt-builder uses 300 words for chapter echo', async () => {
+  const builder = new PromptBuilder('/dummy', mockContextEngine, mockStateStore, null, mockConfig, mockLog);
+  
+  const words: string[] = [];
+  for (let i = 1; i <= 400; i++) {
+    words.push(`word${i}`);
+  }
+  const chapter1Result = words.join(' ');
 
-test('prompt-builder uses slice(-300) not slice(-200) for chapter echo', () => {
-  assert(!promptBuilderSource.includes('slice(-200)'), 'Old 200-word slice must be gone');
-  assert(promptBuilderSource.includes('slice(-300)'), 'New 300-word slice must be present');
+  const project = {
+    id: 'p1',
+    title: 'My Novel',
+    context: {},
+    steps: [
+      { id: 's1', label: 'Chapter 1 writing', taskType: 'revision_execution', chapterNumber: 1, status: 'completed', result: chapter1Result }
+    ]
+  } as any;
+  const provider = { id: 'ollama', name: 'Ollama', providerConfig: {}, contextWindow: 8192 } as any;
+
+  const step = { id: 's2', label: 'Chapter 2 writing', taskType: 'creative_writing', chapterNumber: 2, phase: 'writing' } as any;
+  const result = await builder.build(project, step, provider, 'System prompt');
+  
+  assert(result.message.includes('End of Chapter 1'), 'Should contain Chapter Echo');
+  assert(result.message.includes('word101'), 'Echo must include word101');
+  assert(!result.message.includes('word100'), 'Echo must slice out word100');
 });
 
 // ═══════════════════════════════════════════════════════════
-// Fix — step-runner type routing
+// Fix — step-runner type routing & parameters
 // ═══════════════════════════════════════════════════════════
-console.log('\n─── Fix: Step-runner persona routing ───');
+console.log('\n─── Fix: Step-runner persona routing & parameters ───');
 
-const stepRunnerSource = readFileSync(join(projectRoot, 'projects/src/step-runner.ts'), 'utf8') + '\n' +
-                         readFileSync(join(projectRoot, 'projects/src/runners/StandardLlmRunner.ts'), 'utf8') + '\n' +
-                         readFileSync(join(projectRoot, 'projects/src/runners/CompileRunner.ts'), 'utf8');
+await test('StepRunner planning types builds correct system prompt', () => {
+  const runner = new StandardLlmRunner();
+  const project = { id: 'p1', title: 'My Novel', context: {} } as any;
+  const dummyRunner = {} as any;
 
-test('planningTypes includes outline', () => {
-  assert(stepRunnerSource.includes("'outline', 'voice_profile'") || stepRunnerSource.includes("'outline'"), 'outline must be in planningTypes');
+  const outlineStep = { id: 's1', label: 'Plot outline', taskType: 'outline' } as any;
+  const outlinePrompt = (runner as any).buildSystemPrompt(project, outlineStep, dummyRunner);
+  assert(outlinePrompt.includes('You are the P.E.R.R.Y. System — an expert fiction plotting and world-building architect.'), 'Outline system prompt must have planning framing');
+
+  const voiceStep = { id: 's2', label: 'Voice targets', taskType: 'voice_profile' } as any;
+  const voicePrompt = (runner as any).buildSystemPrompt(project, voiceStep, dummyRunner);
+  assert(voicePrompt.includes('You are the P.E.R.R.Y. System — an expert fiction plotting and world-building architect.'), 'Voice profile system prompt must have planning framing');
 });
 
-test('planningTypes includes voice_profile', () => {
-  assert(stepRunnerSource.includes("'voice_profile'"), 'voice_profile must be in planningTypes');
+await test('StepRunner analytical types builds correct system prompt', () => {
+  const runner = new StandardLlmRunner();
+  const project = { id: 'p1', title: 'My Novel', context: {} } as any;
+  const dummyRunner = {} as any;
+
+  const researchStep = { id: 's3', label: 'Network Research', taskType: 'research' } as any;
+  const researchPrompt = (runner as any).buildSystemPrompt(project, researchStep, dummyRunner);
+  assert(researchPrompt.includes('You are the P.E.R.R.Y. Analytical Engine — a strict literary critic and quality auditing system.'), 'Research system prompt must have analytical framing');
 });
 
-test('analyticalTypes includes research', () => {
-  assert(stepRunnerSource.includes("'research'"), 'research must be in analyticalTypes');
+await test('Creative writing step uses repeat penalty of 1.15', async () => {
+  const runner = new StandardLlmRunner();
+  const project = {
+    id: 'proj-creative',
+    title: 'Creative Project',
+    context: {},
+    steps: []
+  } as any;
+  
+  const step = {
+    id: 'step-creative',
+    label: 'Write Chapter 1',
+    taskType: 'creative_writing',
+    prompt: 'Start writing...',
+    chapterNumber: 1
+  } as any;
+
+  let capturedParams: any = null;
+
+  const mockRunner = {
+    directorAbilities: [],
+    shouldUseWorkersForResearch: () => false,
+    log: mockLog,
+    promptBuilder: {
+      build: async () => ({ message: 'Mock Prompt', budgetReport: { used: 0, remaining: 1000, droppedSlots: [] } }),
+    },
+    mcpClient: {
+      getTools: () => [],
+    },
+    config: {
+      workspaceDir: '/dummy',
+      maxRetries: 3,
+    },
+    styleDna: {
+      compileSeed: () => null,
+      compileGoldenExamples: () => null,
+    },
+    dedup: {
+      deduplicateContent: (text: string) => text,
+      deduplicateOutput: (text: string) => text,
+    },
+    sanitizer: {
+      sanitize: (text: string) => text,
+    },
+    eventBus: {
+      emit: () => {},
+    },
+    stateStore: {
+      completeStep: () => {},
+      failStep: () => {},
+      recordTelemetry: () => {},
+    },
+    costTracker: {
+      recordCost: () => true,
+    },
+    saveStepToDisk: async () => {},
+    router: {
+      config: {
+        get: (key: string, def: any) => def,
+      },
+      resolveRoutingTarget: () => 'writer',
+      getProvider: () => ({ id: 'writer-gpu', name: 'Writer GPU' }),
+      selectProvider: () => ({ id: 'writer-gpu', name: 'Writer GPU' }),
+      getFallbackProvider: () => null,
+      getOutputBudget: () => 4096,
+      getRecommendedThinking: () => undefined,
+      contextWatcher: {
+        recordPromptTokens: () => {},
+        getHallucinationWarning: () => null,
+        getCompressionMultiplier: () => 1.0,
+        recordActualUsage: () => {},
+      },
+      complete: async (params: any) => {
+        capturedParams = params;
+        return {
+          text: 'Once upon a time. '.repeat(100),
+          promptTokens: 10,
+          completionTokens: 5,
+          estimatedCost: 0.0001,
+          tokensUsed: 15,
+        };
+      }
+    }
+  } as any;
+
+  await runner.execute(project, step, mockRunner);
+  assert(capturedParams !== null, 'complete must be called');
+  assertEqual(capturedParams.repeatPenalty, 1.15, 'repeatPenalty must be 1.15');
 });
 
-test('repeatPenalty is 1.15 not 1.3', () => {
-  assert(!stepRunnerSource.includes('? 1.3 :'), 'Old 1.3 penalty must be gone');
-  assert(stepRunnerSource.includes('? 1.15 :'), 'New 1.15 penalty must be present');
+await test('Hallucination guard uses dynamic GPU label', async () => {
+  const runner = new StandardLlmRunner();
+  const project = {
+    id: 'proj-creative',
+    title: 'Creative Project',
+    context: {},
+    steps: []
+  } as any;
+  
+  const step = {
+    id: 'step-creative',
+    label: 'Write Chapter 1',
+    taskType: 'creative_writing',
+    prompt: 'Start writing...',
+    chapterNumber: 1
+  } as any;
+
+  let passedLabel: string | null = null;
+
+  const mockRunner = {
+    directorAbilities: [],
+    shouldUseWorkersForResearch: () => false,
+    log: mockLog,
+    promptBuilder: {
+      build: async () => ({ message: 'Mock Prompt', budgetReport: { used: 0, remaining: 1000, droppedSlots: [] } }),
+    },
+    mcpClient: {
+      getTools: () => [],
+    },
+    config: {
+      workspaceDir: '/dummy',
+      maxRetries: 3,
+    },
+    styleDna: {
+      compileSeed: () => null,
+      compileGoldenExamples: () => null,
+    },
+    dedup: {
+      deduplicateContent: (text: string) => text,
+      deduplicateOutput: (text: string) => text,
+    },
+    sanitizer: {
+      sanitize: (text: string) => text,
+    },
+    eventBus: {
+      emit: () => {},
+    },
+    stateStore: {
+      completeStep: () => {},
+      failStep: () => {},
+      recordTelemetry: () => {},
+    },
+    costTracker: {
+      recordCost: () => true,
+    },
+    saveStepToDisk: async () => {},
+    router: {
+      config: {
+        get: (key: string, def: any) => def,
+      },
+      resolveRoutingTarget: () => 'writer',
+      getProvider: () => ({ id: 'writer-gpu', name: 'My Custom GPU (80GB)' }),
+      selectProvider: () => ({ id: 'writer-gpu', name: 'My Custom GPU (80GB)' }),
+      getFallbackProvider: () => null,
+      getOutputBudget: () => 4096,
+      getRecommendedThinking: () => undefined,
+      contextWatcher: {
+        recordPromptTokens: () => {},
+        getHallucinationWarning: (label: string) => {
+          passedLabel = label;
+          return '\n[WARNING: Near capacity]';
+        },
+        getStats: () => ({ gpus: [{ label: 'My Custom GPU (80GB)', percentFull: 95 }] }),
+        getCompressionMultiplier: () => 1.0,
+        recordActualUsage: () => {},
+      },
+      complete: async (params: any) => {
+        return {
+          text: 'Story prose '.repeat(150),
+          promptTokens: 10,
+          completionTokens: 5,
+          estimatedCost: 0.0001,
+          tokensUsed: 15,
+        };
+      }
+    }
+  } as any;
+
+  await runner.execute(project, step, mockRunner);
+  assertEqual(passedLabel, 'My Custom GPU (80GB)', 'Hallucination warning check must receive custom GPU name');
 });
 
-test('Hallucination guard uses 1-arg call', () => {
-  assert(!stepRunnerSource.includes('getHallucinationWarning(writerName, step.taskType)'), 'Old 2-arg call must be gone');
-  assert(stepRunnerSource.includes('getHallucinationWarning(gpuLabel)'), 'New 1-arg call must be present');
+await test('CompileRunner export task runs sanitizer on final result', async () => {
+  const runner = new CompileRunner();
+  const project = {
+    id: 'proj-compile',
+    title: 'Compilation Project',
+    steps: []
+  } as any;
+  const step = {
+    id: 'step-export',
+    label: 'Export Novel',
+    taskType: 'export'
+  } as any;
+
+  let sanitizeCalled = false;
+
+  const mockRunner = {
+    log: mockLog,
+    stateStore: {
+      completeStep: () => {},
+      failStep: () => {},
+    },
+    eventBus: {
+      emit: () => {},
+    },
+    saveStepToDisk: async () => {},
+    dedup: {
+      scanForCrossChapterDuplicates: () => {},
+    },
+    sanitizer: {
+      sanitize: (text: string) => {
+        sanitizeCalled = true;
+        return text + ' (sanitized)';
+      }
+    }
+  } as any;
+
+  const result = await runner.execute(project, step, mockRunner);
+  assert(sanitizeCalled, 'ProseSanitizer.sanitize must be called during export');
+  assert(result.endsWith('(sanitized)'), 'Sanitized result must be returned');
 });
 
-test('GPU label is dynamic (not hardcoded Writer 5090)', () => {
-  assert(stepRunnerSource.includes("provider.name || 'Writer (5090)'"), 'Dynamic GPU label must be present');
-});
+await test('book_bible system prompt uses positive framing', () => {
+  const runner = new StandardLlmRunner();
+  const project = { id: 'p1', title: 'My Novel', context: {} } as any;
+  const dummyRunner = {} as any;
 
-test('Export step runs sanitizer', () => {
-  assert(stepRunnerSource.includes('sanitizer.sanitize(result)'), 'Sanitizer must be called on export result');
-});
-
-test('book_bible system prompt uses positive framing', () => {
-  assert(!stepRunnerSource.includes('Do not write story prose. Do not include conversational filler.'), 'Old negative constraint must be gone');
-  assert(stepRunnerSource.includes('Output structured data only'), 'Positive framing must be present');
+  const step = { id: 's4', label: 'Book Bible Definitions', taskType: 'book_bible' } as any;
+  const prompt = (runner as any).buildSystemPrompt(project, step, dummyRunner);
+  assert(!prompt.includes('Do not write story prose. Do not include conversational filler.'), 'Must not contain old negative constraints');
+  assert(prompt.includes('Output structured data only'), 'Must contain positive framing');
 });
 
 // ═══════════════════════════════════════════════════════════
-// Fix — prompt-builder isAnalyticalStep expanded
+// Fix — prompt-builder isAnalyticalStep expanded & footers
 // ═══════════════════════════════════════════════════════════
 console.log('\n─── Fix: isAnalyticalStep covers outline + voice_profile ───');
 
-test('prompt-builder isAnalyticalStep includes outline', () => {
-  assert(promptBuilderSource.includes("'outline'"), 'outline must be in isAnalyticalStep');
+await test('prompt-builder isAnalyticalStep covers outline + voice_profile', async () => {
+  const builder = new PromptBuilder('/dummy', mockContextEngine, mockStateStore, null, mockConfig, mockLog);
+  const project = { id: 'p1', title: 'My Novel', context: {}, steps: [] } as any;
+  const provider = { id: 'ollama', name: 'Ollama', providerConfig: {}, contextWindow: 8192 } as any;
+
+  const outlineStep = { id: 's1', label: 'Plot outline', taskType: 'outline', prompt: 'outline prompt' } as any;
+  const outlineResult = await builder.build(project, outlineStep, provider, 'System prompt');
+  
+  assert(!outlineResult.message.includes('[ANTI-LAZINESS:'), 'Outline must skip Anti-Laziness Protocol');
+  assert(!outlineResult.message.includes('[BANNED (overused AI defaults'), 'Outline must skip Global Anti-Patterns');
+
+  const creativeStep = { id: 's2', label: 'Chapter 1', taskType: 'creative_writing', prompt: 'creative prompt' } as any;
+  const creativeResult = await builder.build(project, creativeStep, provider, 'System prompt');
+  assert(creativeResult.message.includes('[ANTI-LAZINESS:'), 'Creative step must include Anti-Laziness Protocol');
+  assert(creativeResult.message.includes('[BANNED (overused AI defaults'), 'Creative step must include Global Anti-Patterns');
 });
 
-test('prompt-builder isAnalyticalStep includes voice_profile', () => {
-  assert(promptBuilderSource.includes("'voice_profile'"), 'voice_profile must be in isAnalyticalStep');
+await test('stat_update has separate reinforcement footer and does not re-emit step.prompt', async () => {
+  const builder = new PromptBuilder('/dummy', mockContextEngine, mockStateStore, null, mockConfig, mockLog);
+  const project = { id: 'p1', title: 'My Novel', context: {}, steps: [] } as any;
+  const provider = { id: 'ollama', name: 'Ollama', providerConfig: {}, contextWindow: 8192 } as any;
+  
+  const step = { id: 's3', label: 'Stats update', taskType: 'stat_update', prompt: 'MY_UNIQUE_STEP_PROMPT' } as any;
+  const result = await builder.build(project, step, provider, 'System prompt');
+  
+  assert(result.message.includes('You are a live tracking database'), 'stat_update must use its own reinforcement footer');
+  assert(!result.message.includes('You are an analytical grading engine'), 'stat_update must not use pov_check framing');
+  
+  const occurrences = result.message.split('MY_UNIQUE_STEP_PROMPT').length - 1;
+  assertEqual(occurrences, 1, 'step.prompt must only be emitted once in the whole prompt');
 });
 
-test('stat_update has separate reinforcement footer (not pov_check framing)', () => {
-  assert(promptBuilderSource.includes("You are a live tracking database"), 'stat_update must have own framing');
-  assert(!promptBuilderSource.includes("step.taskType === 'stat_update' || step.taskType === 'revision_audit'"), 'stat_update must be split from pov_check block');
-});
-
-test('pov_check reinforcement no longer re-emits step.prompt', () => {
-  // The old code had: message += `...\n\n### REQUIRED FORMAT:\n${step.prompt}`
-  // New code does not include ${step.prompt} in the pov_check footer
-  const povCheckBlock = promptBuilderSource.split("if (step.taskType === 'pov_check'")[1]?.split('}')[0] ?? '';
-  assert(!povCheckBlock.includes('step.prompt'), 'pov_check footer must not re-emit step.prompt');
+await test('pov_check reinforcement footer does not re-emit step.prompt', async () => {
+  const builder = new PromptBuilder('/dummy', mockContextEngine, mockStateStore, null, mockConfig, mockLog);
+  const project = { id: 'p1', title: 'My Novel', context: {}, steps: [] } as any;
+  const provider = { id: 'ollama', name: 'Ollama', providerConfig: {}, contextWindow: 8192 } as any;
+  
+  const step = { id: 's4', label: 'POV audit check', taskType: 'pov_check', prompt: 'ANOTHER_UNIQUE_STEP_PROMPT' } as any;
+  const result = await builder.build(project, step, provider, 'System prompt');
+  
+  assert(result.message.includes('You are an analytical grading engine'), 'pov_check must use its reinforcement footer');
+  
+  const occurrences = result.message.split('ANOTHER_UNIQUE_STEP_PROMPT').length - 1;
+  assertEqual(occurrences, 1, 'step.prompt must only be emitted once in the whole prompt');
 });
 
 // ═══════════════════════════════════════════════════════════

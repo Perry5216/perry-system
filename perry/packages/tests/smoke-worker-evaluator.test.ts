@@ -1,7 +1,6 @@
 import { StateStore, StepRunner } from '../projects/src/index.js';
-import { rmSync, mkdtempSync, mkdirSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { rmSync } from 'fs';
+import { mockLog, createTempWorkspace, mockEventBus, mockMcpClient, mockStateStoreDb } from './test-helpers.js';
 
 let passed = 0;
 let failed = 0;
@@ -31,59 +30,6 @@ function assertEqual(actual: any, expected: any, label: string) {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
-}
-
-const mockLog = {
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  debug: () => {},
-  child: () => mockLog,
-} as any;
-
-function createTempWorkspace(): string {
-  const systemTemp = tmpdir();
-  const dir = mkdtempSync(join(systemTemp, 'perry-smoke-test-'));
-  mkdirSync(join(dir, 'skills-installed'), { recursive: true });
-  return dir;
-}
-
-const mockEventBus = {
-  emit: () => {},
-  on: () => {},
-} as any;
-
-const mockMcpClient = {
-  getTools: () => [],
-  executeTool: () => ({}),
-} as any;
-
-function mockStateStoreDb(store: any, getCallback: (sql: string) => any) {
-  const runStub = () => ({ changes: 1, lastInsertRowid: 1 });
-  const allStub = () => [];
-  store.db = {
-    prepare: (sql: string) => {
-      if (sql.includes('task_pool') || sql.includes('SELECT status, result')) {
-        return {
-          get: getCallback,
-          run: runStub,
-          all: allStub,
-        };
-      }
-      return {
-        run: runStub,
-        all: allStub,
-        get: () => null,
-      };
-    },
-    transaction: (fn: Function) => {
-      const runTx = () => fn();
-      runTx.immediate = () => fn();
-      runTx.deferred = () => fn();
-      runTx.exclusive = () => fn();
-      return runTx;
-    },
-  } as any;
 }
 
 console.log('\n─── Worker-Evaluator Loop Smoke Test ───');

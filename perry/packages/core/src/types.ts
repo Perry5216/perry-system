@@ -13,7 +13,7 @@ export type WorkType = 'books' | 'code' | 'dnd' | 'meta' | 'email' | 'hacking';
 
 export type ProjectType =
   | 'software-dev'
-  | 'dynamic-skills'
+  | 'dynamic-abilities'
   // Book templates
   | 'book-planning'
   | 'style-calibration'
@@ -84,7 +84,7 @@ export interface ProjectStep {
   status: StepStatus;
   result?: string;
   error?: string;
-  skill?: string;
+  ability?: string;
   wordCountTarget?: number;
   chapterNumber?: number;
   segmentIndex?: number;
@@ -328,17 +328,17 @@ export interface EventMap {
   // ─── Self-learning taxonomy (load-bearing contract) ──────────────────
   // Emit one of these from ANY service or agent and the framework's
   // LearningCore picks it up — tracks recurrence by (source, kind,
-  // fingerprint), proposes skills once a threshold is crossed. New
+  // fingerprint), proposes abilities once a threshold is crossed. New
   // domains/services get learning automatically without writing their
-  // own SkillProposer wiring.
+  // own AbilityProposer wiring.
   //
   //   source       — which subsystem produced the event ("director",
   //                  "audit", "gc", "prompt-builder", "scout", or a
   //                  domain like "hacking" / "code" / "meta").
-  //                  Determines the proposed skill's service tag.
+  //                  Determines the proposed ability's service tag.
   //   kind         — the pattern bucket within the source
   //                  ("rag-miss", "dir-growth", "step-fail",
-  //                  "leak-pattern"). Threshold + skill template are
+  //                  "leak-pattern"). Threshold + ability template are
   //                  selected per (source, kind).
   //   fingerprint  — what specifically recurred ("bible_rag::topic-hash",
   //                  "scout-findings", "research_assist::EISDIR").
@@ -350,7 +350,7 @@ export interface EventMap {
   'learning:failure':     { source: string; kind: string; fingerprint: string; error: string; metadata?: Record<string, any> };
   'learning:observation': { source: string; kind: string; fingerprint: string; value?: number; metadata?: Record<string, any> };
   'learning:duration':    { source: string; kind: string; fingerprint: string; durationMs: number; metadata?: Record<string, any> };
-  'skill:execution':      { service: string; name: string; success: boolean; durationMs: number; error: string | null };
+  'ability:execution':      { service: string; name: string; success: boolean; durationMs: number; error: string | null };
   'intelligent-evolve:log': { message: string; timestamp: string };
 }
 
@@ -373,7 +373,7 @@ export type AgentDomain = 'code' | 'email' | 'hacking' | 'meta' | 'books' | 'dnd
 export function projectTypeDomain(type: ProjectType): AgentDomain {
   switch (type) {
     case 'software-dev':
-    case 'dynamic-skills':
+    case 'dynamic-abilities':
       return 'code';
     case 'book-planning':
     case 'style-calibration':
@@ -441,7 +441,7 @@ export interface AgentDefinition {
   modelBinding: {
     provider:
       | 'writer'        // local Magnum LoRA on writer GPU (free)
-      | 'librarian'     // local qwen3:14b on librarian GPU (free)
+      | 'curator'       // local qwen3:14b on curator GPU (free)
       | 'researcher'    // local qwen3.6:27b on configurable endpoint (free)
       | 'perry-agent'   // future locally-trained Perry agent LoRA (free)
       | 'workers';      // CLI subscription pool — Claude Code + Gemini CLI race

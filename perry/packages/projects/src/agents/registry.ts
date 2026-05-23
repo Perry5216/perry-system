@@ -313,7 +313,7 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
       'Do NOT propose draft replies — that is email.drafter\'s job.',
       'Skip obvious spam silently.',
     ].join('\n'),
-    modelBinding: { provider: 'librarian' },  // local, fast, generalist
+    modelBinding: { provider: 'curator' },  // local, fast, generalist
     toolACL: [],  // no MCP tools needed for triage
     outputFormat: 'markdown',
     compression: 'medium',
@@ -375,7 +375,7 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
       '  - If asked for an attack, refuse and pivot to defensive framing.',
       '  - Frame findings as "what an attacker MIGHT see and what defenders should do."',
     ].join('\n'),
-    modelBinding: { provider: 'librarian' },  // local, ensures pastes don't leave the box
+    modelBinding: { provider: 'curator' },  // local, ensures pastes don't leave the box
     toolACL: [],
     outputFormat: 'markdown',
     compression: 'low',
@@ -403,7 +403,7 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
       '  - If you don\'t know whether a CVE applies, say so — do NOT guess.',
       '  - Frame everything as defensive remediation; no exploit guidance.',
     ].join('\n'),
-    modelBinding: { provider: 'librarian' },
+    modelBinding: { provider: 'curator' },
     toolACL: [],
     outputFormat: 'markdown',
     compression: 'low',

@@ -12,11 +12,11 @@ export { compressTools } from './mcp-compressor.js';
 export type { CompressedToolList } from './mcp-compressor.js';
 export { ContextBudgetManager } from './context-budget.js';
 export { McpClientService, type McpServerConfig } from './mcp-client-service.js';
-export { SkillProposer, loadInstalledSkills } from './skill-proposer.js';
-export type { SkillProposal, LoadedSkill } from './skill-proposer.js';
-export { SkillEvaluator } from './skill-evaluator.js';
-export { TrajectorySkillWriter, listTrajectorySkills, listTrajectorySources } from './trajectory-skills.js';
-export type { TrajectoryRecord } from './trajectory-skills.js';
+export { AbilityProposer, loadInstalledAbilities } from './ability-proposer.js';
+export type { AbilityProposal, LoadedAbility } from './ability-proposer.js';
+export { AbilityEvaluator } from './ability-evaluator.js';
+export { TrajectoryAbilityWriter, listTrajectoryAbilities, listTrajectorySources } from './trajectory-abilities.js';
+export type { TrajectoryRecord } from './trajectory-abilities.js';
 export type { PluginAPI, PluginMeta, PluginModule, PluginHandle, PluginRouteHandler } from './plugin-api.js';
 
 // Re-export all types

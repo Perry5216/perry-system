@@ -12,7 +12,7 @@ import type {
   Project, ProjectStep, CompletionRequest, CompletionResponse,
   EventBus, Logger, McpClientService
 } from '@perry/core';
-import { loadInstalledSkills, SkillEvaluator } from '@perry/core';
+import { loadInstalledAbilities, AbilityEvaluator } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
 import { ComfyUIService, QwenTextRenderService } from '@perry/ai';
 import * as fs from 'fs';
@@ -132,10 +132,10 @@ export class StepRunner {
   public config: StepRunnerConfig;
   public mcpClient: McpClientService;
 
-  // Consumer side of producer→librarian→consumer for director skills.
-  public directorSkills: import('@perry/core').LoadedSkill[] = [];
-  public directorSkillsLoadedAt = 0;
-  public readonly DIRECTOR_SKILLS_TTL_MS = 60_000;
+  // Consumer side of producer→curator→consumer for director abilities.
+  public directorAbilities: import('@perry/core').LoadedAbility[] = [];
+  public directorAbilitiesLoadedAt = 0;
+  public readonly DIRECTOR_ABILITIES_TTL_MS = 60_000;
 
   // Extracted services
   public povGate: PovQualityGate;
@@ -195,44 +195,44 @@ export class StepRunner {
     // Director self-learning event bindings
     this.attachDirectorLearningEmitter();
 
-    // Initial load of promoted director skills
-    this.refreshDirectorSkills();
+    // Initial load of promoted director abilities
+    this.refreshDirectorAbilities();
   }
 
-  public refreshDirectorSkills(): void {
+  public refreshDirectorAbilities(): void {
     try {
-      this.directorSkills = loadInstalledSkills(this.config.workspaceDir, 'director');
-      this.directorSkillsLoadedAt = Date.now();
-      if (this.directorSkills.length > 0) {
-        this.log.info('StepRunner loaded director skills', { count: this.directorSkills.length });
+      this.directorAbilities = loadInstalledAbilities(this.config.workspaceDir, 'director');
+      this.directorAbilitiesLoadedAt = Date.now();
+      if (this.directorAbilities.length > 0) {
+        this.log.info('StepRunner loaded director abilities', { count: this.directorAbilities.length });
       }
     } catch (err: any) {
-      this.log.warn('refreshDirectorSkills failed', { error: err.message });
-      this.directorSkills = [];
+      this.log.warn('refreshDirectorAbilities failed', { error: err.message });
+      this.directorAbilities = [];
     }
   }
 
   /**
-   * Look up any installed director skill that matches the current step's
+   * Look up any installed director ability that matches the current step's
    * failure context.
    */
-  public findDirectorSkillForFailure(taskType: string, errorFingerprint: string): import('@perry/core').LoadedSkill | null {
-    if (Date.now() - this.directorSkillsLoadedAt > this.DIRECTOR_SKILLS_TTL_MS) {
-      this.refreshDirectorSkills();
+  public findDirectorAbilityForFailure(taskType: string, errorFingerprint: string): import('@perry/core').LoadedAbility | null {
+    if (Date.now() - this.directorAbilitiesLoadedAt > this.DIRECTOR_ABILITIES_TTL_MS) {
+      this.refreshDirectorAbilities();
     }
-    for (const s of this.directorSkills) {
+    for (const s of this.directorAbilities) {
       const w = s.appliesWhen;
       if (!w) continue;
       const taskMatch = !w.task_type || w.task_type === '*' || w.task_type === taskType;
       const errMatch = !w.error_fingerprint || w.error_fingerprint === '*' || w.error_fingerprint === errorFingerprint;
       if (taskMatch && errMatch) {
-        this.log.info('Director skill applied', { skill: s.name, task_type: taskType, error_fingerprint: errorFingerprint });
+        this.log.info('Director ability applied', { ability: s.name, task_type: taskType, error_fingerprint: errorFingerprint });
         this.eventBus.emit('learning:observation', {
           source: 'director',
-          kind: 'skill-applied',
+          kind: 'ability-applied',
           fingerprint: `${s.name}::${taskType}::${errorFingerprint}`,
           value: 1,
-          metadata: { skill: s.name, task_type: taskType, error_fingerprint: errorFingerprint },
+          metadata: { ability: s.name, task_type: taskType, error_fingerprint: errorFingerprint },
         });
         return s;
       }
@@ -287,8 +287,8 @@ export class StepRunner {
    * Runs the double-loop Worker-Evaluator validation pattern.
    */
   async execute(project: Project, step: ProjectStep): Promise<string> {
-    if (Date.now() - this.directorSkillsLoadedAt > this.DIRECTOR_SKILLS_TTL_MS) {
-      this.refreshDirectorSkills();
+    if (Date.now() - this.directorAbilitiesLoadedAt > this.DIRECTOR_ABILITIES_TTL_MS) {
+      this.refreshDirectorAbilities();
     }
 
     // 1. Mark step as active
@@ -584,20 +584,20 @@ export class StepRunner {
 
       const researcherModeNow = this.router.config.get<string>('ai.ollama.researcherMode', 'local');
       const researcherEndpointNow = this.router.config.get<string>('ai.ollama.researcherEndpoint', '');
-      const librarianEndpointGuess = process.env.OLLAMA_LIBRARIAN_BASE_URL || 'http://ollama-embeddings:11434';
+      const curatorEndpointGuess = process.env.OLLAMA_CURATOR_BASE_URL || 'http://ollama-embeddings:11434';
       const researcherOffWriterGpu = isResearcherBound && (
         researcherModeNow === 'workers' ||
-        researcherEndpointNow === librarianEndpointGuess
+        researcherEndpointNow === curatorEndpointGuess
       );
 
-      const librarianBound =
+      const curatorBound =
         !isResearcherBound && (
           step.taskType === 'network_research' ||
           (step.label === 'KDP Concept Keywords' && (current.type as string) === 'amazon-kdp-launch') ||
           (step.label === 'Cast Extraction' && (current.type as string) === 'style-calibration' && step.taskType === 'analysis') ||
           (step.taskType === 'pov_check' && (current.type as string) === 'style-calibration')
         );
-      const stepRunsOnWriterGpu = !librarianBound && !researcherOffWriterGpu;
+      const stepRunsOnWriterGpu = !curatorBound && !researcherOffWriterGpu;
       let waitingLogged = false;
       while (stepRunsOnWriterGpu && fs.existsSync(trainingFlagPath)) {
         if (!waitingLogged) {
@@ -659,7 +659,7 @@ export class StepRunner {
     try {
       const ollamaUrls = [
         process.env.OLLAMA_BASE_URL ?? this.router.config.get<string>('ai.ollama.endpoint', 'http://localhost:11434'),
-        process.env.OLLAMA_LIBRARIAN_BASE_URL ?? this.router.config.get<string>('ai.ollama.librarianEndpoint', 'http://localhost:11435'),
+        process.env.OLLAMA_CURATOR_BASE_URL ?? this.router.config.get<string>('ai.ollama.curatorEndpoint', 'http://localhost:11435'),
       ];
 
       for (const url of ollamaUrls) {
@@ -692,15 +692,15 @@ export class StepRunner {
     let timeoutMs = opts.timeoutMs ?? 30 * 60_000;
 
     try {
-      const matched = SkillEvaluator.evaluate(this.directorSkills, {
+      const matched = AbilityEvaluator.evaluate(this.directorAbilities, {
         task_type: step.taskType,
       });
-      for (const skill of matched) {
-        if (skill.frontmatter.timeout_override !== undefined) {
-          const parsedTimeout = parseInt(skill.frontmatter.timeout_override, 10);
+      for (const ability of matched) {
+        if (ability.frontmatter.timeout_override !== undefined) {
+          const parsedTimeout = parseInt(ability.frontmatter.timeout_override, 10);
           if (!isNaN(parsedTimeout)) {
-            this.log.info('Applying director skill timeout override', {
-              skill: skill.name,
+            this.log.info('Applying director ability timeout override', {
+              ability: ability.name,
               oldTimeoutMs: timeoutMs,
               newTimeoutMs: parsedTimeout,
             });
@@ -709,8 +709,8 @@ export class StepRunner {
           }
         }
       }
-    } catch (skillErr: any) {
-      this.log.warn('Failed to evaluate director skills for timeout override', { error: skillErr.message });
+    } catch (abilityErr: any) {
+      this.log.warn('Failed to evaluate director abilities for timeout override', { error: abilityErr.message });
     }
     const payload = {
       project_id: project.id,
