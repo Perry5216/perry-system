@@ -43,6 +43,7 @@ export interface TicketMetadata {
   proof: {
     baselineState: string;
     failureLogs?: string;
+    currentIteration?: number;
   };
   boundary: {
     inScope: string[];

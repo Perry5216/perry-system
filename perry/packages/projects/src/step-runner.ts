@@ -37,6 +37,85 @@ import { CompileRunner } from './runners/CompileRunner.js';
 import { StandardLlmRunner } from './runners/StandardLlmRunner.js';
 import { AgentRunner } from './agents/runner.js';
 import { getAgent } from './agents/registry.js';
+import { execSync } from 'child_process';
+
+function parseResilientJson(raw: string): { approved: boolean; failureLogs?: string } {
+  const trimmed = raw.trim();
+  
+  // Try direct parsing first
+  try {
+    return JSON.parse(trimmed);
+  } catch (e) {
+    // ignore
+  }
+
+  // Extract from markdown code blocks
+  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (codeBlockMatch) {
+    try {
+      return JSON.parse(codeBlockMatch[1].trim());
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // Try to find the first '{' and last '}'
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    const candidate = trimmed.substring(start, end + 1);
+    try {
+      return JSON.parse(candidate);
+    } catch (e) {
+      // try cleaning candidate
+      const cleaned = candidate
+        .replace(/,\s*}/g, '}') // remove trailing commas before closing brackets
+        .replace(/,\s*]/g, ']') // remove trailing commas before closing braces
+        .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2":') // enforce double quotes on keys
+        .replace(/'/g, '"'); // replace single quotes with double quotes
+      try {
+        return JSON.parse(cleaned);
+      } catch (e2) {
+        // ignore
+      }
+    }
+  }
+
+  // Fallback to regex-based extraction
+  const approvedMatch = trimmed.match(/"approved"\s*:\s*(true|false)/i);
+  const logsMatch = trimmed.match(/"failureLogs"\s*:\s*"([\s\S]*?)"/i);
+
+  if (approvedMatch) {
+    return {
+      approved: approvedMatch[1].toLowerCase() === 'true',
+      failureLogs: logsMatch ? logsMatch[1] : undefined,
+    };
+  }
+
+  throw new Error(`Could not parse JSON output from evaluator: "${raw}"`);
+}
+
+function getGitHead(workspaceDir: string): string | null {
+  try {
+    return execSync('git rev-parse HEAD', { cwd: workspaceDir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function rollbackToCommit(commitHash: string, workspaceDir: string, log?: any) {
+  try {
+    execSync(`git reset --hard ${commitHash}`, { cwd: workspaceDir, stdio: 'pipe' });
+    execSync('git clean -fd', { cwd: workspaceDir, stdio: 'pipe' });
+    if (log) {
+      log.info('Git rollback successful', { commitHash });
+    }
+  } catch (err: any) {
+    if (log) {
+      log.warn('Git rollback failed', { commitHash, error: err.message });
+    }
+  }
+}
 
 export interface StepRunnerConfig {
   workspaceDir: string;
@@ -223,13 +302,15 @@ export class StepRunner {
 
     // Ensure step has a ticket. If not, generate a default ticket wrapper.
     if (!step.ticket) {
+      const gitHead = getGitHead(this.config.workspaceDir);
       step.ticket = {
         order: {
           category: step.taskType || 'generic',
           objective: step.prompt,
         },
         proof: {
-          baselineState: 'No output generated yet',
+          baselineState: gitHead || 'No output generated yet',
+          currentIteration: 0,
         },
         boundary: {
           inScope: [step.label],
@@ -245,137 +326,181 @@ export class StepRunner {
           escalationTarget: 'meta.director',
         },
       };
+    } else {
+      if (step.ticket.proof.currentIteration === undefined) {
+        step.ticket.proof.currentIteration = 0;
+      }
+      if (!step.ticket.proof.baselineState || step.ticket.proof.baselineState === 'No output generated yet') {
+        const gitHead = getGitHead(this.config.workspaceDir);
+        if (gitHead) {
+          step.ticket.proof.baselineState = gitHead;
+        }
+      }
     }
 
-    let attempts = 0;
+    let attempts = step.ticket.proof.currentIteration || 0;
     const maxIterations = step.ticket.budget.maxIterations || 3;
     let approved = false;
     let result = '';
 
-    while (attempts < maxIterations && !approved) {
-      attempts++;
-      this.eventBus.emit('step:progress', {
-        projectId: project.id,
-        stepId: step.id,
-        message: `Worker Loop - Iteration ${attempts}/${maxIterations}`,
-      });
+    // Step-level token & cost tracking wrapper for router.complete
+    const originalComplete = this.router.complete.bind(this.router);
+    let stepCost = 0;
+    let stepTokens = 0;
 
-      // Delegate to strategy
-      let strategyExecuted = false;
-      for (const strategy of this.strategies) {
-        if (strategy.canHandle(step)) {
-          // If we are on iteration > 1, the step has already been marked completed by the previous strategy run.
-          // We need to mark it active again in the state store so we can run it again.
-          if (attempts > 1) {
-            this.stateStore.startStep(project.id, step.id);
+    this.router.complete = async (req: any) => {
+      const res = await originalComplete(req);
+      if (res) {
+        stepCost += res.estimatedCost || 0;
+        stepTokens += res.tokensUsed || (res.promptTokens + res.completionTokens) || 0;
+      }
+      return res;
+    };
+
+    try {
+      while (attempts < maxIterations && !approved) {
+        attempts++;
+        step.ticket.proof.currentIteration = attempts;
+        this.stateStore.save(project);
+
+        this.eventBus.emit('step:progress', {
+          projectId: project.id,
+          stepId: step.id,
+          message: `Worker Loop - Iteration ${attempts}/${maxIterations}`,
+        });
+
+        // Delegate to strategy
+        let strategyExecuted = false;
+        for (const strategy of this.strategies) {
+          if (strategy.canHandle(step)) {
+            if (attempts > 1) {
+              this.stateStore.startStep(project.id, step.id);
+            }
+            result = await strategy.execute(project, step, this);
+            strategyExecuted = true;
+            break;
           }
-          result = await strategy.execute(project, step, this);
-          strategyExecuted = true;
+        }
+
+        if (!strategyExecuted) {
+          throw new Error(`No execution strategy found for step: ${step.label} (taskType: ${step.taskType})`);
+        }
+
+        // Active cost & token budget checks
+        if (step.ticket.budget.tokenLimit && stepTokens > step.ticket.budget.tokenLimit) {
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Evaluator Loop - Token budget exceeded (${stepTokens} > ${step.ticket.budget.tokenLimit}). Halting loop.`,
+          });
           break;
         }
-      }
 
-      if (!strategyExecuted) {
-        throw new Error(`No execution strategy found for step: ${step.label} (taskType: ${step.taskType})`);
-      }
-
-      // Check validation
-      this.eventBus.emit('step:progress', {
-        projectId: project.id,
-        stepId: step.id,
-        message: `Evaluator Loop - Running meta.evaluator (Iteration ${attempts}/${maxIterations})...`,
-      });
-
-      const evalAgent = getAgent('meta.evaluator');
-      if (!evalAgent) {
-        throw new Error(`meta.evaluator agent definition not found in registry`);
-      }
-
-      const agentRunner = new AgentRunner(
-        this.router,
-        this.stateStore,
-        this.mcpClient,
-        this.eventBus,
-        this.log.child('meta-evaluator')
-      );
-
-      const evalSessionId = this.stateStore.createAgentSession({
-        domain: 'meta',
-        projectId: project.id,
-        title: `Evaluation: ${step.label} (Iteration ${attempts})`
-      });
-
-      const rulesBlock = step.ticket.boundary.rules.map((r, i) => `  ${i + 1}. ${r}`).join('\n');
-      const inScopeBlock = step.ticket.boundary.inScope.map(item => `  - ${item}`).join('\n');
-      const outOfScopeBlock = step.ticket.boundary.outOfScope.map(item => `  - ${item}`).join('\n');
-
-      const evalInput = [
-        `### TICKET DETAILS`,
-        `Category: ${step.ticket.order.category}`,
-        `Objective: ${step.ticket.order.objective}`,
-        `Baseline State: ${step.ticket.proof.baselineState}`,
-        `Boundary In-Scope:\n${inScopeBlock}`,
-        `Boundary Out-of-Scope:\n${outOfScopeBlock}`,
-        `Rules:\n${rulesBlock}`,
-        ``,
-        `### WORKER DRAFT OUTPUT`,
-        `---`,
-        result,
-        `---`,
-        ``,
-        `Please evaluate the worker draft output against the active ticket instructions.`,
-        `You must strictly verify the boundary rules and objective constraints.`,
-        `Return a valid JSON object indicating approval status and failure logs if rejected.`
-      ].join('\n');
-
-      const evalInvocation = await agentRunner.invoke({
-        agent: evalAgent,
-        sessionId: evalSessionId,
-        input: evalInput,
-        penSlug: (project.context as any).penNameSlug || undefined,
-      });
-
-      let failureLogs = 'Invalid evaluator response formatting.';
-      try {
-        let rawOutput = evalInvocation.output || '';
-        const match = rawOutput.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        if (match) {
-          rawOutput = match[1];
+        if (step.ticket.budget.costLimitUsd && stepCost > step.ticket.budget.costLimitUsd) {
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Evaluator Loop - Cost budget exceeded ($${stepCost.toFixed(4)} > $${step.ticket.budget.costLimitUsd}). Halting loop.`,
+          });
+          break;
         }
-        const parsed = JSON.parse(rawOutput.trim());
-        approved = !!parsed.approved;
-        failureLogs = parsed.failureLogs || 'Rejected without specific logs.';
-      } catch (err: any) {
-        approved = false;
-        failureLogs = `Failed to parse evaluator JSON response: ${err.message}. Output was: ${evalInvocation.output}`;
-      }
 
-      if (approved) {
+        // Check validation
         this.eventBus.emit('step:progress', {
           projectId: project.id,
           stepId: step.id,
-          message: `Evaluator Loop - Approved on iteration ${attempts}!`,
-        });
-      } else {
-        this.log.warn('Evaluator Loop - Rejected draft', {
-          projectId: project.id,
-          stepId: step.id,
-          iteration: attempts,
-          failureLogs,
-        });
-        this.eventBus.emit('step:progress', {
-          projectId: project.id,
-          stepId: step.id,
-          message: `Evaluator Loop - Rejected draft on iteration ${attempts}. Reason: ${failureLogs}`,
+          message: `Evaluator Loop - Running meta.evaluator (Iteration ${attempts}/${maxIterations})...`,
         });
 
-        // Update the failure logs in ticket proof metadata
-        step.ticket.proof.failureLogs = (step.ticket.proof.failureLogs ? step.ticket.proof.failureLogs + '\n' : '') +
-          `[Iteration ${attempts} Failure]: ${failureLogs}`;
+        const evalAgent = getAgent('meta.evaluator');
+        if (!evalAgent) {
+          throw new Error(`meta.evaluator agent definition not found in registry`);
+        }
 
-        // Save updated project to state store
-        this.stateStore.save(project);
+        const agentRunner = new AgentRunner(
+          this.router,
+          this.stateStore,
+          this.mcpClient,
+          this.eventBus,
+          this.log.child('meta-evaluator')
+        );
+
+        const evalSessionId = this.stateStore.createAgentSession({
+          domain: 'meta',
+          projectId: project.id,
+          title: `Evaluation: ${step.label} (Iteration ${attempts})`
+        });
+
+        const rulesBlock = step.ticket.boundary.rules.map((r, i) => `  ${i + 1}. ${r}`).join('\n');
+        const inScopeBlock = step.ticket.boundary.inScope.map(item => `  - ${item}`).join('\n');
+        const outOfScopeBlock = step.ticket.boundary.outOfScope.map(item => `  - ${item}`).join('\n');
+
+        const evalInput = [
+          `### TICKET DETAILS`,
+          `Category: ${step.ticket.order.category}`,
+          `Objective: ${step.ticket.order.objective}`,
+          `Baseline State: ${step.ticket.proof.baselineState}`,
+          `Boundary In-Scope:\n${inScopeBlock}`,
+          `Boundary Out-of-Scope:\n${outOfScopeBlock}`,
+          `Rules:\n${rulesBlock}`,
+          ``,
+          `### WORKER DRAFT OUTPUT`,
+          `---`,
+          result,
+          `---`,
+          ``,
+          `Please evaluate the worker draft output against the active ticket instructions.`,
+          `You must strictly verify the boundary rules and objective constraints.`,
+          `Return a valid JSON object indicating approval status and failure logs if rejected.`
+        ].join('\n');
+
+        const evalInvocation = await agentRunner.invoke({
+          agent: evalAgent,
+          sessionId: evalSessionId,
+          input: evalInput,
+          penSlug: (project.context as any).penNameSlug || undefined,
+        });
+
+        let failureLogs = 'Invalid evaluator response formatting.';
+        try {
+          const parsed = parseResilientJson(evalInvocation.output || '');
+          approved = !!parsed.approved;
+          failureLogs = parsed.failureLogs || 'Rejected without specific logs.';
+        } catch (err: any) {
+          approved = false;
+          failureLogs = `Failed to parse evaluator JSON response: ${err.message}. Output was: ${evalInvocation.output}`;
+        }
+
+        if (approved) {
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Evaluator Loop - Approved on iteration ${attempts}!`,
+          });
+        } else {
+          this.log.warn('Evaluator Loop - Rejected draft', {
+            projectId: project.id,
+            stepId: step.id,
+            iteration: attempts,
+            failureLogs,
+          });
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Evaluator Loop - Rejected draft on iteration ${attempts}. Reason: ${failureLogs}`,
+          });
+
+          // Update the failure logs in ticket proof metadata
+          step.ticket.proof.failureLogs = (step.ticket.proof.failureLogs ? step.ticket.proof.failureLogs + '\n' : '') +
+            `[Iteration ${attempts} Failure]: ${failureLogs}`;
+
+          // Save updated project to state store
+          this.stateStore.save(project);
+        }
       }
+    } finally {
+      // Always restore original router complete function
+      this.router.complete = originalComplete;
     }
 
     if (!approved) {
@@ -385,13 +510,57 @@ export class StepRunner {
         stepId: step.id,
         message: `Evaluator Loop - Budget depleted. Executing fallback strategy: ${fallbackStrategy}`,
       });
-      if (fallbackStrategy === 'escalate') {
-        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Escalating to ${step.ticket.fallback.escalationTarget || 'meta.director'}. Last failure: ${step.ticket.proof.failureLogs}`);
-      } else if (fallbackStrategy === 'switch-provider') {
-        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Fallback requested: switch provider. Last failure: ${step.ticket.proof.failureLogs}`);
-      } else {
-        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Rolling back step. Last failure: ${step.ticket.proof.failureLogs}`);
+
+      if (fallbackStrategy === 'switch-provider') {
+        const fallbackHistory = step.ticket.proof.failureLogs || '';
+        const switchCount = (fallbackHistory.match(/\[Fallback\]: Switched provider/g) || []).length;
+        if (switchCount < 2) {
+          const oldProvider = project.preferredProvider || 'ollama';
+          const newProvider = oldProvider === 'workers' ? 'ollama' : 'workers';
+          project.preferredProvider = newProvider;
+
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Fallback: Switched provider from "${oldProvider}" to "${newProvider}". Resetting iteration budget.`,
+          });
+
+          // Reset iteration count and log action in failureLogs
+          step.ticket.proof.currentIteration = 0;
+          step.ticket.proof.failureLogs = (step.ticket.proof.failureLogs ? step.ticket.proof.failureLogs + '\n' : '') +
+            `[Fallback]: Switched provider to ${newProvider} and retrying.`;
+
+          this.stateStore.save(project);
+
+          // Re-execute
+          return await this.execute(project, step);
+        } else {
+          this.log.error('Provider switching failed: maximum switch retries exceeded', { projectId: project.id, stepId: step.id });
+          throw new Error(`Worker-Evaluator Loop failed after switching provider twice. Escalating. Last failure: ${step.ticket.proof.failureLogs}`);
+        }
       }
+
+      if (fallbackStrategy === 'default-rollback') {
+        const baseline = step.ticket.proof.baselineState;
+        if (baseline && baseline.length === 40 && /^[a-f0-9]+$/i.test(baseline)) {
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Fallback: Rolling back workspace repository to baseline state commit ${baseline.substring(0, 7)}...`,
+          });
+          rollbackToCommit(baseline, this.config.workspaceDir, this.log);
+        } else {
+          this.eventBus.emit('step:progress', {
+            projectId: project.id,
+            stepId: step.id,
+            message: `Fallback: Rollback failed. No valid git commit hash baseline state recorded (got: "${baseline}").`,
+          });
+        }
+        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Rolled back changes. Last failure: ${step.ticket.proof.failureLogs}`);
+      }
+
+      // Default: escalate
+      throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Escalating to ${step.ticket.fallback.escalationTarget || 'meta.director'}. Last failure: ${step.ticket.proof.failureLogs}`);
     }
 
     return result;
