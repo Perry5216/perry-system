@@ -1,12 +1,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import type { Logger, ProjectStep, ProjectType, ProjectContext } from '@perry/core';
-import type { ProjectTemplate } from '../templates.js';
+import type { Logger, ProjectStep, ProjectType, ProjectContext, ProjectTemplate, WorkType } from '@perry/core';
 
 export interface CustomPipelineDef {
   id: string; // Used as the ProjectType
   name: string;
   description: string;
+  workType?: WorkType;
   steps: {
     label: string;
     phase: string;
@@ -72,6 +72,7 @@ export class CustomPipelineService {
     return this.pipelines.map(def => {
       return {
         type: def.id as ProjectType,
+        workType: def.workType || 'books',
         name: def.name,
         description: def.description,
         buildSteps: (ctx: ProjectContext, title: string, description: string) => {

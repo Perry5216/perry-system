@@ -34,7 +34,9 @@ import {
   Brain,
   ChevronRight,
   Info,
-  DownloadCloud
+  DownloadCloud,
+  Mail,
+  Swords
 } from 'lucide-react';
 
 interface Domain {
@@ -50,6 +52,13 @@ interface Domain {
   updatedAt: string;
   baseModel?: string;
   allowedMcpServers?: string[];
+  modelParameters?: {
+    temperature?: number;
+    maxTokens?: number;
+    repeatPenalty?: number;
+    topP?: number;
+    topK?: number;
+  };
 }
 
 interface Skill {
@@ -95,7 +104,9 @@ const PRESET_ICONS = [
   { name: 'database', label: 'Database' },
   { name: 'globe', label: 'Globe' },
   { name: 'activity', label: 'Activity' },
-  { name: 'pen-tool', label: 'Pen Tool' }
+  { name: 'pen-tool', label: 'Pen Tool' },
+  { name: 'mail', label: 'Mail' },
+  { name: 'swords', label: 'Swords' }
 ];
 
 type FormState = {
@@ -108,6 +119,13 @@ type FormState = {
   defaultSkills: { service: string; name: string }[];
   baseModel: string;
   allowedMcpServers?: string[];
+  modelParameters?: {
+    temperature?: number;
+    maxTokens?: number;
+    repeatPenalty?: number;
+    topP?: number;
+    topK?: number;
+  };
 };
 
 const EMPTY_FORM: FormState = {
@@ -120,6 +138,7 @@ const EMPTY_FORM: FormState = {
   defaultSkills: [],
   baseModel: 'workers',
   allowedMcpServers: undefined,
+  modelParameters: undefined,
 };
 
 function renderDomainIcon(name: string, size = 16, color?: string) {
@@ -135,6 +154,8 @@ function renderDomainIcon(name: string, size = 16, color?: string) {
     case 'globe': return <Globe {...props} />;
     case 'activity': return <Activity {...props} />;
     case 'pen-tool': return <PenTool {...props} />;
+    case 'mail': return <Mail {...props} />;
+    case 'swords': return <Swords {...props} />;
     default: return <Sparkles {...props} />;
   }
 }
@@ -678,6 +699,7 @@ export function DomainsPanel() {
       defaultSkills: d.defaultSkills || [],
       baseModel: d.baseModel || 'workers',
       allowedMcpServers: d.allowedMcpServers,
+      modelParameters: d.modelParameters,
     });
     setEditingId(d.id);
     setMode('edit');
@@ -1364,6 +1386,211 @@ export function DomainsPanel() {
                           Pull & Select Model
                         </button>
                       )}
+                    </div>
+                  </div>
+
+                  {/* Model Parameters Override Section */}
+                  <div style={{
+                    marginTop: 24,
+                    paddingTop: 20,
+                    borderTop: '1px solid rgba(255,255,255,0.06)'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                      <Activity size={16} color={draft.color || 'var(--secondary)'} />
+                      <h4 style={{ margin: 0, color: 'var(--text-main)', fontSize: '0.85rem', fontWeight: 600 }}>Model Parameters Override (Optional)</h4>
+                    </div>
+
+                    <div style={{
+                      background: 'rgba(7, 9, 15, 0.4)',
+                      border: '1px solid rgba(255,255,255,0.06)',
+                      borderRadius: 8,
+                      padding: 16,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 16
+                    }}>
+                      {/* Temperature */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <label style={{ ...labelStyle, marginBottom: 0 }}>Temperature</label>
+                          <span style={{ fontSize: '0.75rem', color: draft.color, fontWeight: 600 }}>
+                            {draft.modelParameters?.temperature !== undefined ? draft.modelParameters.temperature : 'Default'}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <input
+                            type="range"
+                            min="0.0"
+                            max="1.5"
+                            step="0.05"
+                            value={draft.modelParameters?.temperature ?? 0.7}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setDraft(d => ({
+                                ...d,
+                                modelParameters: {
+                                  ...d.modelParameters,
+                                  temperature: val
+                                }
+                              }));
+                            }}
+                            style={{ flex: 1, accentColor: draft.color }}
+                          />
+                          <input
+                            type="number"
+                            min="0.0"
+                            max="1.5"
+                            step="0.05"
+                            value={draft.modelParameters?.temperature ?? 0.7}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              if (isNaN(val)) return;
+                              setDraft(d => ({
+                                ...d,
+                                modelParameters: {
+                                  ...d.modelParameters,
+                                  temperature: Math.min(1.5, Math.max(0, val))
+                                }
+                              }));
+                            }}
+                            style={{
+                              width: 60,
+                              background: '#0a0e17',
+                              border: '1px solid rgba(255,255,255,0.1)',
+                              borderRadius: 4,
+                              color: 'var(--text-main)',
+                              fontSize: '0.75rem',
+                              padding: '2px 6px',
+                              textAlign: 'right'
+                            }}
+                          />
+                        </div>
+                        <p style={{ margin: '4px 0 0', fontSize: '0.62rem', color: 'var(--text-dim)' }}>
+                          Higher values increase creativity/variety; lower values are more deterministic.
+                        </p>
+                      </div>
+
+                      {/* Max Tokens */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <label style={{ ...labelStyle, marginBottom: 0 }}>Max Output Tokens</label>
+                          <span style={{ fontSize: '0.75rem', color: draft.color, fontWeight: 600 }}>
+                            {draft.modelParameters?.maxTokens !== undefined ? draft.modelParameters.maxTokens : 'Default'}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <input
+                            type="range"
+                            min="128"
+                            max="8192"
+                            step="128"
+                            value={draft.modelParameters?.maxTokens ?? 4096}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              setDraft(d => ({
+                                ...d,
+                                modelParameters: {
+                                  ...d.modelParameters,
+                                  maxTokens: val
+                                }
+                              }));
+                            }}
+                            style={{ flex: 1, accentColor: draft.color }}
+                          />
+                          <input
+                            type="number"
+                            min="128"
+                            max="8192"
+                            step="128"
+                            value={draft.modelParameters?.maxTokens ?? 4096}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              if (isNaN(val)) return;
+                              setDraft(d => ({
+                                ...d,
+                                modelParameters: {
+                                  ...d.modelParameters,
+                                  maxTokens: Math.min(8192, Math.max(128, val))
+                                }
+                              }));
+                            }}
+                            style={{
+                              width: 60,
+                              background: '#0a0e17',
+                              border: '1px solid rgba(255,255,255,0.1)',
+                              borderRadius: 4,
+                              color: 'var(--text-main)',
+                              fontSize: '0.75rem',
+                              padding: '2px 6px',
+                              textAlign: 'right'
+                            }}
+                          />
+                        </div>
+                        <p style={{ margin: '4px 0 0', fontSize: '0.62rem', color: 'var(--text-dim)' }}>
+                          Maximum size of generated responses. Lower limits protect generation budget.
+                        </p>
+                      </div>
+
+                      {/* Repeat Penalty */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <label style={{ ...labelStyle, marginBottom: 0 }}>Repeat Penalty</label>
+                          <span style={{ fontSize: '0.75rem', color: draft.color, fontWeight: 600 }}>
+                            {draft.modelParameters?.repeatPenalty !== undefined ? draft.modelParameters.repeatPenalty : 'Default'}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <input
+                            type="range"
+                            min="0.5"
+                            max="2.0"
+                            step="0.05"
+                            value={draft.modelParameters?.repeatPenalty ?? 1.15}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setDraft(d => ({
+                                ...d,
+                                modelParameters: {
+                                  ...d.modelParameters,
+                                  repeatPenalty: val
+                                }
+                              }));
+                            }}
+                            style={{ flex: 1, accentColor: draft.color }}
+                          />
+                          <input
+                            type="number"
+                            min="0.5"
+                            max="2.0"
+                            step="0.05"
+                            value={draft.modelParameters?.repeatPenalty ?? 1.15}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              if (isNaN(val)) return;
+                              setDraft(d => ({
+                                ...d,
+                                modelParameters: {
+                                  ...d.modelParameters,
+                                  repeatPenalty: Math.min(2.0, Math.max(0.5, val))
+                                }
+                              }));
+                            }}
+                            style={{
+                              width: 60,
+                              background: '#0a0e17',
+                              border: '1px solid rgba(255,255,255,0.1)',
+                              borderRadius: 4,
+                              color: 'var(--text-main)',
+                              fontSize: '0.75rem',
+                              padding: '2px 6px',
+                              textAlign: 'right'
+                            }}
+                          />
+                        </div>
+                        <p style={{ margin: '4px 0 0', fontSize: '0.62rem', color: 'var(--text-dim)' }}>
+                          Higher values penalize repetition of identical tokens (1.0 = disabled).
+                        </p>
+                      </div>
                     </div>
                   </div>
                 </div>

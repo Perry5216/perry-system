@@ -474,25 +474,34 @@ When this skill is activated:
   router.post('/intelligent-evolve-project', async (req, res) => {
     try {
       const { projectId, workType, name, description, workersMode, enableSearch } = req.body || {};
-      if (!projectId || !workType) {
-        return res.status(400).json({ error: 'projectId and workType are required' });
+      if (!workType) {
+        return res.status(400).json({ error: 'workType is required' });
       }
 
-      const project = stateStore.get(projectId);
-      if (!project) {
-        return res.status(404).json({ error: `Project ${projectId} not found` });
-      }
+      let projectTitle = '';
+      let projectDesc = '';
+      let projectStepsText = '';
 
-      // Evaluate the project context
-      const projectTitle = project.title;
-      const projectDesc = project.description;
-      const projectStepsText = project.steps.map((s: any) => {
-        let resultExcerpt = '';
-        if (s.result) {
-          resultExcerpt = s.result.length > 500 ? s.result.slice(0, 500) + '...' : s.result;
+      if (projectId) {
+        const project = stateStore.get(projectId);
+        if (project) {
+          projectTitle = project.title;
+          projectDesc = project.description;
+          projectStepsText = project.steps.map((s: any) => {
+            let resultExcerpt = '';
+            if (s.result) {
+              resultExcerpt = s.result.length > 500 ? s.result.slice(0, 500) + '...' : s.result;
+            }
+            return `- Step: ${s.label}\n  Phase: ${s.phase}\n  TaskType: ${s.taskType}\n  Prompt: ${s.prompt}\n  Status: ${s.status}${resultExcerpt ? `\n  Output Sample: ${resultExcerpt}` : ''}`;
+          }).join('\n\n');
         }
-        return `- Step: ${s.label}\n  Phase: ${s.phase}\n  TaskType: ${s.taskType}\n  Prompt: ${s.prompt}\n  Status: ${s.status}${resultExcerpt ? `\n  Output Sample: ${resultExcerpt}` : ''}`;
-      }).join('\n\n');
+      }
+
+      if (!projectTitle) {
+        projectTitle = workType.toUpperCase() === 'DND' ? 'D&D Campaign Builder' : `${workType.charAt(0).toUpperCase() + workType.slice(1)} Pipeline`;
+        projectDesc = `Standard intelligent pipeline for ${workType} domain tasks.`;
+        projectStepsText = `No existing project context was provided. Generate a complete, end-to-end best-practice template for the "${workType}" domain from scratch.`;
+      }
 
       // Run web search context
       let searchContext = '';
@@ -504,7 +513,7 @@ When this skill is activated:
 
         if (backend) {
           try {
-            const query = `${workType} template pipeline steps ${projectTitle} structure guidelines`;
+            const query = `${workType} template pipeline steps guidelines best practices workflow`;
             log.info(`Running intelligent web search via ${backend} for template evolution`, { query });
             let searchResults: SearchResult[] = [];
             if (backend === 'tavily' && tavilyKey) {
@@ -527,7 +536,7 @@ When this skill is activated:
       }
 
       const systemPrompt = [
-        `You are the Perry Intelligent Template Generator. Your job is to analyze a project's existing structure, steps, and output samples, combine them with web search context showing domain best-practices, and generate a highly custom template tailored to that project and work type.`,
+        `You are the Perry Intelligent Template Generator. Your job is to analyze the requested domain work type, combine it with web search context showing best-practices and industry guidelines, and generate a highly custom template tailored to that work type.`,
         ``,
         `For each step of the new template, you must determine the appropriate taskType and prompt to run.`,
         `Perry has the following task types and routing target systems:`,
@@ -564,25 +573,24 @@ When this skill is activated:
       ].join('\n');
 
       const userPrompt = [
-        `Evaluate the following project and generate a reusable custom template under the "${workType}" domain.`,
+        `Generate a reusable custom template under the "${workType}" domain.`,
         ``,
-        `--- Target Project Evaluation ---`,
+        `--- Target Domain Context ---`,
         `Title: ${projectTitle}`,
         `Description: ${projectDesc}`,
-        `Existing Steps and Output Samples:`,
-        projectStepsText,
+        `Context: ${projectStepsText}`,
         ``,
         `--- Web Search Domain Context ---`,
         searchContext || 'No search results available.',
         ``,
         `--- Requirements ---`,
         `Template Name: ${name || projectTitle + ' Template'}`,
-        `Template Description: ${description || 'Custom template evolved from ' + projectTitle}`,
+        `Template Description: ${description || 'Intelligent template for ' + workType}`,
         `Worker Mode: ${workersMode || 'smart'}`,
         `Work Type: ${workType}`,
       ].join('\n');
 
-      log.info('Invoking AI Router to intelligently evolve project to template', { projectId, workType, name, workersMode });
+      log.info('Invoking AI Router to intelligently evolve workType to template', { workType, name, workersMode });
 
       const aiResponse = await aiRouter.complete({
         provider: 'gemini',
@@ -615,7 +623,7 @@ When this skill is activated:
       const newPipeline = {
         id: templateType,
         name: templateName,
-        description: generatedJson.description || description || `Generated template evolved from project: ${projectTitle}`,
+        description: generatedJson.description || description || `Generated template evolved from workType: ${workType}`,
         workType,
         steps: generatedJson.steps.map((s: any) => ({
           label: s.label,

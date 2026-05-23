@@ -39,8 +39,9 @@ interface SkillSummary {
 function parseFrontmatter(raw: string): { name?: string; description?: string; service?: string; proposedAt?: string; body: string } {
   // Minimal YAML frontmatter parser — `name: foo`, `description: bar`, etc.
   // No nested keys, no arrays. Anything we don't recognise stays in the body.
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!m) return { body: raw };
+  const normalized = raw.replace(/\r\n/g, '\n');
+  const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { body: normalized };
   const block = m[1];
   const body = m[2];
   const out: any = { body };
@@ -188,7 +189,8 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
         return res.status(404).json({ error: 'pending skill not found' });
       }
       const raw = await readFile(resolved.path, 'utf-8');
-      const fm = parseFrontmatter(raw);
+      const normalized = raw.replace(/\r\n/g, '\n');
+      const fm = parseFrontmatter(normalized);
       if (!fm.name) {
         return res.status(400).json({ error: 'skill is missing the `name` frontmatter field' });
       }
@@ -203,7 +205,7 @@ export function setupSkillsRoutes(log: Logger, workspaceDir: string, stateStore:
         : join(workspaceDir, 'skills-installed', service);
       if (!existsSync(dstDir)) await mkdir(dstDir, { recursive: true });
       const dst = join(dstDir, `${fm.name}.md`);
-      let promoted = raw.replace(/status:\s*pending/, 'status: installed');
+      let promoted = normalized.replace(/status:\s*pending/, 'status: installed');
       if (!/promoted_at:/.test(promoted)) {
         promoted = promoted.replace(/^---\n/, `---\npromoted_at: ${new Date().toISOString()}\n`);
       }

@@ -9,9 +9,28 @@
 // Project Types
 // ═══════════════════════════════════════════════════════════
 
+export type WorkType = 'books' | 'code' | 'dnd' | 'meta' | 'email' | 'hacking';
+
 export type ProjectType =
   | 'software-dev'
-  | 'dynamic-skills';
+  | 'dynamic-skills'
+  // Book templates
+  | 'book-planning'
+  | 'style-calibration'
+  | 'novel-pipeline'
+  | 'deep-revision'
+  | 'revision-execution'
+  | 'book-production'
+  | 'amazon-kdp-launch'
+  | 'short-story'
+  | 'book-cover'
+  // D&D templates
+  | 'dnd-campaign-planning'
+  | 'dnd-session-prep'
+  | 'dnd-character-design'
+  // Meta templates
+  | 'system-evolution'
+  | 'template-generator';
 
 export type ProjectStatus = 'pending' | 'active' | 'paused' | 'completed' | 'failed';
 export type StepStatus = 'pending' | 'active' | 'completed' | 'failed' | 'skipped';
@@ -75,12 +94,22 @@ export interface ProjectContext {
   reviewMode?: boolean;
   planning?: string;
   config?: Record<string, unknown>;
+  [key: string]: any;
+}
+
+export interface ProjectTemplate {
+  type: ProjectType;
+  workType: WorkType;
+  name: string;
+  description: string;
+  buildSteps: (context: ProjectContext, title: string, description: string) => ProjectStep[];
 }
 
 export interface Project {
   id: string;
   parentId?: string;
   type: ProjectType;
+  workType?: WorkType;
   title: string;
   description: string;
   status: ProjectStatus;
@@ -306,7 +335,7 @@ export interface EventMap {
  * tool ACL, default model bindings, and memory namespace. The
  * core domains (code, email, hacking, meta) extend the framework.
  */
-export type AgentDomain = 'code' | 'email' | 'hacking' | 'meta';
+export type AgentDomain = 'code' | 'email' | 'hacking' | 'meta' | 'books' | 'dnd';
 
 /**
  * Map a ProjectType to its domain. Every project type belongs to exactly
@@ -318,7 +347,23 @@ export function projectTypeDomain(type: ProjectType): AgentDomain {
     case 'software-dev':
     case 'dynamic-skills':
       return 'code';
-    // Future domains add their project types above this default.
+    case 'book-planning':
+    case 'style-calibration':
+    case 'novel-pipeline':
+    case 'deep-revision':
+    case 'revision-execution':
+    case 'book-production':
+    case 'amazon-kdp-launch':
+    case 'short-story':
+    case 'book-cover':
+      return 'books';
+    case 'dnd-campaign-planning':
+    case 'dnd-session-prep':
+    case 'dnd-character-design':
+      return 'dnd';
+    case 'system-evolution':
+    case 'template-generator':
+      return 'meta';
     default:
       return 'code';
   }

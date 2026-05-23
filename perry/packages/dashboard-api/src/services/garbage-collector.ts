@@ -20,7 +20,7 @@
 
 import { Logger } from '@perry/core';
 import type { EventBus, LoadedSkill } from '@perry/core';
-import { loadInstalledSkills } from '@perry/core';
+import { loadInstalledSkills, SkillEvaluator } from '@perry/core';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -112,6 +112,20 @@ export class GarbageCollector {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
+  private getTtl(dirPath: string, defaultTtl: number, skills: LoadedSkill[]): number {
+    const matched = SkillEvaluator.evaluate(skills, {
+      dir_path: dirPath,
+    });
+    let ttl = defaultTtl;
+    for (const skill of matched) {
+      if (skill.frontmatter.suggested_ttl_action === 'tighten') {
+        ttl = Math.floor(defaultTtl / 4);
+        this.log.info('GC: Tightened TTL for directory', { dirPath, defaultTtl, tightenedTtl: ttl });
+      }
+    }
+    return ttl;
+  }
+
   getLastSummary(): GcSummary | null {
     return this.lastSummary;
   }
@@ -126,11 +140,10 @@ export class GarbageCollector {
     const summary: GcSummary = { trigger, startedAt: startedAt.toISOString(), stages: {} };
 
     // Consumer side: load any promoted GC skills + log which directories
-    // they'd override TTLs for. The actual TTL override is a follow-up; this
-    // closes the visible producer→consumer loop and emits a learning event
-    // so the dashboard can show "GC applied skill X for dir Y".
+    // they'd override TTLs for.
+    let skills: LoadedSkill[] = [];
     try {
-      const skills: LoadedSkill[] = loadInstalledSkills(WORKSPACE_DIR, 'gc');
+      skills = loadInstalledSkills(WORKSPACE_DIR, 'gc');
       if (skills.length > 0) {
         this.log.info('GC sweep loaded skills', { count: skills.length, names: skills.map(s => s.name) });
         for (const s of skills) {
@@ -163,11 +176,17 @@ export class GarbageCollector {
       summary.stages.penIntegrity   = await this.auditPenIntegrity();
       summary.stages.promptFreshness = await this.auditPromptFreshness();
       summary.stages.vaultKey       = this.auditVaultKey();
+
+      // Resolve dynamic TTL overrides
+      const comfyuiTtl = this.getTtl(COMFYUI_OUT_DIR, COMFYUI_OUTPUT_TTL_MS, skills);
+      const scoutFindingsTtl = this.getTtl(SCOUT_OUT_DIR, SCOUT_FINDINGS_TTL_MS, skills);
+      const skillsPendingTtl = this.getTtl(SKILLS_PENDING_DIR, SKILLS_PENDING_TTL_MS, skills);
+
       // Storage / corpus stages — added 2026-05-21 for production scale.
-      summary.stages.comfyuiOutput  = await this.sweepComfyuiOutput();
-      summary.stages.scoutFindings  = await this.sweepScoutFindings();
+      summary.stages.comfyuiOutput  = await this.sweepComfyuiOutput(comfyuiTtl);
+      summary.stages.scoutFindings  = await this.sweepScoutFindings(scoutFindingsTtl);
       summary.stages.auditFiles     = await this.sweepAuditFiles();
-      summary.stages.skillsPending  = await this.sweepSkillsPending();
+      summary.stages.skillsPending  = await this.sweepSkillsPending(skillsPendingTtl);
       summary.stages.penProfiles    = await this.sweepPenProfiles();
       summary.stages.ragCorpus      = this.sweepRagCorpus();
       summary.stages.chatMemory     = await this.sweepChatMemory();
@@ -535,9 +554,10 @@ export class GarbageCollector {
   //   - leave subdirectories alone (they're per-project; project deletion
   //     already drops the whole subtree via projectEngine when implemented)
   // ─────────────────────────────────────────────────────────────────────
-  private async sweepComfyuiOutput(): Promise<StageResult> {
+  private async sweepComfyuiOutput(ttlMs?: number): Promise<StageResult> {
     if (!fs.existsSync(COMFYUI_OUT_DIR)) return { skipped: true };
-    const cutoff = Date.now() - COMFYUI_OUTPUT_TTL_MS;
+    const ttl = ttlMs ?? COMFYUI_OUTPUT_TTL_MS;
+    const cutoff = Date.now() - ttl;
     let deleted = 0;
     const errors: string[] = [];
     try {
@@ -561,9 +581,10 @@ export class GarbageCollector {
   // older than TTL drop; the corpus has already been fed into RAG by
   // that point so the raw dumps are recoverable noise.
   // ─────────────────────────────────────────────────────────────────────
-  private async sweepScoutFindings(): Promise<StageResult> {
+  private async sweepScoutFindings(ttlMs?: number): Promise<StageResult> {
     if (!fs.existsSync(SCOUT_OUT_DIR)) return { skipped: true };
-    const cutoff = Date.now() - SCOUT_FINDINGS_TTL_MS;
+    const ttl = ttlMs ?? SCOUT_FINDINGS_TTL_MS;
+    const cutoff = Date.now() - ttl;
     let deleted = 0;
     const errors: string[] = [];
     const walk = (dir: string) => {
@@ -634,9 +655,10 @@ export class GarbageCollector {
   // skills-rejected/ (not deleted — operator can recover them) so the
   // Pending tab doesn't drown in stale candidates.
   // ─────────────────────────────────────────────────────────────────────
-  private async sweepSkillsPending(): Promise<StageResult> {
+  private async sweepSkillsPending(ttlMs?: number): Promise<StageResult> {
     if (!fs.existsSync(SKILLS_PENDING_DIR)) return { skipped: true };
-    const cutoff = Date.now() - SKILLS_PENDING_TTL_MS;
+    const ttl = ttlMs ?? SKILLS_PENDING_TTL_MS;
+    const cutoff = Date.now() - ttl;
     let archived = 0;
     const errors: string[] = [];
     try {

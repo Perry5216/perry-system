@@ -82,11 +82,14 @@ export class OperatorProfileService {
   private readonly observationsPath: string;
   private readonly profilePath: string;
   private readonly preferencesPath: string;
+  private distillTimer: NodeJS.Timeout | null = null;
+  private isDistilling = false;
 
   constructor(
     workspaceDir: string,
     private log: Logger,
     private eventBus?: EventBus,
+    private compressor?: { compress(opts: { text: string; mode: string }): Promise<{ compressed: string }> }
   ) {
     this.dir = join(workspaceDir, 'operator');
     this.observationsPath = join(this.dir, OBSERVATIONS_FILE);
@@ -115,15 +118,56 @@ export class OperatorProfileService {
     this.eventBus.on('skill:promoted' as any, (p: any) => this.observe({ ts: new Date().toISOString(), kind: 'skill-promoted', detail: { name: p?.name, service: p?.service } }));
     this.eventBus.on('skill:rejected' as any, (p: any) => this.observe({ ts: new Date().toISOString(), kind: 'skill-rejected', detail: { name: p?.name, service: p?.service } }));
     this.eventBus.on('step:result:edited' as any, (p: any) => this.observe({ ts: new Date().toISOString(), kind: 'step-result-edited', source: p?.projectId, detail: { stepId: p?.stepId } }));
+    
+    // Listen to agent invocations to capture human interactions and dialogs!
+    this.eventBus.on('agent:invocation:completed' as any, (p: any) => {
+      const isChat = p?.agentId === 'meta.director' || p?.agentId?.startsWith('meta.');
+      this.observe({
+        ts: new Date().toISOString(),
+        kind: isChat ? 'chat-message' : 'manual',
+        detail: {
+          agentId: p?.agentId,
+          input: p?.input ? p.input.slice(0, 1000) : undefined,
+          output: p?.output ? p.output.slice(0, 1000) : undefined,
+          durationMs: p?.durationMs
+        }
+      });
+    });
   }
 
   /** Append a single observation to the raw log. Idempotent / append-only. */
   observe(obs: OperatorObservation): void {
     try {
       appendFileSync(this.observationsPath, JSON.stringify(obs) + '\n', 'utf-8');
+      this.triggerAutoDistill();
     } catch (err: any) {
       this.log.warn('OperatorProfileService.observe failed', { error: err.message });
     }
+  }
+
+  private triggerAutoDistill(): void {
+    if (!this.compressor || this.isDistilling) return;
+    if (this.distillTimer) clearTimeout(this.distillTimer);
+    
+    this.distillTimer = setTimeout(async () => {
+      this.isDistilling = true;
+      try {
+        this.log.info('Running auto-distillation of operator profile...');
+        await this.distill(async (prompt: string) => {
+          try {
+            const r = await this.compressor!.compress({ text: prompt, mode: 'context_briefing' });
+            return r?.compressed || '';
+          } catch (err: any) {
+            this.log.warn('Compressor call failed during auto-distillation', { error: err.message });
+            return '';
+          }
+        });
+      } catch (err: any) {
+        this.log.warn('Auto-distillation pass failed', { error: err.message });
+      } finally {
+        this.isDistilling = false;
+      }
+    }, 15_000); // 15 seconds debounce
   }
 
   /** Manual observation hook (e.g. from a dashboard endpoint). */
@@ -238,6 +282,104 @@ export class OperatorProfileService {
     } catch (err: any) {
       this.log.warn('OperatorProfileService.distill failed', { error: err.message });
       return { updated: false, observationsSeen: 0 };
+    }
+  }
+
+  initializePersona(persona: 'writer' | 'coder' | 'gm' | 'security'): void {
+    const templates = {
+      writer: {
+        profile: `# Operator Profile (Creative Writer)
+
+## Identity
+Creative novelist focused on fiction writing, scene layout, and deep character development.
+
+## Working style
+Prefers detailed outlines, character identity profiling, and chapter-by-chapter drafting. Focuses heavily on show-don't-tell, emotional resonance, and consistent pacing.
+`,
+        preferences: `# Operator Preferences
+
+## Approved patterns
+- Detailed sensory descriptions and somatic markers
+- Strong, active verbs in prose
+- Clean formatting of dialogue (standard punctuation rules)
+
+## Rejected patterns
+- Clichés and predictable tropes
+- Preamble or conversational filler in agent outputs
+- Over-explaining plot points (prefers subtext)
+`
+      },
+      coder: {
+        profile: `# Operator Profile (Software Engineer)
+
+## Identity
+Full-stack software developer focused on building clean, modular, and typed web applications.
+
+## Working style
+Prefers code changes driven by precise implementation plans. Highly values automated tests, linting compliance, and surgical file modifications.
+`,
+        preferences: `# Operator Preferences
+
+## Approved patterns
+- Strictly typed interfaces (TypeScript)
+- Short, targeted functions with clear responsibilities
+- Writing tests alongside implementation
+
+## Rejected patterns
+- Bloated comments explaining obvious code
+- Large, exploratory changes that deviate from the plan
+- Non-standard library dependencies
+`
+      },
+      gm: {
+        profile: `# Operator Profile (D&D Game Master)
+
+## Identity
+Tabletop roleplaying game master running campaigns and prep sessions.
+
+## Working style
+Prefers structured campaign outlines, dungeon descriptions, faction motives, and detailed NPC stat blocks.
+`,
+        preferences: `# Operator Preferences
+
+## Approved patterns
+- Vivid fantasy scene settings and ambient descriptions
+- Stat blocks formatted cleanly in markdown
+- Coherent world lore integration
+
+## Rejected patterns
+- Anachronistic or modern slang in medieval fantasy settings
+- Over-simplification of combat encounters
+- Lack of player agency in planned plotlines
+`
+      },
+      security: {
+        profile: `# Operator Profile (Security Analyst)
+
+## Identity
+Defensive security professional focused on vulnerability research, OSINT, and threat mitigation.
+
+## Working style
+Analyzes CVE feeds, threat intelligence bulletins, and system recon logs. Focuses strictly on defensive remediation.
+`,
+        preferences: `# Operator Preferences
+
+## Approved patterns
+- Technical vulnerability summaries with CVSS prioritization
+- Remediation guides and patch advice
+- Secure coding standards (OWASP Top 10)
+
+## Rejected patterns
+- Live exploit generation or attack scripting
+- Explanations of attack vectors without defensive remedies
+`
+      }
+    };
+
+    const t = templates[persona];
+    if (t) {
+      this.setProfile(t.profile, t.preferences);
+      this.recordManual(`Initialized operator persona as: ${persona}`);
     }
   }
 }

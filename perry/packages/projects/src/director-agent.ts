@@ -138,7 +138,7 @@ export class DirectorAgent {
     //    its own {{pen_slug}} substitution; we extend that prompt here to
     //    inject the project-specific framing (title, type, description).
     const projectFraming = [
-      `You are currently managing the project: "${project.title}" (type: ${project.type}).`,
+      `You are currently managing the project: "${project.title}" (ID: ${project.id}, type: ${project.type}).`,
       `Description: ${project.description || '(none provided)'}`,
       '',
     ].join('\n');
@@ -472,7 +472,7 @@ Proceed with the next step now.`;
       if (!director) return;
 
       const projectFraming = [
-        `You are currently managing the project: "${project.title}" (type: ${project.type}).`,
+        `You are currently managing the project: "${project.title}" (ID: ${project.id}, type: ${project.type}).`,
         `Description: ${project.description || '(none provided)'}`,
         `ACTIVE GOAL: "${goal.text}"${subgoalsStr}`,
         `Status: Autonomous execution loop turn ${goal.turnsUsed} of ${maxTurns}.`,

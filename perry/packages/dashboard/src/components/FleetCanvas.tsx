@@ -27,7 +27,7 @@ const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env
 
 interface AgentDef {
   id: string;
-  domain: 'code' | 'email' | 'hacking' | 'meta';
+  domain: 'code' | 'email' | 'hacking' | 'meta' | 'books' | 'dnd';
   label: string;
   description: string;
   systemPrompt: string;
@@ -49,6 +49,8 @@ const DOMAIN_COLORS: Record<AgentDef['domain'], string> = {
   email:   '#4ECDC4', // cyan
   hacking: '#FF6B6B', // red
   meta:    '#E2E8F0', // off-white (system)
+  books:   '#22D3EE', // cyan/blue
+  dnd:     '#ef4444', // red
 };
 
 // Provider colors are also cost-coded. Local providers are cool tones
@@ -92,7 +94,7 @@ interface PlacedDomain {
 function placeDomains(domains: DomainSummary[], agents: AgentDef[]): PlacedDomain[] {
   // Fixed canonical ordering — domains stay in stable positions even as
   // agent count fluctuates. Add new domains here.
-  const canonical: AgentDef['domain'][] = ['code', 'email', 'hacking', 'meta'];
+  const canonical: AgentDef['domain'][] = ['code', 'books', 'dnd', 'email', 'hacking', 'meta'];
   const present = canonical.filter(d => domains.some(dom => dom.id === d));
   return present.map((id, idx) => {
     // Start at top (-π/2), distribute clockwise around the core.
@@ -234,11 +236,6 @@ export function FleetCanvas({ hideRightDock = false }: { hideRightDock?: boolean
     [placedDomains],
   );
   const selectedAgent = placedAgents.find(a => a.id === selectedAgentId) || null;
-
-  // Live counts for HUD telemetry
-  const activeTrails = trails.length;
-  const completedToday = activityFeed.filter(e => e.kind === 'completed').length;
-  const failedToday = activityFeed.filter(e => e.kind === 'failed').length;
 
   return (
     <div style={{
@@ -383,17 +380,7 @@ export function FleetCanvas({ hideRightDock = false }: { hideRightDock?: boolean
         </div>
       </div>
 
-      {/* ── HUD telemetry: top-right ──────────────────────────── */}
-      <div style={{
-        position: 'absolute', top: 14, right: 24, zIndex: 4,
-        display: 'flex', gap: 18, alignItems: 'center',
-      }}>
-        <HudStat label="Agents"    value={agents.length} />
-        <HudStat label="Domains"   value={placedDomains.length} />
-        <HudStat label="Active"    value={activeTrails} accent />
-        <HudStat label="Done"      value={completedToday} tone="success" />
-        {failedToday > 0 && <HudStat label="Failed" value={failedToday} tone="danger" />}
-      </div>
+
 
       {/* 1. Widescreen Space Backdrop SVG (fills the entire panel, stars expand from viewport center) */}
       <svg
@@ -846,7 +833,7 @@ export function FleetCanvas({ hideRightDock = false }: { hideRightDock?: boolean
       <div
         className="fleet-right-dock"
         style={{
-          position: 'absolute', top: 60, right: 0, bottom: 0,
+          position: 'absolute', top: 0, right: 0, bottom: 0,
           width: 'var(--right-dock-w)',
           background: 'linear-gradient(270deg, rgba(7,9,15,0.85) 0%, rgba(7,9,15,0) 100%)',
           borderLeft: '1px solid var(--panel-border)',
@@ -935,47 +922,6 @@ function Row({ k, v }: { k: string; v: string }) {
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
       <span style={{ color: '#9BA4B5' }}>{k}</span>
       <span style={{ color: '#E2E8F0', fontWeight: 500 }}>{v}</span>
-    </div>
-  );
-}
-
-/**
- * HudStat — small monospace telemetry chip used in the FleetCanvas HUD.
- * Mimics the heads-up display in flight-sim instruments: tiny uppercase
- * label above a larger numeric value.
- */
-function HudStat({ label, value, accent, tone }: {
-  label: string;
-  value: number | string;
-  accent?: boolean;
-  tone?: 'success' | 'danger';
-}) {
-  const valueColor =
-    tone === 'success' ? 'var(--success)' :
-    tone === 'danger'  ? 'var(--danger)'  :
-    accent             ? 'var(--accent)'  :
-    'var(--text-main)';
-  return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
-      lineHeight: 1,
-    }}>
-      <span style={{
-        fontFamily: 'var(--font-sans)',
-        fontSize: '0.65rem',
-        fontWeight: 500,
-        letterSpacing: '0.04em',
-        color: 'var(--text-dim)',
-        textTransform: 'uppercase',
-        marginBottom: 4,
-      }}>{label}</span>
-      <span style={{
-        fontFamily: 'var(--font-mono)',
-        fontSize: '0.95rem',
-        fontWeight: 600,
-        color: valueColor,
-        fontVariantNumeric: 'tabular-nums',
-      }}>{value}</span>
     </div>
   );
 }

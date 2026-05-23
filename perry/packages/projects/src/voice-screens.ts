@@ -1,3 +1,5 @@
+import { loadInstalledSkills, SkillEvaluator } from '@perry/core';
+
 /**
  * voice-screens — shared regex bank for filter-word / named-emotion /
  * anti-pattern detection. Used by:
@@ -107,10 +109,28 @@ export interface LeakHit {
  * gate (drainWorkerResults). For early-exit pre-train pair scanning, use
  * `firstFailure()` instead.
  */
-export function scanLeaks(text: string): LeakHit[] {
+export function scanLeaks(text: string, workspaceDir?: string, penSlug?: string): LeakHit[] {
   const narration = stripDialogue(text);
   const found = new Map<string, string[]>();
+
+  let skills: any[] = [];
+  if (workspaceDir && penSlug) {
+    try {
+      skills = loadInstalledSkills(workspaceDir, 'audit');
+    } catch { /* ignore load failures */ }
+  }
+
   const add = (tag: string, m: string) => {
+    if (workspaceDir && penSlug && skills.length > 0) {
+      const matched = SkillEvaluator.evaluate(skills, {
+        pen_slug: penSlug,
+        leak_tag: tag,
+      });
+      const ignored = matched.some(skill => 
+        skill.frontmatter.action === 'ignore' || skill.frontmatter.action === 'skip'
+      );
+      if (ignored) return;
+    }
     const arr = found.get(tag) || [];
     arr.push(m);
     found.set(tag, arr);

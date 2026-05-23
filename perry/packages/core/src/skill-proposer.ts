@@ -18,7 +18,7 @@
  * module is intentionally stateless across restarts).
  */
 
-import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { Logger } from './logger.js';
 
@@ -144,6 +144,7 @@ export interface LoadedSkill {
   appliesWhen: Record<string, string | number | boolean>;
   body: string;
   path: string;
+  frontmatter: Record<string, any>;
 }
 
 /**
@@ -166,9 +167,9 @@ export function loadInstalledSkills(workspaceDir: string, service: string): Load
       const fullPath = join(dir, f);
       if (loadedPaths.has(fullPath)) continue;
       try {
-        const fs = require('fs');
-        const raw: string = fs.readFileSync(fullPath, 'utf-8');
-        const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+        const raw: string = readFileSync(fullPath, 'utf-8');
+        const normalized = raw.replace(/\r\n/g, '\n');
+        const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
         if (!m) continue;
         const block = m[1];
         const body = m[2];
@@ -205,6 +206,7 @@ export function loadInstalledSkills(workspaceDir: string, service: string): Load
           appliesWhen,
           body,
           path: fullPath,
+          frontmatter,
         });
       } catch { /* skip */ }
     }

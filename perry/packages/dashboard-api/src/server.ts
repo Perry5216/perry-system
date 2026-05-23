@@ -26,6 +26,7 @@ import { setupOpenAICompatRoutes } from './routes/openai-compat.js';
 import { setupSearchRoutes } from './routes/search.js';
 import { setupVoiceRoutes } from './routes/voice.js';
 import { setupPluginsRoutes } from './routes/plugins.js';
+import { setupPensRoutes } from './routes/pens.js';
 import { createAuthMiddleware } from './middleware/auth.js';
 import type { GarbageCollector } from './services/garbage-collector.js';
 import type { GatewayManager } from './services/gateway-manager.js';
@@ -124,7 +125,7 @@ export function createServer(
   app.use('/api/analytics', setupAnalyticsRoutes(stateStore, log.child('analytics'), memoryStore));
   // Surface per-producer learning telemetry counters so the dashboard can
   // show "the system is actually observing" before the first skill fires.
-  app.use('/api/learning', setupLearningRoutes(stateStore, workspaceDir, log.child('learning'), learningCore, skillEvolution));
+  app.use('/api/learning', setupLearningRoutes(stateStore, workspaceDir, log.child('learning'), aiRouter, learningCore, skillEvolution));
   // Domain registry — define new task verticals (code-review, security-research,
   // etc.) and configure which dashboard panels each surfaces.
   const domainRegistry = new DomainRegistry({ workspaceDir, log: log.child('domains') });
@@ -177,7 +178,11 @@ export function createServer(
     eventBus,
     log: log.child('agents'),
     chatMemory,
+    domainRegistry,
   }));
+
+  // Pen system / Soul management routes
+  app.use('/api', setupPensRoutes(projectEngine, workspaceDir, log.child('pens')));
 
   // Secrets vault management — /api/secrets, /api/secrets-audit.
   app.use('/api', setupSecretsRoutes(secrets, log.child('secrets'), aiRouter));

@@ -1,78 +1,39 @@
 /**
  * @perry/projects — Template Registry
  *
- * Defines all project types and their step sequences.
+ * Coordinates and defines all project templates categorized by work types.
  */
 
-import type { ProjectStep, ProjectType, ProjectContext } from '@perry/core';
+import type { ProjectStep, ProjectType, ProjectContext, WorkType, ProjectTemplate } from '@perry/core';
+import { bookTemplates, generateCalibrationPassSteps } from './domains/book/templates.js';
+import { codeTemplates } from './domains/code/templates.js';
+import { dndTemplates } from './domains/dnd/templates.js';
+import { metaTemplates } from './domains/meta/templates.js';
 
-export interface ProjectTemplate {
-  type: ProjectType;
-  name: string;
-  description: string;
-  buildSteps: (context: ProjectContext, title: string, description: string) => ProjectStep[];
+export { generateCalibrationPassSteps };
+export type { ProjectTemplate };
+
+const TEMPLATES = new Map<string, ProjectTemplate>();
+
+// Register book templates
+for (const tpl of bookTemplates) {
+  TEMPLATES.set(tpl.type, tpl);
 }
 
-function step(
-  index: number,
-  label: string,
-  phase: string,
-  taskType: string,
-  prompt: string,
-  opts?: {
-    wordCountTarget?: number;
-    chapterNumber?: number;
-    segmentIndex?: number;
-    totalSegments?: number;
-    networkRequests?: ProjectStep['networkRequests'];
-  },
-): ProjectStep {
-  return {
-    id: `step-${index}`,
-    label,
-    phase,
-    taskType,
-    prompt,
-    status: 'pending',
-    wordCountTarget: opts?.wordCountTarget,
-    chapterNumber: opts?.chapterNumber,
-    segmentIndex: opts?.segmentIndex,
-    totalSegments: opts?.totalSegments,
-    networkRequests: opts?.networkRequests,
-  };
+// Register code templates
+for (const tpl of codeTemplates) {
+  TEMPLATES.set(tpl.type, tpl);
 }
 
-const softwareDev: ProjectTemplate = {
-  type: 'software-dev',
-  name: 'Software Development',
-  description: 'Design, implement, review, and verify software tasks.',
-  buildSteps: (ctx, title, description) => {
-    return [
-      step(1, 'Architecting & Design', 'planning', 'architect',
-        `Create a detailed implementation plan for: ${title}\n\nDescription: ${description}`),
-      step(2, 'Implementation', 'writing', 'coder',
-        `Write code based on the design.\n\nDescription: ${description}`),
-      step(3, 'Verification', 'verification', 'reviewer',
-        `Verify the changes against requirements and run tests.`)
-    ];
-  }
-};
-
-export function generateCalibrationPassSteps(
-  pass: number,
-  startIdx: number,
-  title: string,
-  ctx: any,
-  isFinal: boolean,
-  unused?: any,
-  totalChapters?: number
-): any[] {
-  return [];
+// Register D&D templates
+for (const tpl of dndTemplates) {
+  TEMPLATES.set(tpl.type, tpl);
 }
 
-const TEMPLATES = new Map<string, ProjectTemplate>([
-  ['software-dev', softwareDev],
-]);
+// Register meta templates
+for (const tpl of metaTemplates) {
+  TEMPLATES.set(tpl.type, tpl);
+}
 
 export class TemplateRegistry {
   /** Get a template by type name. */

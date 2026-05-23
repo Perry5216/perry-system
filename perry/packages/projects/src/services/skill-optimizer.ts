@@ -401,8 +401,9 @@ ${winner.body.trim()}
   }
 
   private parseSkillFile(raw: string): { frontmatter: Record<string, string>; body: string } {
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-    if (!m) return { frontmatter: {}, body: raw };
+    const normalized = raw.replace(/\r\n/g, '\n');
+    const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    if (!m) return { frontmatter: {}, body: normalized };
     const block = m[1];
     const body = m[2];
     const frontmatter: any = {};

@@ -30,10 +30,11 @@ import { join } from 'path';
 import type { Logger } from '@perry/core';
 import { listTrajectorySkills, listTrajectorySources } from '@perry/core';
 import type { StateStore } from '@perry/projects';
+import type { AIRouter } from '@perry/ai';
 import type { LearningCore } from '../services/learning-core.js';
 import type { SkillEvolution } from '../services/skill-evolution.js';
 
-export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string, log: Logger, learningCore?: LearningCore, skillEvolution?: SkillEvolution) {
+export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string, log: Logger, aiRouter: AIRouter, learningCore?: LearningCore, skillEvolution?: SkillEvolution) {
   const router = Router();
 
   // SkillEvolution — scoring, evolution timeline, suggestions, transfer.
@@ -58,6 +59,197 @@ export function setupLearningRoutes(stateStore: StateStore, workspaceDir: string
       const transfer = skillEvolution?.getTransferCandidates({ limit }) || [];
       res.json({ installable, transfer });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  router.post('/auto-evaluate', async (req, res) => {
+    try {
+      let promotedSkillsCount = 0;
+      
+      // 1. Promote all pending skills from skills-pending
+      const pendingDir = join(workspaceDir, 'skills-pending');
+      if (existsSync(pendingDir)) {
+        const parseFM = (raw: string) => {
+          const normalized = raw.replace(/\r\n/g, '\n');
+          const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+          if (!m) return { body: normalized };
+          const block = m[1];
+          const body = m[2];
+          const out: any = { body };
+          for (const line of block.split('\n')) {
+            const kv = line.match(/^([a-z_]+):\s*(.*)$/i);
+            if (kv) {
+              const key = kv[1];
+              let val = kv[2].trim();
+              if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                val = val.slice(1, -1);
+              }
+              out[key] = val;
+            }
+          }
+          return out;
+        };
+
+        const walkAndPromote = async (dir: string, defaultService = 'worker') => {
+          const fsPromises = await import('fs/promises');
+          const { readdir, readFile, writeFile, unlink, mkdir } = fsPromises;
+          const entries = await readdir(dir, { withFileTypes: true });
+          for (const ent of entries) {
+            if (ent.isDirectory()) {
+              await walkAndPromote(join(dir, ent.name), ent.name);
+            } else if (ent.isFile() && ent.name.endsWith('.md')) {
+              try {
+                const filePath = join(dir, ent.name);
+                const raw = await readFile(filePath, 'utf-8');
+                const normalized = raw.replace(/\r\n/g, '\n');
+                const fm = parseFM(normalized);
+                if (fm.name) {
+                  const service = fm.service || defaultService;
+                  const isWorker = service === 'worker';
+                  const dstDir = isWorker
+                    ? '/app/.claude/commands'
+                    : join(workspaceDir, 'skills-installed', service);
+                  
+                  if (!existsSync(dstDir)) await mkdir(dstDir, { recursive: true });
+                  const dst = join(dstDir, `${fm.name}.md`);
+                  
+                  let promoted = normalized.replace(/status:\s*pending/, 'status: installed');
+                  if (!/promoted_at:/.test(promoted)) {
+                    promoted = promoted.replace(/^---\n/, `---\npromoted_at: ${new Date().toISOString()}\n`);
+                  }
+                  await writeFile(dst, promoted, 'utf-8');
+                  await unlink(filePath);
+                  promotedSkillsCount++;
+                  
+                  // Log evolution event
+                  skillEvolution?.recordEvolutionEvent({
+                    ts: new Date().toISOString(),
+                    kind: 'skill-promoted',
+                    service,
+                    name: fm.name,
+                    metadata: { autoAligned: true }
+                  });
+                }
+              } catch (err: any) {
+                log.error(`Auto-evaluate failed to promote pending skill: ${ent.name}`, { error: err.message });
+              }
+            }
+          }
+        };
+        await walkAndPromote(pendingDir);
+      }
+
+      // 2. Run auto-promotion pass on verified patterns
+      const promoResult = await skillEvolution?.runAutoPromotionPass() || { scanned: 0, promoted: 0 };
+
+      // 3. Sync and initialize all Pens/Souls on disk
+      const pens = stateStore.getPenNames();
+      const pensDir = join(workspaceDir, 'pens');
+      const fsPromises = await import('fs/promises');
+      for (const pen of pens) {
+        const targetDir = join(pensDir, pen.slug);
+        if (!existsSync(targetDir)) {
+          await fsPromises.mkdir(targetDir, { recursive: true });
+        }
+        const soulPath = join(targetDir, 'SOUL.md');
+        if (!existsSync(soulPath)) {
+          const defaultSoul = [
+            `# SOUL: ${pen.displayName}`,
+            ``,
+            `## Style DNA`,
+            `- Tone: Natural, engaging, human.`,
+            `- Vocabulary: Precise, avoids clichés.`,
+            `- Pacing: Measured, showing rather than telling.`,
+            ``,
+            `## Voice Tagline`,
+            `_${pen.voiceTagline || 'No tagline configured'}_`,
+            ``,
+          ].join('\n');
+          await fsPromises.writeFile(soulPath, defaultSoul, 'utf-8');
+        }
+        const lessonsPath = join(targetDir, 'LESSONS.md');
+        if (!existsSync(lessonsPath)) {
+          const defaultLessons = [
+            `# LESSONS: ${pen.displayName}`,
+            ``,
+            `## Core Principles`,
+            `1. Keep prose clean and grounded.`,
+            `2. Avoid repetitive sentence structures.`,
+            ``,
+          ].join('\n');
+          await fsPromises.writeFile(lessonsPath, defaultLessons, 'utf-8');
+        }
+      }
+
+      // 4. Match and auto-assign souls (Pens) ONLY to 'books' agents.
+      // For non-books agents, send off to Meta to auto-evaluate and write up a dedicated soul if missing.
+      const mapping: Record<string, string> = {};
+      try {
+        const raw = stateStore.getMeta('agent_souls');
+        if (raw) Object.assign(mapping, JSON.parse(raw));
+      } catch {}
+
+      const penSlugs = pens.map(p => p.slug);
+      const defaultPen = penSlugs.includes('a-perry') ? 'a-perry' : (penSlugs[0] || '');
+      
+      const { AGENT_REGISTRY } = await import('@perry/projects');
+      const { generateAgentSoul } = await import('./agents.js');
+      let autoGeneratedCount = 0;
+
+      for (const agent of Object.values(AGENT_REGISTRY)) {
+        if (agent.domain === 'books') {
+          // Assign a pen slug if not already assigned
+          if (!mapping[agent.id] && penSlugs.length > 0) {
+            const match = penSlugs.find(slug => 
+              slug.toLowerCase().includes(agent.domain.toLowerCase()) || 
+              agent.domain.toLowerCase().includes(slug.toLowerCase())
+            );
+            mapping[agent.id] = match || defaultPen;
+          }
+          
+          // Generate CONFIG.json if missing for books domain agents
+          const targetDir = join(workspaceDir, 'souls', 'agents', agent.id);
+          const configPath = join(targetDir, 'CONFIG.json');
+          if (!existsSync(configPath)) {
+            await generateAgentSoul(agent, workspaceDir, aiRouter, log);
+            autoGeneratedCount++;
+          }
+        } else {
+          // Non-books agent: delete from mapping so it does NOT map to a pen name!
+          delete mapping[agent.id];
+          
+          // Send off to Meta if it doesn't have a dedicated soul file
+          const targetDir = join(workspaceDir, 'souls', 'agents', agent.id);
+          const soulPath = join(targetDir, 'SOUL.md');
+          if (!existsSync(soulPath)) {
+            await generateAgentSoul(agent, workspaceDir, aiRouter, log);
+            autoGeneratedCount++;
+          }
+        }
+      }
+      stateStore.setMeta('agent_souls', JSON.stringify(mapping));
+
+      // Log a general evolution event for workspace auto-alignment
+      skillEvolution?.recordEvolutionEvent({
+        ts: new Date().toISOString(),
+        kind: 'skill-promoted',
+        metadata: {
+          message: `Workspace auto-aligned: promoted ${promotedSkillsCount} pending skills, auto-promoted ${promoResult.promoted} verified patterns, and generated dedicated souls for ${autoGeneratedCount} agents.`
+        }
+      });
+
+      res.json({
+        success: true,
+        promotedPendingSkills: promotedSkillsCount,
+        autoPromotedPatterns: promoResult.promoted,
+        scannedPatterns: promoResult.scanned,
+        initializedPens: pens.length,
+        assignedSouls: mapping,
+        autoGeneratedSoulsCount: autoGeneratedCount,
+      });
+    } catch (err: any) {
+      log.error('POST /learning/auto-evaluate failed', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
   });
 
   router.post('/auto-promote/run', async (_req, res) => {

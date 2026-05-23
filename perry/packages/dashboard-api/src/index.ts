@@ -136,7 +136,8 @@ async function bootstrap() {
             taskType: step.taskType,
           },
           gate: () => {
-            const leaks = scanLeaks(result);
+            const penSlug = (project.context as any)?.penNameSlug;
+            const leaks = scanLeaks(result, WORKSPACE, penSlug);
             if (leaks.length === 0) {
               return { verified: true, reason: 'scanLeaks: 0 hits' };
             }
@@ -333,7 +334,7 @@ async function bootstrap() {
   const { SkillEvolution } = await import('./services/skill-evolution.js');
   const skillEvolution = new SkillEvolution(WORKSPACE, log.child('skill-evolution'), eventBus, stateStore, aiRouter);
   const { OperatorProfileService } = await import('./services/operator-profile-service.js');
-  const operatorProfile = new OperatorProfileService(WORKSPACE, log.child('operator-profile'), eventBus);
+  const operatorProfile = new OperatorProfileService(WORKSPACE, log.child('operator-profile'), eventBus, aiRouter.compressor as any);
   const { CronService } = await import('./services/cron-service.js');
   const cronService = new CronService(WORKSPACE, log.child('cron'), projectEngine, eventBus);
   const { PluginManager } = await import('./services/plugin-manager.js');

@@ -52,6 +52,7 @@ export function SystemPanel() {
   const [anchorSubmitting, setAnchorSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savingRow, setSavingRow] = useState<string | null>(null);
+  const [gpuLimit, setGpuLimit] = useState<number | null>(null);
   // RAG search
   const [projects, setProjects] = useState<Array<{ id: string; title: string }>>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>('');
@@ -64,19 +65,21 @@ export function SystemPanel() {
 
   const refresh = async () => {
     try {
-      const [r, dna, pov, scene, p, wife] = await Promise.all([
+      const [r, dna, pov, scene, p, wife, concurrency] = await Promise.all([
         fetch(`${API_BASE}/system/routing/steps`).then(r => r.json()),
         fetch(`${API_BASE}/system/style-dna/enabled`).then(r => r.json()),
         fetch(`${API_BASE}/system/quality/pov-gate-blocking`).then(r => r.json()),
         fetch(`${API_BASE}/system/pipeline/scene-by-scene`).then(r => r.json()),
         fetch(`${API_BASE}/pens`).then(r => r.ok ? r.json() : { pens: [] }).catch(() => ({ pens: [] })),
         fetch(`${API_BASE}/system/wife-mode/enabled`).then(r => r.json()).catch(() => ({ enabled: null })),
+        fetch(`${API_BASE}/system/concurrency/gpu`).then(r => r.json()).catch(() => ({ limit: null })),
       ]);
       if (r?.effective) setRouting({ effective: r.effective, overrides: r.overrides || {}, validTargets: r.validTargets });
       if (typeof dna?.enabled === 'boolean') setDnaEnabled(dna.enabled);
       if (typeof pov?.blocking === 'boolean') setPovBlocking(pov.blocking);
       if (typeof scene?.enabled === 'boolean') setSceneByScene(scene.enabled);
       if (typeof wife?.enabled === 'boolean') setWifeModeEnabled(wife.enabled);
+      if (typeof concurrency?.limit === 'number') setGpuLimit(concurrency.limit);
       const penList: Array<{ slug: string; displayName?: string }> = Array.isArray(p?.pens) ? p.pens : [];
       setPens(penList);
       if (!selectedPen && penList.length > 0) setSelectedPen(penList[0].slug);
@@ -235,6 +238,18 @@ export function SystemPanel() {
     }
   };
 
+  const updateGpuLimit = async (limit: number) => {
+    setGpuLimit(limit);
+    try {
+      await fetch(`${API_BASE}/system/concurrency/gpu`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit }),
+      });
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
   const submitAnchor = async () => {
     if (!selectedPen || !anchorPasteText.trim()) return;
     setAnchorSubmitting(true);
@@ -324,6 +339,38 @@ export function SystemPanel() {
             descOn="Wife responder agent runs locally on RTX 5070 Ti using MistralRP-Noromaid GGUF."
             descOff="Wife responder agent disabled. Model is unloaded from VRAM when turned off."
           />
+          <div style={{
+            flex: '1 1 320px', minWidth: 280,
+            background: 'var(--panel-bg)', border: '1px solid var(--panel-border)',
+            borderRadius: 6, padding: '14px 16px',
+            display: 'flex', flexDirection: 'column', justifyContent: 'space-between'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>GPU Concurrency Limit</span>
+              <select
+                value={gpuLimit ?? 1}
+                onChange={e => updateGpuLimit(parseInt(e.target.value, 10))}
+                disabled={gpuLimit === null}
+                style={{
+                  background: 'var(--bg)',
+                  color: 'var(--text-main)',
+                  border: '1px solid var(--panel-border)',
+                  borderRadius: 4,
+                  padding: '3px 8px',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                  cursor: gpuLimit !== null ? 'pointer' : 'wait'
+                }}
+              >
+                {[1, 2, 3, 4, 5].map(val => (
+                  <option key={val} value={val}>{val} Way</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+              Active GPU concurrency limit. Set to 1 to protect local GPU VRAM; increase up to 5 to run steps in parallel.
+            </div>
+          </div>
         </div>
       </section>
 

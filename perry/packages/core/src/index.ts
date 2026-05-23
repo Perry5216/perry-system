@@ -14,6 +14,7 @@ export { ContextBudgetManager } from './context-budget.js';
 export { McpClientService, type McpServerConfig } from './mcp-client-service.js';
 export { SkillProposer, loadInstalledSkills } from './skill-proposer.js';
 export type { SkillProposal, LoadedSkill } from './skill-proposer.js';
+export { SkillEvaluator } from './skill-evaluator.js';
 export { TrajectorySkillWriter, listTrajectorySkills, listTrajectorySources } from './trajectory-skills.js';
 export type { TrajectoryRecord } from './trajectory-skills.js';
 export type { PluginAPI, PluginMeta, PluginModule, PluginHandle, PluginRouteHandler } from './plugin-api.js';

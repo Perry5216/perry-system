@@ -141,7 +141,7 @@ async function bootstrap() {
       'get_anti_patterns', 'get_recent_mined_pairs', 'get_rejected_pairs',
       'inject_pair', 'fetch_url',
       'embed_text', 'rag_search', 'session_search', 'session_view', 'compress_context',
-      'propose_skill',
+      'create_template_for_worktype',
       'index_scout_finding', 'check_scout_coverage', 'mark_scout_finding_used',
     ]),
     researcher: new Set([
@@ -191,7 +191,7 @@ async function bootstrap() {
     rag_search_global:       'Cross-project semantic search.',
     session_search:          'Exact-keyword (FTS5) search over completed step outputs; returns excerpts.',
     session_view:            'Fetch full content of one indexed step by step_id (companion to session_search).',
-    propose_skill:           'Propose a new skill (procedural memory) after a verified-successful complex task. Lands in skills-pending/{service}/ for human review.',
+    create_template_for_worktype: 'Create and publish a new project template for a specific worktype (books, code, dnd, email, hacking, meta). Once published, it becomes immediately accessible inside the worktype\'s template choices.',
     index_scout_finding:     'Index a scouted source as scout_finding with structured metadata (subgenre, source, tone). Feeds the dedup substrate.',
     check_scout_coverage:    'Pre-crawl check: count scout findings matching filters + saturation verdict. Skip queries that would only duplicate.',
     mark_scout_finding_used: 'Flip a scout finding to verified_scout_finding after the bible/chapter that cited it succeeded.',
@@ -533,28 +533,41 @@ async function bootstrap() {
           },
         },
         {
-          name: 'propose_skill',
-          description: 'Submit a candidate skill (procedural memory) for human review. Use ONLY after finishing a verified-successful complex task — when you\'ve discovered a non-trivial workflow that other workers (or services) would benefit from. Lands in workspace/skills-pending/{service}/ for human approval. Set service="scout" for source-discovery patterns, "audit" for voice-leak recipes, "director" for orchestration patterns, etc. Default service="worker" (general agent workflows). Mirrors the agent-authored skills pattern with a verification gate.',
+          name: 'create_template_for_worktype',
+          description: 'Create and publish a new project template for a specific worktype (books, code, dnd, email, hacking, meta). Once published, it becomes immediately accessible inside the worktype\'s template choices.',
           inputSchema: {
             type: 'object',
             properties: {
-              name: { type: 'string', description: 'Skill slug: lowercase-kebab-case, 3-40 chars. Becomes /name when promoted (for service=worker).' },
-              description: { type: 'string', description: 'One-line summary, 10-200 chars. Surfaces in the skill catalog.' },
-              body: { type: 'string', description: 'Markdown procedure: when to use, steps, pitfalls, verification. Min 100 chars.' },
-              service: { type: 'string', description: 'Which subsystem this skill is for. Default "worker" (LLM agents). Other values: "scout", "audit", "director", "trainer", "gc", "prompt-builder". Determines storage subdir and which consumer loads it.' },
-              applies_when: {
-                type: 'object',
-                description: 'Optional structured trigger conditions consumed by non-LLM services (e.g. {subgenre:"cyberpunk", source:"reddit"}). Free-form key/value; serialised into frontmatter.',
-                additionalProperties: true,
+              worktype: {
+                type: 'string',
+                enum: ['books', 'code', 'dnd', 'email', 'hacking', 'meta'],
+                description: 'The target worktype/domain for the template.'
               },
-              evidence: {
-                type: 'object',
-                description: 'Optional — task_ids, success signals, audit scores supporting the proposal.',
-                additionalProperties: true,
+              name: {
+                type: 'string',
+                description: 'Display name of the template (e.g., "Novel Planner", "Cyberpunk Noir").'
               },
+              description: {
+                type: 'string',
+                description: 'Description of the template.'
+              },
+              steps: {
+                type: 'array',
+                description: 'The steps/pipeline configuration for this template.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    label: { type: 'string', description: 'Display label/title of the step.' },
+                    phase: { type: 'string', description: 'Phase identifier (e.g., "setup", "planning", "drafting", "review").' },
+                    taskType: { type: 'string', description: 'The specialized task type or agent id responsible for this step.' },
+                    prompt: { type: 'string', description: 'Detailed instruction/prompt for the step.' }
+                  },
+                  required: ['label', 'phase', 'taskType', 'prompt']
+                }
+              }
             },
-            required: ['name', 'description', 'body'],
-          },
+            required: ['worktype', 'name', 'description', 'steps']
+          }
         },
         {
           name: 'index_scout_finding',
@@ -1446,61 +1459,112 @@ async function bootstrap() {
         }
       }
 
-      case 'propose_skill': {
-        // Worker (or service-via-worker) has finished a verified-successful
-        // complex task and wants to durably record the procedure. Lands in
-        // workspace/skills-pending/{service}/ — never directly active — so a
-        // human reviews before the skill enters rotation. Mirrors the
-        // verified-success learning loop's gate philosophy: producers
-        // propose, humans (or a future librarian) decide.
-        const { name, description, body, service, applies_when, evidence } = request.params.arguments as any;
-        if (typeof name !== 'string' || !/^[a-z0-9-]{3,40}$/.test(name)) {
-          throw new McpError(ErrorCode.InvalidParams, 'name must be lowercase-kebab-case, 3-40 chars');
+      case 'create_template_for_worktype': {
+        const { worktype, name, description, steps } = request.params.arguments as any;
+        if (typeof worktype !== 'string' || !['books', 'code', 'dnd', 'email', 'hacking', 'meta'].includes(worktype)) {
+          throw new McpError(ErrorCode.InvalidParams, 'worktype must be one of books, code, dnd, email, hacking, meta');
         }
-        if (typeof description !== 'string' || description.length < 10 || description.length > 200) {
-          throw new McpError(ErrorCode.InvalidParams, 'description must be 10-200 chars');
+        if (typeof name !== 'string' || !name.trim()) {
+          throw new McpError(ErrorCode.InvalidParams, 'name is required');
         }
-        if (typeof body !== 'string' || body.length < 100) {
-          throw new McpError(ErrorCode.InvalidParams, 'body must be at least 100 chars of markdown procedure');
+        if (typeof description !== 'string') {
+          throw new McpError(ErrorCode.InvalidParams, 'description is required');
         }
-        const svc = typeof service === 'string' && /^[a-z][a-z0-9-]{1,20}$/.test(service) ? service : 'worker';
+        if (!Array.isArray(steps) || steps.length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, 'steps must be a non-empty array');
+        }
         try {
           const fs = await import('fs');
           const path = await import('path');
-          const workspaceDir = process.env.PERRY_WORKSPACE || '/app/workspace';
-          // Per-service subdir keeps audit/director/scout/etc. proposals
-          // browseable independently and lets the consumer service load
-          // only its own skills at runtime.
-          const dir = path.join(workspaceDir, 'skills-pending', svc);
-          fs.mkdirSync(dir, { recursive: true });
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-          const filename = `${stamp}__${name}.md`;
-          const fullPath = path.join(dir, filename);
-          const evidenceBlock = evidence ? `\n## Evidence\n\`\`\`json\n${JSON.stringify(evidence, null, 2)}\n\`\`\`\n` : '';
-          // Serialise applies_when as a nested YAML block so non-LLM
-          // consumers (audit-service, future GC tuner, etc.) can parse it
-          // mechanically without re-running an LLM.
-          let appliesBlock = '';
-          if (applies_when && typeof applies_when === 'object') {
-            const lines: string[] = ['applies_when:'];
-            for (const [k, v] of Object.entries(applies_when)) {
-              const safeV = typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v);
-              lines.push(`  ${k}: ${safeV}`);
+          const { DomainRegistry } = await import('@perry/projects');
+
+          const kebabName = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+          const templateType = `custom-${kebabName}`;
+          
+          const newPipeline = {
+            id: templateType,
+            name: `${name} (Generated)`,
+            description: description,
+            workType: worktype,
+            steps: steps.map((s: any) => ({
+              label: s.label,
+              phase: s.phase,
+              taskType: s.taskType,
+              prompt: s.prompt,
+            }))
+          };
+
+          const configPath = path.join(WORKSPACE, '.config', 'custom_pipelines.json');
+          let pipelines: any[] = [];
+          if (fs.existsSync(configPath)) {
+            try {
+              pipelines = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            } catch (e) {
+              log.error('Failed to parse custom_pipelines.json in MCP tool', { error: e instanceof Error ? e.message : String(e) });
             }
-            appliesBlock = lines.join('\n') + '\n';
           }
-          const content =
-            `---\nname: ${name}\nservice: ${svc}\ndescription: ${description}\nproposed_at: ${new Date().toISOString()}\nstatus: pending\n${appliesBlock}---\n\n` +
-            body.trim() + '\n' + evidenceBlock;
-          fs.writeFileSync(fullPath, content, 'utf-8');
+          
+          pipelines = pipelines.filter((p: any) => p.id !== templateType);
+          pipelines.push(newPipeline);
+          
+          const configDir = path.dirname(configPath);
+          if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+          }
+          fs.writeFileSync(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
+
+          const skillName = `template-builder-${kebabName}`;
+          const skillDir = path.join(WORKSPACE, 'skills-installed', worktype);
+          if (!fs.existsSync(skillDir)) {
+            fs.mkdirSync(skillDir, { recursive: true });
+          }
+          const skillPath = path.join(skillDir, `${skillName}.md`);
+          const now = new Date().toISOString();
+          const skillContent = `---
+name: ${skillName}
+service: ${worktype}
+description: Skill dedicated to generating and maintaining the custom template ${templateType} (${name}).
+proposed_at: ${now}
+promoted_at: ${now}
+proposed_by: template-evolution
+status: installed
+applies_when:
+  kind: template-builder
+  fingerprint: ${templateType}
+---
+
+# Template Builder Skill: ${name}
+
+This skill belongs to the domain ${worktype} and is dedicated to generating and running templates for this domain.
+When this skill is activated:
+- Utilize the structure and prompt strategies defined in the ${name} template.
+- Refine steps, parameters, and prompts to align with domain guidelines.
+- Self-improve the template over time based on execution observations.
+`;
+          fs.writeFileSync(skillPath, skillContent, 'utf8');
+
+          const domainRegistry = new DomainRegistry({ workspaceDir: WORKSPACE, log });
+          const domain = domainRegistry.get(worktype);
+          if (domain) {
+            const defaultSkills = domain.defaultSkills || [];
+            const skillExists = defaultSkills.some(s => s.service === worktype && s.name === skillName);
+            if (!skillExists) {
+              const updatedSkills = [...defaultSkills, { service: worktype, name: skillName }];
+              domainRegistry.update(worktype, { defaultSkills: updatedSkills });
+              log.info(`Assigned skill ${worktype}/${skillName} to domain ${worktype}`);
+            }
+          }
+
           return { content: [{ type: 'text', text: JSON.stringify({
-            accepted: true,
-            file: fullPath,
-            service: svc,
-            note: `Saved to skills-pending/${svc}/. Awaiting human review in the dashboard Self-Learning → Skills tab.`,
+            success: true,
+            templateType,
+            templateName: newPipeline.name,
+            worktype,
+            skillName,
+            note: `Published template ${newPipeline.name} and registered template-builder skill ${skillName} to domain ${worktype}.`
           }) }] };
         } catch (err: any) {
-          throw new McpError(ErrorCode.InternalError, `propose_skill failed: ${err.message}`);
+          throw new McpError(ErrorCode.InternalError, `create_template_for_worktype failed: ${err.message}`);
         }
       }
 

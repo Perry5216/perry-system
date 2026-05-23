@@ -20,27 +20,70 @@
 
 import { useEffect, useState } from 'react';
 import { PanelHeader } from './PanelHeader';
-import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileText, Sparkles, Edit3, Save, Pin, Trash2, Activity, Shield, Layers, Loader2, AlertTriangle, Wand2 } from 'lucide-react';
+import { Search, BookOpen, RotateCcw, Check, X, ChevronDown, ChevronRight, FileText, Sparkles, Edit3, Save, Pin, Trash2, Activity, Shield, Layers, Loader2, AlertTriangle, Wand2, Plus, UserCircle2 } from 'lucide-react';
 import { DiffViewer } from './DiffViewer';
 
 const API_BASE = (typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV)
   ? 'http://localhost:4000/api' : '/api';
 
-type SubTab = 'sessions' | 'skills' | 'pens' | 'evolution';
+type SubTab = 'sessions' | 'skills' | 'pens' | 'evolution' | 'souls';
 
 export function SelfLearningPanel() {
   const [tab, setTab] = useState<SubTab>('sessions');
+  const [reloadKey, setReloadKey] = useState(0);
+  const [evaluating, setEvaluating] = useState(false);
+
+  const handleAutoEvaluate = async () => {
+    if (!confirm('Run Workspace Alignment? This will promote pending skills, initialize/sync character soul files on disk, and match active agents to matching souls.')) return;
+    try {
+      setEvaluating(true);
+      const r = await fetch(`${API_BASE}/learning/auto-evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      alert(`Workspace alignment completed!\n\nPromoted pending skills: ${data.promotedPendingSkills}\nAuto-promoted patterns: ${data.autoPromotedPatterns}\nInitialized pens: ${data.initializedPens}\nAssigned agent souls: ${Object.keys(data.assignedSouls || {}).length}`);
+      setReloadKey(prev => prev + 1);
+    } catch (e: any) {
+      alert(`Workspace alignment failed: ${e.message}`);
+    } finally {
+      setEvaluating(false);
+    }
+  };
+
+  const evalButton = (
+    <button
+      onClick={handleAutoEvaluate}
+      disabled={evaluating}
+      style={{
+        ...btnPrimary(evaluating),
+        background: 'rgba(168,85,247,0.12)',
+        borderColor: 'rgba(168,85,247,0.4)',
+        color: '#c4a8ff',
+      }}
+    >
+      {evaluating ? <Loader2 size={12} className="animate-spin" /> : null}
+      {evaluating ? 'Aligning...' : 'Auto-Evaluate Workspace'}
+    </button>
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 16 }}>
-      <PanelHeader eyebrow="SELF-LEARNING" title="Self-Learning" subtitle="Sessions · Skills · Pens · Evolution" />
+      <PanelHeader
+        eyebrow="SELF-LEARNING"
+        title="Self-Learning"
+        subtitle="Sessions · Skills · Pens · Evolution · Souls"
+        actions={evalButton}
+      />
       <LearningActivity />
       <SubTabs current={tab} onChange={setTab} />
       <div style={{ flex: 1, overflowY: 'auto', marginTop: 12 }}>
-        {tab === 'sessions' && <SessionsTab />}
-        {tab === 'skills' && <SkillsTab />}
-        {tab === 'pens' && <PensTab />}
-        {tab === 'evolution' && <EvolutionTab />}
+        {tab === 'sessions' && <SessionsTab key={reloadKey} />}
+        {tab === 'skills' && <SkillsTab key={reloadKey} />}
+        {tab === 'pens' && <PensTab key={reloadKey} />}
+        {tab === 'evolution' && <EvolutionTab key={reloadKey} />}
+        {tab === 'souls' && <SoulsTab key={reloadKey} />}
       </div>
     </div>
   );
@@ -247,6 +290,7 @@ function SubTabs({ current, onChange }: { current: SubTab; onChange: (t: SubTab)
     { key: 'skills',   label: 'Skills',    icon: <Sparkles size={14} /> },
     { key: 'pens',     label: 'Pens',      icon: <BookOpen size={14} /> },
     { key: 'evolution', label: 'Evolution', icon: <Sparkles size={14} /> },
+    { key: 'souls',     label: 'Souls',     icon: <UserCircle2 size={14} /> },
   ];
   return (
     <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid rgba(34,211,238,0.15)', paddingBottom: 0 }}>
@@ -1224,6 +1268,61 @@ function PensTab() {
   const [draftLessons, setDraftLessons] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Create new Pen / Soul states
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [newSlug, setNewSlug] = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [newGenre, setNewGenre] = useState('');
+  const [newTagline, setNewTagline] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const handleCreatePen = async () => {
+    if (!newSlug.trim()) {
+      setErr('Pen Slug is required');
+      return;
+    }
+    if (!newDisplayName.trim()) {
+      setErr('Display Name is required');
+      return;
+    }
+    setCreating(true);
+    setErr(null);
+    try {
+      const r = await fetch(`${API_BASE}/pens`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slug: newSlug.trim(),
+          displayName: newDisplayName.trim(),
+          genreOrSeries: newGenre.trim(),
+          voiceTagline: newTagline.trim(),
+        }),
+      });
+      if (!r.ok) {
+        const errorData = await r.json().catch(() => ({ error: 'Failed to create pen' }));
+        throw new Error(errorData.error || 'Failed to create pen');
+      }
+      
+      // Reload pens list
+      const listRes = await fetch(`${API_BASE}/pens`);
+      const listJ = await listRes.json();
+      const list = Array.isArray(listJ) ? listJ : (listJ.pens || []);
+      setPens(list);
+      setSelected(newSlug.trim());
+      setShowCreateForm(false);
+
+      // Reset form
+      setNewSlug('');
+      setNewDisplayName('');
+      setNewGenre('');
+      setNewTagline('');
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   useEffect(() => {
     fetch(`${API_BASE}/pens`)
       .then(r => r.json())
@@ -1305,10 +1404,39 @@ function PensTab() {
   return (
     <div style={{ display: 'flex', gap: 12, height: '100%' }}>
       <aside style={{ width: 200, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <button
+          onClick={() => {
+            setSelected(null);
+            setShowCreateForm(true);
+            setErr(null);
+          }}
+          style={{
+            padding: '6px 12px',
+            background: 'rgba(34, 211, 238, 0.15)',
+            border: '1px solid rgba(34, 211, 238, 0.4)',
+            borderRadius: 6,
+            color: 'var(--secondary)',
+            cursor: 'pointer',
+            fontSize: '0.78rem',
+            fontFamily: 'var(--font-mono)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            marginBottom: 8,
+          }}
+        >
+          <Plus size={12} /> New Soul
+        </button>
+
         {pens.map(p => (
           <button
             key={p.slug}
-            onClick={() => setSelected(p.slug)}
+            onClick={() => {
+              setSelected(p.slug);
+              setShowCreateForm(false);
+              setErr(null);
+            }}
             style={{
               ...penListBtn,
               borderColor: selected === p.slug ? 'rgba(34,211,238,0.4)' : 'rgba(34,211,238,0.1)',
@@ -1324,7 +1452,86 @@ function PensTab() {
       </aside>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
         {err && <div style={errBox}>{err}</div>}
-        {selected && (
+        
+        {showCreateForm ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 500, padding: 16, background: 'rgba(7,9,15,0.4)', border: '1px solid rgba(34,211,238,0.15)', borderRadius: 8 }}>
+            <h3 style={{ ...sectionHeading, marginBottom: 8 }}>Create Agent Soul (Pen Name)</h3>
+            
+            <div style={formRow}>
+              <label style={formLabel}>Pen Slug (kebab-case, e.g. "a-perry")</label>
+              <input
+                style={formInput}
+                type="text"
+                placeholder="e.g. a-perry"
+                value={newSlug}
+                onChange={e => setNewSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+              />
+            </div>
+            
+            <div style={formRow}>
+              <label style={formLabel}>Display Name</label>
+              <input
+                style={formInput}
+                type="text"
+                placeholder="e.g. Perry"
+                value={newDisplayName}
+                onChange={e => setNewDisplayName(e.target.value)}
+              />
+            </div>
+            
+            <div style={formRow}>
+              <label style={formLabel}>Genre or Series (Optional)</label>
+              <input
+                style={formInput}
+                type="text"
+                placeholder="e.g. Cyberpunk Noir"
+                value={newGenre}
+                onChange={e => setNewGenre(e.target.value)}
+              />
+            </div>
+            
+            <div style={formRow}>
+              <label style={formLabel}>Voice Tagline (Optional)</label>
+              <input
+                style={formInput}
+                type="text"
+                placeholder="e.g. A cynical, street-smart netrunner..."
+                value={newTagline}
+                onChange={e => setNewTagline(e.target.value)}
+              />
+            </div>
+            
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                onClick={handleCreatePen}
+                disabled={creating}
+                style={btnPrimary(creating)}
+              >
+                {creating ? 'Creating…' : 'Create Soul'}
+              </button>
+              <button
+                onClick={() => {
+                  setShowCreateForm(false);
+                  if (pens.length > 0) setSelected(pens[0].slug);
+                  setErr(null);
+                }}
+                disabled={creating}
+                style={{
+                  padding: '6px 12px',
+                  background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: 6,
+                  color: 'var(--text-muted)',
+                  cursor: 'pointer',
+                  fontSize: '0.78rem',
+                  fontFamily: 'var(--font-mono)'
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : selected ? (
           <>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={sectionHeading}>{selected}</h3>
@@ -1365,7 +1572,442 @@ function PensTab() {
               </div>
             )}
           </>
+        ) : (
+          <div style={{ color: 'var(--text-muted)', padding: 12 }}>Select a pen or click "New Soul" to begin.</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+interface AgentSummary {
+  id: string;
+  domain: string;
+  label: string;
+  description: string;
+}
+
+function SoulsTab() {
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [pens, setPens] = useState<PenSummary[]>([]);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  
+  // Selected agent for edit
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<{ soul: string | null; lessons: string | null; config: string | null } | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [editingSoul, setEditingSoul] = useState(false);
+  const [editingLessons, setEditingLessons] = useState(false);
+  const [editingConfig, setEditingConfig] = useState(false);
+  const [draftSoul, setDraftSoul] = useState('');
+  const [draftLessons, setDraftLessons] = useState('');
+  const [draftConfig, setDraftConfig] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      const [rAgents, rPens, rMapping] = await Promise.all([
+        fetch(`${API_BASE}/agents`),
+        fetch(`${API_BASE}/pens`),
+        fetch(`${API_BASE}/agents/souls/mapping`),
+      ]);
+
+      if (!rAgents.ok) throw new Error(`Agents fetch failed: ${rAgents.statusText}`);
+      if (!rPens.ok) throw new Error(`Pens fetch failed: ${rPens.statusText}`);
+      if (!rMapping.ok) throw new Error(`Souls mapping fetch failed: ${rMapping.statusText}`);
+
+      const [jAgents, jPens, jMapping] = await Promise.all([
+        rAgents.json(),
+        rPens.json(),
+        rMapping.json(),
+      ]);
+
+      const agentsList = jAgents.agents || [];
+      setAgents(agentsList);
+      setPens(Array.isArray(jPens) ? jPens : (jPens.pens || []));
+      setMapping(jMapping.mapping || {});
+      setErr(null);
+      
+      // Auto-select first agent
+      if (agentsList.length > 0 && !selectedAgentId) {
+        setSelectedAgentId(agentsList[0].id);
+      }
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const loadAgentProfile = async (agentId: string) => {
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) return;
+
+    setProfileLoading(true);
+    setEditingSoul(false);
+    setEditingLessons(false);
+    setEditingConfig(false);
+    try {
+      if (agent.domain === 'books') {
+        const assignedPen = mapping[agentId];
+        let soul = null;
+        let lessons = null;
+        let config = null;
+        if (assignedPen) {
+          try {
+            const r = await fetch(`${API_BASE}/pens/${encodeURIComponent(assignedPen)}/profile`);
+            const j = await r.json();
+            soul = j.soul;
+            lessons = j.lessons;
+          } catch (e) {
+            console.error('Failed to load pen profile', e);
+          }
+        }
+        try {
+          const cr = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/profile`);
+          const cj = await cr.json();
+          config = cj.config;
+        } catch (e) {
+          console.error('Failed to load agent profile config', e);
+        }
+        setProfile({ soul, lessons, config });
+      } else {
+        const r = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/profile`);
+        const j = await r.json();
+        setProfile({ soul: j.soul, lessons: j.lessons, config: j.config });
+      }
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setProfileLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedAgentId && agents.length > 0) {
+      loadAgentProfile(selectedAgentId);
+    }
+  }, [selectedAgentId, mapping, agents]);
+
+  const handleAssignSoul = async (agentId: string, penSlug: string) => {
+    try {
+      setSavingId(agentId);
+      const r = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/soul`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ penSlug: penSlug || null }),
+      });
+      if (!r.ok) throw new Error(`Failed to assign soul: ${r.statusText}`);
+      const data = await r.json();
+      setMapping(data.mapping || {});
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const handleRefreshProfile = async () => {
+    if (!selectedAgentId) return;
+    const agent = agents.find(a => a.id === selectedAgentId);
+    if (!agent) return;
+
+    setRefreshing(true);
+    setErr(null);
+    try {
+      if (agent.domain === 'books') {
+        const assignedPen = mapping[agent.id];
+        if (assignedPen) {
+          const r = await fetch(`${API_BASE}/pens/${encodeURIComponent(assignedPen)}/refresh-profile`, { method: 'POST' });
+          if (!r.ok) throw new Error(await r.text());
+        }
+        const cr = await fetch(`${API_BASE}/agents/${encodeURIComponent(selectedAgentId)}/refresh-profile`, { method: 'POST' });
+        if (!cr.ok) throw new Error(await cr.text());
+      } else {
+        const r = await fetch(`${API_BASE}/agents/${encodeURIComponent(selectedAgentId)}/refresh-profile`, { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+      }
+      loadAgentProfile(selectedAgentId);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const beginEdit = (which: 'soul' | 'lessons' | 'config') => {
+    if (which === 'soul') {
+      setDraftSoul(profile?.soul ?? '');
+      setEditingSoul(true);
+    } else if (which === 'lessons') {
+      setDraftLessons(profile?.lessons ?? '');
+      setEditingLessons(true);
+    } else {
+      setDraftConfig(profile?.config ?? '');
+      setEditingConfig(true);
+    }
+  };
+ 
+  const cancelEdit = (which: 'soul' | 'lessons' | 'config') => {
+    if (which === 'soul') setEditingSoul(false);
+    else if (which === 'lessons') setEditingLessons(false);
+    else setEditingConfig(false);
+  };
+ 
+  const saveEdit = async (which: 'soul' | 'lessons' | 'config') => {
+    if (!selectedAgentId) return;
+    const agent = agents.find(a => a.id === selectedAgentId);
+    if (!agent) return;
+ 
+    setSaving(true);
+    setErr(null);
+    try {
+      if (which === 'config') {
+        try {
+          JSON.parse(draftConfig);
+        } catch (e: any) {
+          throw new Error(`Invalid CONFIG.json format: ${e.message}`);
+        }
+      }
+
+      const body: any = {};
+      if (which === 'soul') body.soul = draftSoul;
+      else if (which === 'lessons') body.lessons = draftLessons;
+      else body.config = draftConfig;
+ 
+      if (which === 'config') {
+        const r = await fetch(`${API_BASE}/agents/${encodeURIComponent(selectedAgentId)}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config: draftConfig }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+      } else if (agent.domain === 'books') {
+        const assignedPen = mapping[agent.id];
+        if (!assignedPen) return;
+        const r = await fetch(`${API_BASE}/pens/${encodeURIComponent(assignedPen)}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(await r.text());
+      } else {
+        const r = await fetch(`${API_BASE}/agents/${encodeURIComponent(selectedAgentId)}/profile`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(await r.text());
+      }
+ 
+      setProfile(prev => ({
+        soul: which === 'soul' ? draftSoul : (prev?.soul ?? null),
+        lessons: which === 'lessons' ? draftLessons : (prev?.lessons ?? null),
+        config: which === 'config' ? draftConfig : (prev?.config ?? null),
+      }));
+      if (which === 'soul') setEditingSoul(false);
+      else if (which === 'lessons') setEditingLessons(false);
+      else setEditingConfig(false);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 12 }}>Loading agent souls…</div>;
+
+  const selectedAgent = agents.find(a => a.id === selectedAgentId);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {err && <div style={errBox}>{err}</div>}
+      
+      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 16, alignItems: 'start' }}>
+        {/* Left Column: Agent Registry Mapping */}
+        <section style={cardPanelStyle}>
+          <h3 style={sectionHeadingWithIcon}>
+            <UserCircle2 size={16} style={{ color: 'var(--secondary)' }} />
+            Agent Persona Assignments ({agents.length})
+          </h3>
+          
+          {agents.length === 0 ? (
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '8px 0', fontStyle: 'italic' }}>
+              No registered agents found.
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto', border: '1px solid rgba(34,211,238,0.1)', borderRadius: 6 }}>
+              <table style={telemetryTableStyle}>
+                <thead>
+                  <tr>
+                    <th style={telemetryThStyle}>Agent Label</th>
+                    <th style={telemetryThStyle}>Domain</th>
+                    <th style={telemetryThStyle}>Persona Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {agents.map(agent => {
+                    const currentSoul = mapping[agent.id] || '';
+                    const isSaving = savingId === agent.id;
+                    const isSelected = selectedAgentId === agent.id;
+                    return (
+                      <tr 
+                        key={agent.id} 
+                        onClick={() => setSelectedAgentId(agent.id)}
+                        style={{
+                          ...telemetryTrStyle,
+                          cursor: 'pointer',
+                          background: isSelected ? 'rgba(34,211,238,0.06)' : 'transparent',
+                          borderColor: isSelected ? 'rgba(34,211,238,0.3)' : 'rgba(34,211,238,0.05)'
+                        }}
+                      >
+                        <td style={{ ...telemetryTdStyle, fontWeight: 600, color: isSelected ? 'var(--secondary)' : 'var(--text-main)' }}>
+                          {agent.label}
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 'normal' }}>
+                            ID: <code>{agent.id}</code>
+                          </div>
+                        </td>
+                        <td style={telemetryTdStyle}>
+                          <span style={serviceBadge}>{agent.domain}</span>
+                        </td>
+                        <td style={telemetryTdStyle} onClick={e => e.stopPropagation()}>
+                          {agent.domain === 'books' ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <select
+                                value={currentSoul}
+                                onChange={e => handleAssignSoul(agent.id, e.target.value)}
+                                disabled={isSaving}
+                                style={{
+                                  ...formInput,
+                                  background: currentSoul ? 'rgba(168,85,247,0.08)' : 'rgba(7,9,15,0.6)',
+                                  borderColor: currentSoul ? 'rgba(168,85,247,0.3)' : 'rgba(34,211,238,0.2)',
+                                  color: currentSoul ? '#c4a8ff' : 'var(--text-main)',
+                                  cursor: isSaving ? 'wait' : 'pointer'
+                                }}
+                              >
+                                <option value="" style={{ background: '#1c1c1e', color: 'var(--text-muted)' }}>None / Default</option>
+                                {pens.map(pen => (
+                                  <option key={pen.slug} value={pen.slug} style={{ background: '#1c1c1e', color: 'var(--text-main)' }}>
+                                    {pen.displayName} ({pen.slug})
+                                  </option>
+                                ))}
+                              </select>
+                              {isSaving && <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>...</span>}
+                            </div>
+                          ) : (
+                            <span style={{ color: 'var(--accent)', fontSize: '0.72rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                              ★ Dedicated Soul
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* Right Column: Persona Details & Editor */}
+        <section style={cardPanelStyle}>
+          {selectedAgent ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(34,211,238,0.1)', paddingBottom: 8 }}>
+                <div>
+                  <h4 style={{ ...subSectionTitle, margin: 0, color: 'var(--secondary)' }}>
+                    {selectedAgent.label} Soul
+                  </h4>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    Type: {selectedAgent.domain === 'books' ? `Pen overrides (assigned: ${mapping[selectedAgent.id] || 'default'})` : 'Dedicated Agent Soul'}
+                  </span>
+                </div>
+                <button 
+                  onClick={handleRefreshProfile} 
+                  disabled={refreshing || profileLoading || editingSoul || editingLessons || editingConfig || (selectedAgent.domain === 'books' && !mapping[selectedAgent.id])} 
+                  style={btnPrimary(refreshing)} 
+                  title="Regenerate/refresh agent soul via Meta"
+                >
+                  <RotateCcw size={12} /> {refreshing ? 'Regenerating…' : 'Regen Soul'}
+                </button>
+              </div>
+ 
+              {profileLoading ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', padding: 12 }}>Loading soul files...</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {selectedAgent.domain === 'books' && !mapping[selectedAgent.id] ? (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontStyle: 'italic', padding: 12 }}>
+                      No Pen is assigned to this books agent. Assign a Pen in the dropdown to view and edit its soul files.
+                    </div>
+                  ) : (
+                    <>
+                      <EditableCard
+                        title="SOUL.md"
+                        body={profile?.soul}
+                        placeholder="No SOUL.md generated yet. Run Auto-Evaluate or click 'Regen Soul' to have Meta write a dedicated style persona."
+                        editing={editingSoul}
+                        draft={draftSoul}
+                        saving={saving}
+                        onDraftChange={setDraftSoul}
+                        onBeginEdit={() => beginEdit('soul')}
+                        onCancel={() => cancelEdit('soul')}
+                        onSave={() => saveEdit('soul')}
+                      />
+ 
+                      <EditableCard
+                        title="LESSONS.md"
+                        body={profile?.lessons}
+                        placeholder="No LESSONS.md generated yet."
+                        editing={editingLessons}
+                        draft={draftLessons}
+                        saving={saving}
+                        onDraftChange={setDraftLessons}
+                        onBeginEdit={() => beginEdit('lessons')}
+                        onCancel={() => cancelEdit('lessons')}
+                        onSave={() => saveEdit('lessons')}
+                      />
+
+                      <EditableCard
+                        title="CONFIG.json (Model & Parameters)"
+                        body={profile?.config}
+                        placeholder="No CONFIG.json generated yet."
+                        editing={editingConfig}
+                        draft={draftConfig}
+                        saving={saving}
+                        onDraftChange={setDraftConfig}
+                        onBeginEdit={() => beginEdit('config')}
+                        onCancel={() => cancelEdit('config')}
+                        onSave={() => saveEdit('config')}
+                      />
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ color: 'var(--text-muted)', fontStyle: 'italic', padding: 12 }}>
+              Select an agent from the table to configure its soul.
+            </div>
+          )}
+        </section>
+      </div>
+
+      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+        <strong>About Agent Persona Souls:</strong>
+        <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+          <li><strong>Books Domain Agents:</strong> map to external Pen Names (LoRA backings, styles DNA, and lessons). Close-sourced only to books.</li>
+          <li><strong>Other Domains (Code, Email, Hacking, Meta):</strong> use dedicated agent-specific soul files (<code>workspace/souls/agents/ID/SOUL.md</code>). If missing, Meta automatically evaluates their description/roles and writes a custom dedicated persona.</li>
+        </ul>
       </div>
     </div>
   );

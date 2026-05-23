@@ -487,7 +487,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
           const pen = obj?.metadata?.pen;
           if (typeof pen !== 'string' || !pen.trim()) untaggedPen++;
         }
-        const hits = scanLeaks(good);
+        const hits = scanLeaks(good, WORKSPACE_DIR, slug);
         if (hits.length === 0) {
           clean++;
         } else {
@@ -782,7 +782,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
         b.total++;
 
         const narration = stripDialogue(good);
-        const hits = scanLeaks(good);
+        const hits = scanLeaks(good, WORKSPACE_DIR, slug);
         const fpLeak = firstPersonRe.test(narration);
         const hasLeak = hits.length > 0 || fpLeak;
         if (hasLeak) b.leakCount++;
@@ -1110,7 +1110,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
           continue;
         }
         // 1. Hard regex leaks (existing logic)
-        const hits = scanLeaks(good);
+        const hits = scanLeaks(good, WORKSPACE_DIR, slug);
         if (hits.length > 0) {
           removed++;
           removedByReason.leak++;
@@ -1321,7 +1321,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     isCheckingAuth = true;
 
     const checkAnthropic = new Promise<boolean>((resolve) => {
-      exec('docker exec perry-worker claude auth status', (err, stdout, stderr) => {
+      exec('docker exec perry-worker claude auth status', { timeout: 10000 }, (err, stdout, stderr) => {
         if (err) {
           resolve(false);
           return;
@@ -1336,7 +1336,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     });
 
     const checkAntigrav = new Promise<boolean>((resolve) => {
-      exec('docker exec perry-worker gemini -p "ping" --skip-trust', (err, stdout, stderr) => {
+      exec('docker exec perry-worker gemini -p "ping" --skip-trust', { timeout: 10000 }, (err, stdout, stderr) => {
         if (err) {
           resolve(false);
           return;
@@ -1346,7 +1346,7 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
     });
 
     const checkCodex = new Promise<boolean>((resolve) => {
-      exec('docker exec perry-worker codex login status', (err, stdout, stderr) => {
+      exec('docker exec perry-worker codex login status', { timeout: 10000 }, (err, stdout, stderr) => {
         if (err) {
           resolve(false);
           return;
@@ -2211,6 +2211,36 @@ export function setupSystemRoutes(aiRouter: AIRouter, projectEngine: ProjectEngi
       }
       log.info('Step routing overrides updated', { overrides });
       res.json({ ok: true, effective: aiRouter.getRoutingTable() });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── GPU Concurrency Limits ──────────────────────────────────────────
+  // GET /concurrency/gpu — read active GPU concurrency limit
+  // PUT /concurrency/gpu — update active GPU concurrency limit
+  router.get('/concurrency/gpu', (_req, res) => {
+    try {
+      const limit = aiRouter.config.get<number>('gpu.concurrencyLimit', 1);
+      res.json({ limit });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  router.put('/concurrency/gpu', (req, res) => {
+    try {
+      const limit = parseInt(req.body.limit, 10);
+      if (isNaN(limit) || limit < 1 || limit > 5) {
+        return res.status(400).json({ error: 'limit must be an integer between 1 and 5' });
+      }
+      aiRouter.config.set('gpu.concurrencyLimit', limit);
+      // Notify ProjectEngine so it can process queued tasks immediately if limit increased
+      if (typeof (projectEngine as any).processGpuQueue === 'function') {
+        (projectEngine as any).processGpuQueue();
+      }
+      log.info('GPU concurrency limit updated', { limit });
+      res.json({ ok: true, limit });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

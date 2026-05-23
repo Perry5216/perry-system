@@ -45,7 +45,19 @@ const formatUptime = (sec?: number) => {
   return `${m}m`;
 };
 
-export function TopStatusBar({ activePen }: { activePen?: string }) {
+export function TopStatusBar({
+  activePen,
+  agentsCount = 0,
+  domainsCount = 0,
+  activeCount = 0,
+  doneCount = 0,
+}: {
+  activePen?: string;
+  agentsCount?: number;
+  domainsCount?: number;
+  activeCount?: number;
+  doneCount?: number;
+}) {
   const [health, setHealth] = useState<SystemHealth>({
     perry: 'unknown', writer: 'unknown', librarian: 'unknown', db: 'unknown',
   });
@@ -147,20 +159,42 @@ export function TopStatusBar({ activePen }: { activePen?: string }) {
         </span>
       </div>
 
-      {/* Centre: container health pills */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 16,
-        background: 'rgba(0, 0, 0, 0.25)',
-        padding: '3px 12px',
-        borderRadius: 4,
-        border: '1px solid rgba(255, 255, 255, 0.03)',
-      }}>
-        <HealthPill name="perry" status={health.perry} />
-        <HealthPill name="writer" status={health.writer} />
-        <HealthPill name="librarian" status={health.librarian} />
-        <HealthPill name="db" status={health.db} />
+      {/* Centre: container health pills + telemetry stats */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 16,
+          background: 'rgba(0, 0, 0, 0.25)',
+          padding: '0 12px',
+          height: 28,
+          boxSizing: 'border-box',
+          borderRadius: 4,
+          border: '1px solid rgba(255, 255, 255, 0.03)',
+        }}>
+          <HealthPill name="perry" status={health.perry} />
+          <HealthPill name="writer" status={health.writer} />
+          <HealthPill name="librarian" status={health.librarian} />
+          <HealthPill name="db" status={health.db} />
+        </div>
+
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 20,
+          background: 'rgba(0, 0, 0, 0.25)',
+          padding: '0 12px',
+          height: 28,
+          boxSizing: 'border-box',
+          borderRadius: 4,
+          border: '1px solid rgba(255, 255, 255, 0.03)',
+          fontFamily: 'var(--font-mono)',
+        }}>
+          <TopBarStat label="AGENTS" value={agentsCount} />
+          <TopBarStat label="DOMAINS" value={domainsCount} />
+          <TopBarStat label="ACTIVE" value={activeCount} valueColor="#a855f7" hasDot={true} dotColor="#a855f7" />
+          <TopBarStat label="DONE" value={doneCount} valueColor="#10b981" />
+        </div>
       </div>
 
       {/* Right: active domain switcher + active pen + uptime + audio toggle */}
@@ -238,8 +272,53 @@ function HealthPill({ name, status }: { name: string; status: Health }) {
         textTransform: 'uppercase',
         fontWeight: 600,
         color: status === 'down' ? 'var(--danger)' : status === 'warn' ? 'var(--warning)' : 'var(--text-muted)',
+        lineHeight: 1,
       }}>
         {name}
+      </span>
+    </div>
+  );
+}
+
+function TopBarStat({
+  label,
+  value,
+  valueColor = 'white',
+  hasDot = false,
+  dotColor = 'var(--accent)'
+}: {
+  label: string;
+  value: number;
+  valueColor?: string;
+  hasDot?: boolean;
+  dotColor?: string;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 46, justifyContent: 'center' }}>
+      <span style={{ fontSize: '0.55rem', color: 'var(--text-dim)', fontWeight: 500, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 1, lineHeight: 1 }}>
+        {label}
+      </span>
+      <span style={{ fontSize: '0.82rem', color: valueColor, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'monospace', lineHeight: 1 }}>
+        {hasDot && (
+          <>
+            <style>{`
+              @keyframes topBarActivePulse {
+                0%, 100% { opacity: 0.5; transform: scale(0.9); }
+                50%      { opacity: 1; transform: scale(1.3); }
+              }
+            `}</style>
+            <span style={{
+              width: 4,
+              height: 4,
+              borderRadius: '50%',
+              background: dotColor,
+              boxShadow: `0 0 6px ${dotColor}`,
+              display: 'inline-block',
+              animation: value > 0 ? 'topBarActivePulse 1.5s infinite ease-in-out' : 'none'
+            }} />
+          </>
+        )}
+        {value}
       </span>
     </div>
   );

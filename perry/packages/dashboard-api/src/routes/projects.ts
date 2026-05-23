@@ -3,7 +3,8 @@
  */
 
 import { Router } from 'express';
-import { ProjectEngine } from '@perry/projects';
+import { join } from 'path';
+import { ProjectEngine, DomainRegistry } from '@perry/projects';
 import { Logger } from '@perry/core';
 
 export function setupProjectRoutes(engine: ProjectEngine, log: Logger) {
@@ -171,6 +172,107 @@ export function setupProjectRoutes(engine: ProjectEngine, log: Logger) {
       res.json({ success: true });
     } catch (err: any) {
       log.error('Failed to clear director chat', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post('/:id/generate-template', async (req, res) => {
+    const project = engine.getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Not found' });
+
+    try {
+      const workspaceDir = engine.getStateStore().getWorkspaceDir();
+      const domainRegistry = new DomainRegistry({ workspaceDir, log });
+      
+      const { projectTypeDomain } = await import('@perry/core');
+      const domainId = projectTypeDomain(project.type);
+      
+      const kebabName = project.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      const templateType = `custom-${kebabName}`;
+      
+      const newPipeline = {
+        id: templateType,
+        name: `${project.title} (Generated)`,
+        description: project.description || `Generated template based on project: ${project.title}`,
+        workType: project.workType || 'books',
+        steps: project.steps.map(s => ({
+          label: s.label,
+          phase: s.phase,
+          taskType: s.taskType,
+          prompt: s.promptOverride || s.prompt,
+        }))
+      };
+
+      const configPath = join(workspaceDir, '.config', 'custom_pipelines.json');
+      let pipelines: any[] = [];
+      const fs = await import('fs');
+      if (fs.existsSync(configPath)) {
+        try {
+          pipelines = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        } catch (e) {
+          log.error('Failed to parse custom_pipelines.json', { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      
+      pipelines = pipelines.filter((p: any) => p.id !== templateType);
+      pipelines.push(newPipeline);
+      
+      const configDir = join(configPath, '..');
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+      fs.writeFileSync(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
+
+      const skillName = `template-builder-${kebabName}`;
+      const skillDir = join(workspaceDir, 'skills-installed', domainId);
+      if (!fs.existsSync(skillDir)) {
+        fs.mkdirSync(skillDir, { recursive: true });
+      }
+      const skillPath = join(skillDir, `${skillName}.md`);
+      const now = new Date().toISOString();
+      const skillContent = `---
+name: ${skillName}
+service: ${domainId}
+description: Skill dedicated to generating and maintaining the custom template ${templateType} (${project.title}).
+proposed_at: ${now}
+promoted_at: ${now}
+proposed_by: template-evolution
+status: installed
+applies_when:
+  kind: template-builder
+  fingerprint: ${templateType}
+---
+
+# Template Builder Skill: ${project.title}
+
+This skill belongs to the domain ${domainId} and is dedicated to generating and running templates for this domain.
+When this skill is activated:
+- Utilize the structure and prompt strategies defined in the ${project.title} template.
+- Refine steps, parameters, and prompts to align with domain guidelines.
+- Self-improve the template over time based on execution observations.
+`;
+      fs.writeFileSync(skillPath, skillContent, 'utf8');
+
+      const domain = domainRegistry.get(domainId);
+      if (domain) {
+        const defaultSkills = domain.defaultSkills || [];
+        const skillExists = defaultSkills.some(s => s.service === domainId && s.name === skillName);
+        if (!skillExists) {
+          const updatedSkills = [...defaultSkills, { service: domainId, name: skillName }];
+          domainRegistry.update(domainId, { defaultSkills: updatedSkills });
+          log.info(`Assigned skill ${domainId}/${skillName} to domain ${domainId}`);
+        }
+      }
+
+      res.json({
+        success: true,
+        templateType,
+        templateName: newPipeline.name,
+        domainId,
+        skillName
+      });
+    } catch (err: any) {
+      log.error('Failed to generate template from project', { projectId: req.params.id, error: err.message });
       res.status(500).json({ error: err.message });
     }
   });

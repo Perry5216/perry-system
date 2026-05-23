@@ -631,7 +631,6 @@ export function App() {
   const [evolvePipelineGoal, setEvolvePipelineGoal] = useState('');
   const [evolveWorkersMode, setEvolveWorkersMode] = useState('smart');
   const [isEvolvingTemplate, setIsEvolvingTemplate] = useState(false);
-  const [adminIntelligentProjectId, setAdminIntelligentProjectId] = useState<string>('');
   const [adminIntelligentWorkType, setAdminIntelligentWorkType] = useState<string>('dnd');
   const [isIntelligentEnableSearch, setIntelligentEnableSearch] = useState<boolean>(true);
   const [isIntelligentlyEvolving, setIsIntelligentlyEvolving] = useState<boolean>(false);
@@ -1540,14 +1539,7 @@ export function App() {
   };
 
   const handleIntelligentEvolve = async () => {
-    if (!adminIntelligentProjectId) {
-      alert('Please select a target project.');
-      return;
-    }
-    const targetProject = projects.find(p => p.id === adminIntelligentProjectId);
-    if (!targetProject) return;
-
-    if (!confirm(`Do you want to intelligently evolve the project "${targetProject.title}" into a custom template for the "${adminIntelligentWorkType}" domain? This will evaluate the project, perform web research for domain best-practices, and generate optimized template steps.`)) return;
+    if (!confirm(`Do you want to intelligently create a custom template for the "${adminIntelligentWorkType}" domain? This will perform web research for domain best-practices and generate optimized template steps.`)) return;
 
     setIsIntelligentlyEvolving(true);
     try {
@@ -1555,16 +1547,15 @@ export function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          projectId: adminIntelligentProjectId,
           workType: adminIntelligentWorkType,
           enableSearch: isIntelligentEnableSearch,
           workersMode: 'smart'
         })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to intelligently evolve template');
+      if (!res.ok) throw new Error(data.error || 'Failed to intelligently generate template');
 
-      alert(`Successfully evolved project with intelligent search!\nCreated template: ${data.templateName}\nAssigned skill "${data.skillName}" to the ${data.domainId} domain.`);
+      alert(`Successfully created template: ${data.templateName}!\nAssigned skill "${data.skillName}" to the ${data.domainId} domain.`);
 
       // Refresh templates
       const templatesRes = await fetch(`${API_BASE}/system/templates`);
@@ -1572,9 +1563,8 @@ export function App() {
         const tData = await templatesRes.json();
         setTemplates(tData);
       }
-      setAdminIntelligentProjectId('');
     } catch (err: any) {
-      alert(`Error during intelligent template evolution: ${err.message}`);
+      alert(`Error during intelligent template generation: ${err.message}`);
     } finally {
       setIsIntelligentlyEvolving(false);
     }
@@ -2050,34 +2040,11 @@ export function App() {
                         <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 600, color: 'white', fontFamily: 'monospace' }}>INTELLIGENT EVOLVE</h4>
                       </div>
                       <p className="text-muted" style={{ fontSize: '0.7rem', margin: 0 }}>
-                        Evaluate a project and generate an optimized custom template for a work type (e.g. D&D) using web search context.
+                        Generate an optimized custom template for a work type (e.g. D&D) using web search context.
                       </p>
                     </div>
                     
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: 'auto' }}>
-                      <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT TARGET PROJECT</label>
-                      <select
-                        value={adminIntelligentProjectId}
-                        onChange={(e) => setAdminIntelligentProjectId(e.target.value)}
-                        style={{
-                          width: '100%',
-                          padding: '0.4rem',
-                          borderRadius: '4px',
-                          border: '1px solid var(--panel-border)',
-                          background: 'var(--bg-main)',
-                          color: 'white',
-                          fontSize: '0.75rem',
-                          outline: 'none'
-                        }}
-                      >
-                        <option value="">-- Choose a project --</option>
-                        {projects
-                          .filter(p => p.type !== 'system-evolution' && p.type !== 'template-generator')
-                          .map(p => (
-                            <option key={p.id} value={p.id}>{p.title} ({p.type})</option>
-                          ))}
-                      </select>
-
                       <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT WORK TYPE</label>
                       <select
                         value={adminIntelligentWorkType}
@@ -2117,7 +2084,7 @@ export function App() {
                       <button
                         className="btn btn-primary"
                         onClick={handleIntelligentEvolve}
-                        disabled={!adminIntelligentProjectId || isIntelligentlyEvolving}
+                        disabled={isIntelligentlyEvolving}
                         style={{
                           fontSize: '0.75rem',
                           padding: '0.5rem',

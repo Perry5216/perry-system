@@ -25,6 +25,8 @@
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import type { AgentDefinition, AgentInvocation, EventBus, Logger, McpClientService } from '@perry/core';
 import { compressTools } from '@perry/core';
 import type { AIRouter } from '@perry/ai';
@@ -82,6 +84,20 @@ export class AgentRunner {
   }): Promise<AgentInvocation> {
     const { agent, sessionId, input, parentInvocationId, penSlug, modelBindingOverride } = opts;
 
+    // Resolve the active pen slug (soul) for this agent
+    let activePenSlug = penSlug;
+    try {
+      const rawMapping = this.stateStore.getMeta('agent_souls');
+      if (rawMapping) {
+        const mapping = JSON.parse(rawMapping);
+        if (mapping[agent.id]) {
+          activePenSlug = mapping[agent.id];
+        }
+      }
+    } catch (err: any) {
+      this.log.warn('Failed to parse agent_souls meta', { error: err.message });
+    }
+
     // 1. Create the invocation row up front so even crashes leave a record.
     const invocationId = this.stateStore.createAgentInvocation({
       sessionId, agentId: agent.id, domain: agent.domain,
@@ -93,14 +109,47 @@ export class AgentRunner {
 
     try {
       // 2. Resolve which model + provider this invocation uses.
-      const binding = this.resolveBinding(agent, penSlug, modelBindingOverride);
+      const binding = this.resolveBinding(agent, activePenSlug, modelBindingOverride);
       this.log.info('agent invocation starting', {
         invocationId, agentId: agent.id, domain: agent.domain,
         provider: binding.provider, model: binding.model || '<default>',
       });
 
       // 3. Render the system prompt (lightweight {{var}} substitution).
-      const systemPrompt = this.renderPrompt(agent.systemPrompt, { penSlug });
+      let systemPrompt = this.renderPrompt(agent.systemPrompt, { penSlug: activePenSlug });
+      if (agent.domain === 'books' && activePenSlug) {
+        try {
+          const workspaceDir = this.stateStore.getWorkspaceDir();
+          const targetDir = join(workspaceDir, 'pens', activePenSlug);
+          
+          const soulPath = join(targetDir, 'SOUL.md');
+          if (existsSync(soulPath)) {
+            systemPrompt += `\n\n## Pen Identity (${activePenSlug})\n` + readFileSync(soulPath, 'utf-8');
+          }
+          const lessonsPath = join(targetDir, 'LESSONS.md');
+          if (existsSync(lessonsPath)) {
+            systemPrompt += `\n\n## Pen Lessons (${activePenSlug})\n` + readFileSync(lessonsPath, 'utf-8');
+          }
+        } catch (err: any) {
+          this.log.warn('Failed to load pen profile files for runner', { penSlug: activePenSlug, error: err.message });
+        }
+      } else if (agent.domain !== 'books') {
+        try {
+          const workspaceDir = this.stateStore.getWorkspaceDir();
+          const targetDir = join(workspaceDir, 'souls', 'agents', agent.id);
+          
+          const soulPath = join(targetDir, 'SOUL.md');
+          if (existsSync(soulPath)) {
+            systemPrompt += `\n\n## Agent Persona Soul (${agent.id})\n` + readFileSync(soulPath, 'utf-8');
+          }
+          const lessonsPath = join(targetDir, 'LESSONS.md');
+          if (existsSync(lessonsPath)) {
+            systemPrompt += `\n\n## Agent Lessons (${agent.id})\n` + readFileSync(lessonsPath, 'utf-8');
+          }
+        } catch (err: any) {
+          this.log.warn('Failed to load agent soul files for runner', { agentId: agent.id, error: err.message });
+        }
+      }
 
       // 4. Build the chat sequence: optional history + user input.
       const messages: ChatMessage[] = [];
@@ -147,7 +196,7 @@ export class AgentRunner {
           systemPrompt,
           userInput: input,
           history: opts.history,
-          penSlug,
+          penSlug: activePenSlug,
           invocationId,
         });
         this.stateStore.updateAgentInvocation(invocationId, {
@@ -158,7 +207,7 @@ export class AgentRunner {
         });
         try {
           this.stateStore.recordAgentTrajectory({
-            invocationId, agentId: agent.id, domain: agent.domain, penSlug,
+            invocationId, agentId: agent.id, domain: agent.domain, penSlug: activePenSlug,
             workerClass: 'workers',
             model: 'workers',
             messages: [...(opts.history || []), { role: 'user', content: input }, { role: 'assistant', content: text }],
@@ -196,14 +245,31 @@ export class AgentRunner {
           throw new Error(`Agent ${agent.id} exceeded ${agent.timeoutMs}ms wall-clock timeout`);
         }
 
+        // Load custom parameters from CONFIG.json if it exists
+        let configParams: any = {};
+        try {
+          const { existsSync, readFileSync } = require('fs');
+          const { join } = require('path');
+          const configPath = join(this.stateStore.getWorkspaceDir(), 'souls', 'agents', agent.id, 'CONFIG.json');
+          if (existsSync(configPath)) {
+            const configJson = JSON.parse(readFileSync(configPath, 'utf-8'));
+            if (configJson && configJson.parameters) {
+              configParams = configJson.parameters;
+            }
+          }
+        } catch {}
+
         response = await this.router.complete({
           provider: binding.provider,
           ...(binding.model ? { model: binding.model } : {}),
           system: systemPrompt,
           messages,
           tools: tools.length > 0 ? tools : undefined,
-          maxTokens: 4_096,
-          temperature: 0.7,
+          maxTokens: configParams.maxTokens || 4_096,
+          temperature: typeof configParams.temperature === 'number' ? configParams.temperature : 0.7,
+          ...(typeof configParams.topP === 'number' ? { topP: configParams.topP } : {}),
+          ...(typeof configParams.topK === 'number' ? { topK: configParams.topK } : {}),
+          ...(typeof configParams.repeatPenalty === 'number' ? { repeatPenalty: configParams.repeatPenalty } : {}),
           ...(agent.outputFormat === 'json' ? { format: agent.jsonSchema || 'json' } : {}),
         });
 
@@ -385,6 +451,32 @@ export class AgentRunner {
       }
       return resolved;
     }
+
+    // 2. Check if there is a meta-assigned CONFIG.json on disk for this agent
+    try {
+      const { existsSync, readFileSync } = require('fs');
+      const { join } = require('path');
+      const configPath = join(this.stateStore.getWorkspaceDir(), 'souls', 'agents', agent.id, 'CONFIG.json');
+      if (existsSync(configPath)) {
+        const configJson = JSON.parse(readFileSync(configPath, 'utf-8'));
+        if (configJson && configJson.modelBinding) {
+          const resolved = {
+            provider: configJson.modelBinding.provider || agent.modelBinding.provider,
+            model: configJson.modelBinding.model ?? agent.modelBinding.model,
+          };
+          const ALLOWED = new Set(['writer', 'librarian', 'researcher', 'perry-agent', 'workers']);
+          if (ALLOWED.has(resolved.provider)) {
+            const PROVIDER_ID_ALIAS: Record<string, string> = {
+              writer: 'ollama',
+            };
+            if (PROVIDER_ID_ALIAS[resolved.provider]) {
+              resolved.provider = PROVIDER_ID_ALIAS[resolved.provider];
+            }
+            return resolved;
+          }
+        }
+      }
+    } catch {}
 
     if (agent.id === 'meta.wife-responder') {
       const wifeModeEnabled = this.router.vault.getSync('whatsapp_wife_mode_enabled') !== 'false';

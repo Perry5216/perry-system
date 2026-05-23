@@ -11,6 +11,7 @@
  *   - Cron (count summary; link out to dedicated tab)
  */
 import { useEffect, useState } from 'react';
+import { Heart, Cpu, ExternalLink, Activity, Server } from 'lucide-react';
 import { PanelHeader } from './PanelHeader';
 
 interface GatewayStatus {
@@ -31,7 +32,26 @@ interface PluginInfo {
 }
 interface SearchBackend { id: string; configured: boolean }
 
-export function IntegrationsPanel() {
+interface GpuStatus {
+  label: string;
+  endpoint: string;
+  model: string | null;
+  contextUsed: number;
+  contextLimit: number;
+  percentFull: number;
+  headroom: number;
+  status: 'idle' | 'green' | 'yellow' | 'red' | 'critical';
+  hallucinationRisk: boolean;
+  lastPolled: string;
+}
+
+interface ContextStats {
+  gpus: GpuStatus[];
+  compressionMultiplier: number;
+  globalRisk: 'low' | 'moderate' | 'high';
+}
+
+export function IntegrationsPanel({ contextStats }: { contextStats: ContextStats | null }) {
   return (
     <div style={{ padding: 24, overflowY: 'auto', height: '100%', fontFamily: 'var(--font-mono)' }}>
       <PanelHeader
@@ -41,6 +61,8 @@ export function IntegrationsPanel() {
       />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16, marginTop: 16 }}>
+        <HardwareStatsCard contextStats={contextStats} />
+        <SponsorsCard />
         <GatewaysCard />
         <VoiceCard />
         <SearchCard />
@@ -51,6 +73,264 @@ export function IntegrationsPanel() {
     </div>
   );
 }
+
+function HardwareStatsCard({ contextStats }: { contextStats: ContextStats | null }) {
+  if (!contextStats) {
+    return (
+      <Card title="Local Hardware & GPU Stats" eyebrow="Telemetry">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 0', color: 'var(--text-muted)' }}>
+          <Activity size={16} className="animate-spin" />
+          <span>Polling hardware sensors...</span>
+        </div>
+      </Card>
+    );
+  }
+
+  const { gpus, compressionMultiplier, globalRisk } = contextStats;
+
+  const riskColor = globalRisk === 'high' ? '#ef4444' : globalRisk === 'moderate' ? '#f59e0b' : '#10b981';
+  const riskBg = globalRisk === 'high' ? 'rgba(239,68,68,0.15)' : globalRisk === 'moderate' ? 'rgba(245,158,11,0.15)' : 'rgba(16,185,129,0.15)';
+  const riskText = globalRisk === 'high' ? 'HIGH VRAM RISK' : globalRisk === 'moderate' ? 'MODERATE LOAD' : 'SYSTEM HEALTHY';
+
+  return (
+    <Card title="Local Hardware & GPU Stats" eyebrow={`${gpus.length} active gpu(s)`}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '8px 12px',
+        marginBottom: 12,
+        background: riskBg,
+        border: `1px solid rgba(${globalRisk === 'high' ? '239,68,68' : globalRisk === 'moderate' ? '245,158,11' : '16,185,129'}, 0.25)`,
+        borderRadius: 6,
+        transition: 'all 0.3s ease'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Activity size={14} style={{ color: riskColor }} />
+          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: riskColor, letterSpacing: '0.05em' }}>
+            {riskText}
+          </span>
+        </div>
+        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span>Compression:</span>
+          <span style={{ color: 'var(--secondary)', fontWeight: 600 }}>{compressionMultiplier.toFixed(1)}x</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {gpus.map((gpu) => {
+          const isCritical = gpu.percentFull > 90;
+          const isWarning = gpu.percentFull > 70 && gpu.percentFull <= 90;
+          const barColor = isCritical ? '#ef4444' : isWarning ? '#fbbf24' : '#10b981';
+
+          return (
+            <div key={gpu.label} style={{
+              padding: 10,
+              background: 'rgba(0,0,0,0.2)',
+              border: `1px solid ${gpu.hallucinationRisk ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.04)'}`,
+              borderRadius: 6,
+              position: 'relative',
+              overflow: 'hidden'
+            }}>
+              {gpu.hallucinationRisk && (
+                <div style={{
+                  position: 'absolute', top: 0, left: 0, right: 0, height: 2,
+                  background: 'linear-gradient(90deg, #ef4444, transparent, #ef4444)',
+                  opacity: 0.8
+                }} />
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Cpu size={14} style={{ color: barColor }} />
+                  <span style={{ fontWeight: 600, fontSize: '0.8rem', color: 'var(--text-main)' }}>{gpu.label}</span>
+                </div>
+                <span style={{
+                  fontSize: '0.65rem',
+                  padding: '1px 6px',
+                  borderRadius: 10,
+                  fontWeight: 600,
+                  background: gpu.status === 'idle' ? 'rgba(255,255,255,0.06)' : 'rgba(34,211,238,0.1)',
+                  color: gpu.status === 'idle' ? 'var(--text-muted)' : 'var(--secondary)'
+                }}>
+                  {gpu.status === 'idle' ? 'IDLE' : gpu.model ? gpu.model.split('/').pop()?.split(':').shift() : 'ACTIVE'}
+                </span>
+              </div>
+
+              <div style={{ margin: '8px 0 4px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: 2 }}>
+                  <span>VRAM Context: {gpu.percentFull}%</span>
+                  <span>{(gpu.contextUsed / 1024).toFixed(1)}K / {(gpu.contextLimit / 1024).toFixed(0)}K ctx</span>
+                </div>
+                <div style={{ height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{
+                    width: `${gpu.percentFull}%`,
+                    height: '100%',
+                    background: `linear-gradient(90deg, ${barColor}cc, ${barColor})`,
+                    borderRadius: 3,
+                    boxShadow: `0 0 6px ${barColor}44`,
+                    transition: 'width 1s ease'
+                  }} />
+                </div>
+              </div>
+
+              {gpu.hallucinationRisk && (
+                <div style={{ fontSize: '0.65rem', color: '#fca5a5', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#ef4444', animation: 'pulse 1.5s infinite' }} />
+                  <span>VRAM Threshold Exceeded — High Hallucination Risk</span>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <Help>
+        Telemetry pulled dynamically from local Ollama instances. System self-limits concurrency when context fills up to avoid out-of-memory failure.
+      </Help>
+    </Card>
+  );
+}
+
+function SponsorsCard() {
+  return (
+    <Card title="Sponsors & Partner Integrations" eyebrow="Community Support">
+      <div style={{ marginBottom: 12 }}>
+        <a
+          href="https://github.com/sponsors/perry-system"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
+            padding: '10px 16px',
+            borderRadius: 6,
+            background: 'linear-gradient(135deg, #db2777 0%, #7c3aed 100%)',
+            color: '#ffffff',
+            fontWeight: 600,
+            textDecoration: 'none',
+            fontSize: '0.85rem',
+            border: '1px solid rgba(255,255,255,0.1)',
+            boxShadow: '0 4px 12px rgba(124, 58, 237, 0.25)',
+            transition: 'all 0.25s ease'
+          }}
+          onMouseEnter={(e: any) => {
+            e.currentTarget.style.transform = 'translateY(-1px)';
+            e.currentTarget.style.boxShadow = '0 6px 16px rgba(124, 58, 237, 0.4)';
+          }}
+          onMouseLeave={(e: any) => {
+            e.currentTarget.style.transform = 'translateY(0)';
+            e.currentTarget.style.boxShadow = '0 4px 12px rgba(124, 58, 237, 0.25)';
+          }}
+        >
+          <Heart size={16} fill="currentColor" style={{ color: '#ffffff' }} />
+          <span>Sponsor Perry on GitHub</span>
+          <ExternalLink size={12} />
+        </a>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>Support Local Development Hosting</label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 4 }}>
+          <a
+            href="https://runpod.io?ref=perry"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              ...affiliateBtnStyle,
+              background: 'rgba(244,63,94,0.06)',
+              borderColor: 'rgba(244,63,94,0.2)',
+              color: '#f43f5e'
+            }}
+            onMouseEnter={(e: any) => {
+              e.currentTarget.style.background = 'rgba(244,63,94,0.1)';
+              e.currentTarget.style.borderColor = 'rgba(244,63,94,0.4)';
+              e.currentTarget.style.boxShadow = '0 0 10px rgba(244,63,94,0.15)';
+            }}
+            onMouseLeave={(e: any) => {
+              e.currentTarget.style.background = 'rgba(244,63,94,0.06)';
+              e.currentTarget.style.borderColor = 'rgba(244,63,94,0.2)';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
+          >
+            <Server size={12} />
+            <span>RunPod GPU</span>
+            <ExternalLink size={10} />
+          </a>
+          <a
+            href="https://lambdalabs.com?ref=perry"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              ...affiliateBtnStyle,
+              background: 'rgba(168,85,247,0.06)',
+              borderColor: 'rgba(168,85,247,0.2)',
+              color: '#a855f7'
+            }}
+            onMouseEnter={(e: any) => {
+              e.currentTarget.style.background = 'rgba(168,85,247,0.1)';
+              e.currentTarget.style.borderColor = 'rgba(168,85,247,0.4)';
+              e.currentTarget.style.boxShadow = '0 0 10px rgba(168,85,247,0.15)';
+            }}
+            onMouseLeave={(e: any) => {
+              e.currentTarget.style.background = 'rgba(168,85,247,0.06)';
+              e.currentTarget.style.borderColor = 'rgba(168,85,247,0.2)';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
+          >
+            <Server size={12} />
+            <span>Lambda Labs</span>
+            <ExternalLink size={10} />
+          </a>
+        </div>
+      </div>
+
+      <div>
+        <label style={lbl}>Ecosystem Partners</label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+          <span style={{ ...partnerChipStyle, color: '#f59e0b', borderColor: 'rgba(245,158,11,0.25)', background: 'rgba(245,158,11,0.06)' }}>
+            Ollama substrate
+          </span>
+          <span style={{ ...partnerChipStyle, color: '#06b6d4', borderColor: 'rgba(6,182,212,0.25)', background: 'rgba(6,182,212,0.06)' }}>
+            Unbounded AI
+          </span>
+          <span style={{ ...partnerChipStyle, color: '#38bdf8', borderColor: 'rgba(56,189,248,0.25)', background: 'rgba(56,189,248,0.06)' }}>
+            OpenRouter unified
+          </span>
+        </div>
+      </div>
+
+      <Help>
+        Perry is open-source. Supporting our cloud partners and GitHub sponsors keeps development funded, enabling better local models and features.
+      </Help>
+    </Card>
+  );
+}
+
+const affiliateBtnStyle: any = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 6,
+  padding: '6px 8px',
+  borderRadius: 4,
+  fontSize: '0.72rem',
+  fontWeight: 600,
+  textDecoration: 'none',
+  border: '1px solid',
+  transition: 'all 0.25s ease'
+};
+
+const partnerChipStyle: any = {
+  padding: '2px 8px',
+  fontSize: '0.7rem',
+  fontWeight: 600,
+  border: '1px solid',
+  borderRadius: 12,
+  letterSpacing: '0.02em'
+};
 
 // ─── Gateways ────────────────────────────────────────────────────────────
 

@@ -46,6 +46,14 @@ export interface DomainDefinition {
   allowedMcpServers?: string[];
   /** Selected base model for LLM operations in this domain. */
   baseModel?: string;
+  /** Model parameters configuration override for this domain. */
+  modelParameters?: {
+    temperature?: number;
+    maxTokens?: number;
+    repeatPenalty?: number;
+    topP?: number;
+    topK?: number;
+  };
   /** Whether the domain is a built-in (locked from deletion). */
   builtin: boolean;
   createdAt: string;
@@ -66,6 +74,76 @@ const BUILTIN_CODE: DomainDefinition = {
   updatedAt: '2026-05-13T00:00:00.000Z',
 };
 
+const BUILTIN_BOOKS: DomainDefinition = {
+  id: 'books',
+  label: 'Books',
+  description: 'Novel-writing pipeline with per-pen-name fine-tuning, scout, audit, and revision.',
+  color: '#22d3ee',
+  icon: 'book-open',
+  dashboardPanels: ['projects', 'self-learning', 'trajectories', 'analytics', 'models'],
+  defaultSkills: [],
+  baseModel: 'workers',
+  builtin: true,
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+};
+
+const BUILTIN_DND: DomainDefinition = {
+  id: 'dnd',
+  label: 'D&D',
+  description: 'D&D campaign planning, session preparation, and character design.',
+  color: '#ef4444',
+  icon: 'swords',
+  dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultSkills: [],
+  baseModel: 'workers',
+  builtin: true,
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+};
+
+const BUILTIN_META: DomainDefinition = {
+  id: 'meta',
+  label: 'Meta',
+  description: 'Meta/admin domain dedicated to system evolution and generating project templates.',
+  color: '#e2e8f0',
+  icon: 'settings',
+  dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultSkills: [],
+  baseModel: 'workers',
+  builtin: true,
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+};
+
+const BUILTIN_EMAIL: DomainDefinition = {
+  id: 'email',
+  label: 'Email',
+  description: 'Email reading, drafting, filtering, and reply-chain planning.',
+  color: '#06b6d4',
+  icon: 'mail',
+  dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultSkills: [],
+  baseModel: 'workers',
+  builtin: true,
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+};
+
+const BUILTIN_HACKING: DomainDefinition = {
+  id: 'hacking',
+  label: 'Hacking',
+  description: 'Security audits, penetration testing, vulnerability reporting, and recon.',
+  color: '#a855f7',
+  icon: 'terminal',
+  dashboardPanels: ['projects', 'self-learning', 'trajectories'],
+  defaultSkills: [],
+  baseModel: 'workers',
+  builtin: true,
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+};
+
 export class DomainRegistry {
   private readonly dir: string;
   private readonly log: Logger;
@@ -78,15 +156,24 @@ export class DomainRegistry {
   }
 
   private ensureBuiltins(): void {
-    const codePath = join(this.dir, 'code.json');
-    if (!existsSync(codePath)) {
-      try {
-        writeFileSync(codePath, JSON.stringify(BUILTIN_CODE, null, 2), 'utf-8');
-        this.log.info('DomainRegistry seeded built-in domain', { id: 'code' });
-      } catch (err: any) {
-        this.log.warn('Failed to seed builtin code domain', { error: err.message });
+    const seed = (def: DomainDefinition) => {
+      const p = join(this.dir, `${def.id}.json`);
+      if (!existsSync(p)) {
+        try {
+          writeFileSync(p, JSON.stringify(def, null, 2), 'utf-8');
+          this.log.info('DomainRegistry seeded built-in domain', { id: def.id });
+        } catch (err: any) {
+          this.log.warn(`Failed to seed builtin ${def.id} domain`, { error: err.message });
+        }
       }
-    }
+    };
+
+    seed(BUILTIN_CODE);
+    seed(BUILTIN_BOOKS);
+    seed(BUILTIN_DND);
+    seed(BUILTIN_META);
+    seed(BUILTIN_EMAIL);
+    seed(BUILTIN_HACKING);
   }
 
   list(): DomainDefinition[] {
@@ -140,6 +227,7 @@ export class DomainRegistry {
       defaultSkills: Array.isArray(input.defaultSkills) ? input.defaultSkills : [],
       allowedMcpServers: Array.isArray(input.allowedMcpServers) ? input.allowedMcpServers : undefined,
       baseModel: input.baseModel ?? 'workers',
+      modelParameters: input.modelParameters,
       builtin: false,
       createdAt: now,
       updatedAt: now,

@@ -49,8 +49,8 @@ export class ProjectEngine {
   public getEventBus(): EventBus { return this.eventBus; }
   /** Expose the shared MCP client (agent routes use it to feed AgentRunner). */
   public getMcpClient(): McpClientService { return this.mcpClient; }
-  /** Expose the prompt builder so the host can inject late-bound services (RagService). */
   public getPromptBuilder(): PromptBuilder { return this.promptBuilder; }
+  private config: ProjectEngineConfig;
   private director: DirectorAgent;
 
   // Per-project execution lock: tracks which projects have an active loop
@@ -60,6 +60,44 @@ export class ProjectEngine {
     promise: Promise<void>;
   }>();
 
+  // Asynchronous Flow Control: global semaphore for GPU lock and execution queue
+  private activeGpuTasks = 0;
+  private gpuWaiters: Array<() => void> = [];
+  private executionQueue: string[] = [];
+  private queueWorkerActive = false;
+
+  private async acquireGlobalLock(waitLog: string): Promise<() => void> {
+    const limit = this.config.config.get<number>('gpu.concurrencyLimit', 1);
+
+    if (this.activeGpuTasks < limit) {
+      this.activeGpuTasks++;
+      return () => this.releaseGlobalLock();
+    }
+
+    return new Promise<() => void>(resolve => {
+      this.log.info(`${waitLog} (Current active: ${this.activeGpuTasks}/${limit}, Queue length: ${this.gpuWaiters.length})`);
+      this.gpuWaiters.push(() => {
+        resolve(() => this.releaseGlobalLock());
+      });
+    });
+  }
+
+  private releaseGlobalLock(): void {
+    this.activeGpuTasks = Math.max(0, this.activeGpuTasks - 1);
+    this.processGpuQueue();
+  }
+
+  public processGpuQueue(): void {
+    const limit = this.config.config.get<number>('gpu.concurrencyLimit', 1);
+    while (this.gpuWaiters.length > 0 && this.activeGpuTasks < limit) {
+      this.activeGpuTasks++;
+      const nextWaiter = this.gpuWaiters.shift();
+      if (nextWaiter) {
+        nextWaiter();
+      }
+    }
+  }
+
   constructor(
     stateStore: StateStore,
     router: AIRouter,
@@ -68,6 +106,7 @@ export class ProjectEngine {
     log: Logger,
     config: ProjectEngineConfig,
   ) {
+    this.config = config;
     this.stateStore = stateStore;
     this.templates = new TemplateRegistry();
     this.promptTemplates = new PromptTemplateService(config.workspaceDir, log.child('templates'));
@@ -123,7 +162,15 @@ export class ProjectEngine {
 
     // Recover orphaned "active" steps and run GC only if maintenance is enabled
     if (config.enableMaintenance) {
-      this.recoverOrphanedSteps();
+      const recoveredIds = this.recoverOrphanedSteps();
+
+      // Auto-resume recovered projects
+      if (recoveredIds && recoveredIds.length > 0) {
+        this.log.info('Auto-resuming recovered projects on boot', { count: recoveredIds.length, ids: recoveredIds });
+        for (const id of recoveredIds) {
+          this.enqueueProject(id);
+        }
+      }
 
       // Run Garbage Collection asynchronously on boot
       setTimeout(() => {
@@ -173,6 +220,8 @@ export class ProjectEngine {
         this.log.warn('Auto-chain handler threw', { error: err.message });
       }
     });
+
+    this.seedPresetsIfEmpty();
   }
 
   async chatWithDirector(projectId: string, message: string): Promise<string> {
@@ -366,6 +415,7 @@ export class ProjectEngine {
       id,
       parentId: input.parentId,
       type: input.type,
+      workType: template.workType,
       title: input.title,
       description: input.description,
       status: 'pending',
@@ -815,9 +865,10 @@ export class ProjectEngine {
    * container restart. Reset them back to "pending" so the pipeline can
    * pick them up on the next execution.
    */
-  private recoverOrphanedSteps(): void {
+  private recoverOrphanedSteps(): string[] {
     const projects = this.stateStore.list();
     let recovered = 0;
+    const recoveredIds: string[] = [];
 
     for (const project of projects) {
       // Bug 6 fix: never re-queue steps on a project the user deliberately
@@ -847,12 +898,14 @@ export class ProjectEngine {
           project.status = 'pending';
         }
         this.stateStore.save(project);
+        recoveredIds.push(project.id);
       }
     }
 
     if (recovered > 0) {
       this.log.info('Orphan recovery complete', { stepsRecovered: recovered });
     }
+    return recoveredIds;
   }
 
   // ── Execution ───────────────────────────────────────────
@@ -892,7 +945,8 @@ export class ProjectEngine {
   }
 
   async executeNextStep(projectId: string): Promise<string | null> {
-    const release = await this.acquireExecutionLock(projectId, 'Waiting for previous execution loop to drain before single step');
+    const releaseGlobal = await this.acquireGlobalLock(`Waiting for global GPU slot before executing single step for ${projectId}`);
+    const releaseProject = await this.acquireExecutionLock(projectId, 'Waiting for previous execution loop to drain before single step');
 
     try {
       const project = this.stateStore.get(projectId);
@@ -908,21 +962,81 @@ export class ProjectEngine {
 
       return await this.stepRunner.execute(project, step);
     } finally {
-      release();
+      releaseProject();
+      releaseGlobal();
     }
   }
 
   /**
-   * Execute all remaining steps in a project sequentially.
+   * Enqueue a project for sequential execution.
    */
-  async executeAll(projectId: string): Promise<void> {
-    // Pre-check (avoids racing into the lock for a non-existent project)
-    if (!this.stateStore.get(projectId)) throw new Error(`Project not found: ${projectId}`);
+  enqueueProject(projectId: string): void {
+    const project = this.stateStore.get(projectId);
+    if (!project) return;
 
-    const release = await this.acquireExecutionLock(projectId, 'Waiting for previous execution loop to drain');
+    if (this.executionQueue.includes(projectId)) {
+      this.log.info('Project already queued for execution', { projectId });
+      return;
+    }
+
+    // Transition project to active immediately so the UI reflects it
+    if (project.status !== 'active') {
+      project.status = 'active';
+      this.stateStore.save(project);
+      this.eventBus.emit('project:started', { projectId });
+    }
+
+    this.executionQueue.push(projectId);
+    this.log.info('Project enqueued for sequential execution', { projectId, queueLength: this.executionQueue.length });
+
+    this.startQueueWorker();
+  }
+
+  private async startQueueWorker(): Promise<void> {
+    if (this.queueWorkerActive) return;
+    this.queueWorkerActive = true;
 
     try {
-      // Re-fetch after acquiring — state may have changed while we waited
+      while (this.executionQueue.length > 0) {
+        const nextId = this.executionQueue[0];
+
+        const project = this.stateStore.get(nextId);
+        if (!project || project.status === 'paused' || project.status === 'completed') {
+          this.executionQueue.shift();
+          continue;
+        }
+
+        this.log.info('Queue worker: starting execution of project', { projectId: nextId });
+
+        try {
+          await this.executeAllInternal(nextId);
+        } catch (err: any) {
+          this.log.error('Queue worker: execution failed for project', { projectId: nextId, error: err.message });
+        } finally {
+          this.executionQueue.shift();
+        }
+      }
+    } finally {
+      this.queueWorkerActive = false;
+    }
+  }
+
+  /**
+   * Execute all remaining steps in a project sequentially (via queue).
+   */
+  async executeAll(projectId: string): Promise<void> {
+    if (!this.stateStore.get(projectId)) throw new Error(`Project not found: ${projectId}`);
+    this.enqueueProject(projectId);
+  }
+
+  /**
+   * Internal execution of all remaining steps (acquires global serialization lock).
+   */
+  private async executeAllInternal(projectId: string): Promise<void> {
+    const releaseGlobal = await this.acquireGlobalLock(`Waiting for global GPU slot before executing project ${projectId}`);
+    const releaseProject = await this.acquireExecutionLock(projectId, 'Waiting for previous execution loop to drain');
+
+    try {
       const latest = this.stateStore.get(projectId);
       if (!latest) throw new Error(`Project not found after drain: ${projectId}`);
       this.refreshPendingPrompts(latest);
@@ -939,7 +1053,8 @@ export class ProjectEngine {
         this.eventBus.emit('project:completed', { projectId });
       }
     } finally {
-      release();
+      releaseProject();
+      releaseGlobal();
     }
   }
 
@@ -1048,11 +1163,12 @@ export class ProjectEngine {
 
   // ── Templates ───────────────────────────────────────────
 
-  listTemplates(): Array<{ type: string; name: string; description: string }> {
+  listTemplates(): Array<{ type: string; name: string; description: string; workType: string }> {
     return this.templates.list().map(t => ({
       type: t.type,
       name: t.name,
       description: t.description,
+      workType: t.workType,
     }));
   }
 
@@ -1064,5 +1180,65 @@ export class ProjectEngine {
 
   getWorkspaceDir(): string {
     return this.workspaceDir;
+  }
+
+  private seedPresetsIfEmpty(): void {
+    try {
+      const existing = this.stateStore.list();
+      const hasPresets = existing.some(p => p.title.includes('Shattered Realm') || p.title.includes('The Last Synapse'));
+      if (hasPresets) {
+        return;
+      }
+
+      this.log.info('Seeding preset parent-child projects across domains...');
+
+      // 1. Books Domain presets
+      const bookParent = this.createProject({
+        type: 'book-planning',
+        title: 'Novel: The Last Synapse',
+        description: 'A cyberpunk mystery novel about a detective investigating the murder of a digital consciousness. Set in Neo-Tokyo, 2188.',
+        context: { targetChapters: 12, targetWordsPerChapter: 2500 }
+      });
+
+      this.createProject({
+        type: 'style-calibration',
+        title: 'Style Calibration: Cyberpunk Noir',
+        description: 'Calibrate the prose style for Novel: The Last Synapse. The goal is to establish a hardboiled cyberpunk tone with dense noir textures and low contraction rate.',
+        parentId: bookParent.id,
+        context: { targetChapters: 5, targetWordsPerChapter: 2000, penNameSlug: 'cyber-noir-detective' }
+      });
+
+      // 2. D&D Domain presets
+      const dndParent = this.createProject({
+        type: 'dnd-campaign-planning',
+        title: 'Epic Campaign: The Shattered Realm',
+        description: 'Plan a high-fantasy campaign centered around a collapsing elemental realm. The players must find the core anchors before the sky-isles fall into the abyss.'
+      });
+
+      this.createProject({
+        type: 'dnd-session-prep',
+        title: 'Session 1: The Whispering Caves',
+        description: 'The party starts at an outpost on the edge of the elemental rift. They find a map leading to the Whispering Caves where an elemental anchor is rumored to be.',
+        parentId: dndParent.id
+      });
+
+      // 3. Meta / Admin Domain presets
+      const metaParent = this.createProject({
+        type: 'system-evolution',
+        title: 'Workspace Observation & Tuning',
+        description: 'Observe agent interactions across domains, detect optimization areas, and auto-apply refined skills.'
+      });
+
+      this.createProject({
+        type: 'template-generator',
+        title: 'Automated Pipeline Synthesis',
+        description: 'Extract templates and configure playbooks based on successful project runs.',
+        parentId: metaParent.id
+      });
+
+      this.log.info('Successfully seeded preset projects.');
+    } catch (err: any) {
+      this.log.error('Failed to seed preset projects', { error: err.message });
+    }
   }
 }

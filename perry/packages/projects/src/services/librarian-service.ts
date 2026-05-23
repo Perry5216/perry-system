@@ -173,8 +173,9 @@ export class LibrarianService {
   }
 
   private parseSkillFile(raw: string): { frontmatter: Record<string, string>; body: string } {
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-    if (!m) return { frontmatter: {}, body: raw };
+    const normalized = raw.replace(/\r\n/g, '\n');
+    const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    if (!m) return { frontmatter: {}, body: normalized };
     const block = m[1];
     const body = m[2];
     const frontmatter: any = {};
@@ -192,7 +193,8 @@ export class LibrarianService {
   }
 
   private updateFrontmatter(content: string, updates: Record<string, string>): string {
-    const m = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    const normalized = content.replace(/\r\n/g, '\n');
+    const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
     if (!m) {
       // Create fresh frontmatter
       const fmLines = ['---'];
@@ -200,7 +202,7 @@ export class LibrarianService {
         fmLines.push(`${k}: ${v}`);
       }
       fmLines.push('---');
-      return fmLines.join('\n') + '\n\n' + content;
+      return fmLines.join('\n') + '\n\n' + normalized;
     }
     const block = m[1];
     const body = m[2];
