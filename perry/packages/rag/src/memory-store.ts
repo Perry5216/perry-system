@@ -195,6 +195,16 @@ export class MemoryStore {
       CREATE INDEX IF NOT EXISTS idx_chunks_project_tier ON chunks(project_id, tier);
     `);
 
+    // ── Parent Documents ──
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS parent_documents (
+        project_id  TEXT NOT NULL,
+        source_ref  TEXT NOT NULL,
+        text        TEXT NOT NULL,
+        PRIMARY KEY (project_id, source_ref)
+      );
+    `);
+
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
         title, body,
@@ -214,6 +224,30 @@ export class MemoryStore {
       CREATE TRIGGER IF NOT EXISTS trg_au AFTER UPDATE ON entries BEGIN
         INSERT INTO entries_fts(entries_fts, rowid, title, body) VALUES('delete', old.id, old.title, old.body);
         INSERT INTO entries_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+      END;
+    `);
+
+    // ── Chunks FTS ──
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        text,
+        content='chunks',
+        content_rowid='id',
+        tokenize='porter unicode61 remove_diacritics 2'
+      );
+      INSERT OR IGNORE INTO chunks_fts(rowid, text) SELECT id, text FROM chunks;
+    `);
+
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_chunks_ai AFTER INSERT ON chunks BEGIN
+        INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_chunks_ad AFTER DELETE ON chunks BEGIN
+        INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_chunks_au AFTER UPDATE ON chunks BEGIN
+        INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
+        INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
       END;
     `);
   }
@@ -246,6 +280,22 @@ export class MemoryStore {
     } catch (err) {
       this.log.error('Upsert failed', { error: String(err) });
       return null;
+    }
+  }
+
+  /**
+   * Add or update a parent document text.
+   */
+  upsertParentDocument(projectId: string, sourceRef: string, text: string): void {
+    if (!this.db) return;
+    try {
+      this.db.prepare(`
+        INSERT INTO parent_documents (project_id, source_ref, text)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project_id, source_ref) DO UPDATE SET text = excluded.text
+      `).run(projectId, sourceRef, text);
+    } catch (err: any) {
+      this.log.error('upsertParentDocument failed', { error: err.message });
     }
   }
 
@@ -297,6 +347,8 @@ export class MemoryStore {
     const result = this.db.prepare('DELETE FROM entries WHERE project_id = @projectId')
       .run({ projectId });
     const chunkResult = this.db.prepare('DELETE FROM chunks WHERE project_id = @projectId')
+      .run({ projectId });
+    this.db.prepare('DELETE FROM parent_documents WHERE project_id = @projectId')
       .run({ projectId });
     this.log.info('Project entries + chunks deleted', { projectId, entries: result.changes, chunks: chunkResult.changes });
     return result.changes;
@@ -377,6 +429,9 @@ export class MemoryStore {
     const result = this.db.prepare(
       'DELETE FROM chunks WHERE project_id = @projectId AND source_ref = @sourceRef'
     ).run({ projectId, sourceRef });
+    this.db.prepare(
+      'DELETE FROM parent_documents WHERE project_id = @projectId AND source_ref = @sourceRef'
+    ).run({ projectId, sourceRef });
     return result.changes;
   }
 
@@ -423,22 +478,24 @@ export class MemoryStore {
     score: number;
     metadata: any | null;
     tier?: string;
+    parentText?: string;
   }> {
     if (!this.db) return [];
     const topK = Math.max(1, Math.min(opts.topK ?? 8, 50));
     const minScore = opts.minScore ?? 0;
     const kindFilter = opts.kinds && opts.kinds.length > 0
-      ? `AND kind IN (${opts.kinds.map(() => '?').join(',')})`
+      ? `AND c.kind IN (${opts.kinds.map(() => '?').join(',')})`
       : '';
     const targetTiers = opts.tier ? [opts.tier] : opts.tiers;
     const tierFilter = targetTiers && targetTiers.length > 0
-      ? `AND tier IN (${targetTiers.map(() => '?').join(',')})`
+      ? `AND c.tier IN (${targetTiers.map(() => '?').join(',')})`
       : '';
 
     const sql = `
-      SELECT id, source_ref, kind, chunk_index, text, token_count, embedding, metadata, tier
-      FROM chunks
-      WHERE project_id = ? ${kindFilter} ${tierFilter}
+      SELECT c.id, c.source_ref, c.kind, c.chunk_index, c.text, c.token_count, c.embedding, c.metadata, c.tier, p.text AS parent_text
+      FROM chunks c
+      LEFT JOIN parent_documents p ON p.project_id = c.project_id AND p.source_ref = c.source_ref
+      WHERE c.project_id = ? ${kindFilter} ${tierFilter}
     `;
     const params = [opts.projectId, ...(opts.kinds || []), ...(targetTiers || [])];
     const rows = this.db.prepare(sql).all(...params) as any[];
@@ -473,10 +530,77 @@ export class MemoryStore {
         score,
         metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
         tier: r.tier,
+        parentText: r.parent_text || undefined,
       });
     }
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, topK);
+  }
+
+  /** FTS5 text match on chunks. Returns top-K BM25 ranked hits. */
+  searchChunksFts(opts: {
+    projectId: string;
+    query: string;
+    kinds?: string[];
+    topK?: number;
+    tier?: string;
+    tiers?: string[];
+  }): Array<{
+    id: number;
+    sourceRef: string;
+    kind: string;
+    chunkIndex: number;
+    text: string;
+    tokenCount: number;
+    score: number;
+    metadata: any | null;
+    tier?: string;
+    parentText?: string;
+  }> {
+    if (!this.db || !opts.query?.trim()) return [];
+    const safeQuery = opts.query.replace(/[\x00-\x1f]/g, '').trim();
+    const kindFilter = opts.kinds && opts.kinds.length > 0
+      ? `AND c.kind IN (${opts.kinds.map(() => '?').join(',')})`
+      : '';
+    const targetTiers = opts.tier ? [opts.tier] : opts.tiers;
+    const tierFilter = targetTiers && targetTiers.length > 0
+      ? `AND c.tier IN (${targetTiers.map(() => '?').join(',')})`
+      : '';
+
+    const sql = `
+      SELECT c.id, c.source_ref, c.kind, c.chunk_index, c.text, c.token_count, c.metadata, c.tier, p.text AS parent_text,
+             bm25(chunks_fts) AS rank
+      FROM chunks_fts
+      JOIN chunks c ON c.id = chunks_fts.rowid
+      LEFT JOIN parent_documents p ON p.project_id = c.project_id AND p.source_ref = c.source_ref
+      WHERE chunks_fts MATCH ? AND c.project_id = ? ${kindFilter} ${tierFilter}
+      ORDER BY rank
+      LIMIT ?
+    `;
+    const params = [
+      safeQuery,
+      opts.projectId,
+      ...(opts.kinds || []),
+      ...(targetTiers || []),
+      Math.min(opts.topK ?? 25, 100)
+    ];
+    try {
+      return this.db.prepare(sql).all(...params).map((r: any) => ({
+        id: r.id,
+        sourceRef: r.source_ref,
+        kind: r.kind,
+        chunkIndex: r.chunk_index,
+        text: r.text,
+        tokenCount: r.token_count,
+        score: -r.rank,
+        metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
+        tier: r.tier,
+        parentText: r.parent_text || undefined,
+      }));
+    } catch (err: any) {
+      this.log.warn('searchChunksFts failed', { error: err.message });
+      return [];
+    }
   }
 
   /**
@@ -604,6 +728,72 @@ export class MemoryStore {
     } catch { return 0; }
   }
 
+  /** FTS5 text match on chunks globally across all projects. Returns top-K BM25 ranked hits. */
+  searchChunksGlobalFts(opts: {
+    query: string;
+    kinds?: string[];
+    topK?: number;
+    tier?: string;
+    tiers?: string[];
+  }): Array<{
+    id: number;
+    projectId: string;
+    sourceRef: string;
+    kind: string;
+    chunkIndex: number;
+    text: string;
+    tokenCount: number;
+    score: number;
+    metadata: any | null;
+    tier?: string;
+    parentText?: string;
+  }> {
+    if (!this.db || !opts.query?.trim()) return [];
+    const safeQuery = opts.query.replace(/[\x00-\x1f]/g, '').trim();
+    const kindFilter = opts.kinds && opts.kinds.length > 0
+      ? `AND c.kind IN (${opts.kinds.map(() => '?').join(',')})`
+      : '';
+    const targetTiers = opts.tier ? [opts.tier] : opts.tiers;
+    const tierFilter = targetTiers && targetTiers.length > 0
+      ? `AND c.tier IN (${targetTiers.map(() => '?').join(',')})`
+      : '';
+
+    const sql = `
+      SELECT c.id, c.project_id, c.source_ref, c.kind, c.chunk_index, c.text, c.token_count, c.metadata, c.tier, p.text AS parent_text,
+             bm25(chunks_fts) AS rank
+      FROM chunks_fts
+      JOIN chunks c ON c.id = chunks_fts.rowid
+      LEFT JOIN parent_documents p ON p.project_id = c.project_id AND p.source_ref = c.source_ref
+      WHERE chunks_fts MATCH ? ${kindFilter} ${tierFilter}
+      ORDER BY rank
+      LIMIT ?
+    `;
+    const params = [
+      safeQuery,
+      ...(opts.kinds || []),
+      ...(targetTiers || []),
+      Math.min(opts.topK ?? 25, 100)
+    ];
+    try {
+      return this.db.prepare(sql).all(...params).map((r: any) => ({
+        id: r.id,
+        projectId: r.project_id,
+        sourceRef: r.source_ref,
+        kind: r.kind,
+        chunkIndex: r.chunk_index,
+        text: r.text,
+        tokenCount: r.token_count,
+        score: -r.rank,
+        metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
+        tier: r.tier,
+        parentText: r.parent_text || undefined,
+      }));
+    } catch (err: any) {
+      this.log.warn('searchChunksGlobalFts failed', { error: err.message });
+      return [];
+    }
+  }
+
   /** Cross-project chunk search (e.g., "where have I written about X across all projects"). */
   searchChunksGlobal(opts: {
     queryEmbedding: number[];
@@ -617,11 +807,11 @@ export class MemoryStore {
     const topK = Math.max(1, Math.min(opts.topK ?? 8, 50));
     const minScore = opts.minScore ?? 0;
     const kindFilter = opts.kinds && opts.kinds.length > 0
-      ? `kind IN (${opts.kinds.map(() => '?').join(',')})`
+      ? `c.kind IN (${opts.kinds.map(() => '?').join(',')})`
       : '';
     const targetTiers = opts.tier ? [opts.tier] : opts.tiers;
     const tierFilter = targetTiers && targetTiers.length > 0
-      ? `tier IN (${targetTiers.map(() => '?').join(',')})`
+      ? `c.tier IN (${targetTiers.map(() => '?').join(',')})`
       : '';
     
     const whereClauses: string[] = [];
@@ -632,8 +822,10 @@ export class MemoryStore {
     const params = [...(opts.kinds || []), ...(targetTiers || [])];
 
     const rows = this.db.prepare(`
-      SELECT id, project_id, source_ref, kind, chunk_index, text, token_count, embedding, metadata, tier
-      FROM chunks ${whereSql}
+      SELECT c.id, c.project_id, c.source_ref, c.kind, c.chunk_index, c.text, c.token_count, c.embedding, c.metadata, c.tier, p.text AS parent_text
+      FROM chunks c
+      LEFT JOIN parent_documents p ON p.project_id = c.project_id AND p.source_ref = c.source_ref
+      ${whereSql}
     `).all(...params) as any[];
     const q = opts.queryEmbedding;
     let qMag = 0;
@@ -657,6 +849,7 @@ export class MemoryStore {
         tokenCount: r.token_count, score,
         metadata: r.metadata ? (() => { try { return JSON.parse(r.metadata); } catch { return null; } })() : null,
         tier: r.tier,
+        parentText: r.parent_text || undefined,
       });
     }
     scored.sort((a, b) => b.score - a.score);

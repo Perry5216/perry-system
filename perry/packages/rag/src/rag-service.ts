@@ -50,6 +50,7 @@ export interface RagHit {
   tokenCount: number;
   score: number;
   metadata: any | null;
+  parentText?: string;
 }
 
 const DEFAULT_TARGET_TOKENS = 400;
@@ -251,6 +252,10 @@ export class RagService {
       if (id !== null) stored++;
     }
 
+    if (stored > 0) {
+      this.store.upsertParentDocument(opts.projectId, opts.sourceRef, opts.text);
+    }
+
     this.log.info('Indexed text', {
       projectId: opts.projectId, sourceRef: opts.sourceRef, kind: opts.kind,
       chunks: stored, totalChars: opts.text.length,
@@ -312,6 +317,45 @@ export class RagService {
     };
   }
 
+  /** Fuses Vector and FTS search results using Reciprocal Rank Fusion (RRF) */
+  private fuseRrf<T extends { id: number }>(vectorHits: T[], ftsHits: T[], topK: number): T[] {
+    const k = 60; // Standard constant
+    const scores = new Map<number, number>();
+    const docMap = new Map<number, T>();
+
+    // Process Vector Hits
+    vectorHits.forEach((hit, index) => {
+      const rank = index + 1;
+      const rrf = 1 / (k + rank);
+      scores.set(hit.id, rrf);
+      docMap.set(hit.id, hit);
+    });
+
+    // Process FTS Hits
+    ftsHits.forEach((hit, index) => {
+      const rank = index + 1;
+      const rrf = 1 / (k + rank);
+      const prev = scores.get(hit.id) || 0;
+      scores.set(hit.id, prev + rrf);
+      if (!docMap.has(hit.id)) {
+        docMap.set(hit.id, hit);
+      }
+    });
+
+    // Sort by merged RRF score descending
+    const merged = Array.from(docMap.keys()).map(id => {
+      const hit = docMap.get(id)!;
+      const rrfScore = scores.get(id)!;
+      return {
+        ...hit,
+        score: rrfScore, // Use the fused RRF score
+      };
+    });
+
+    merged.sort((a, b) => b.score - a.score);
+    return merged.slice(0, topK);
+  }
+
   /**
    * Retrieve top-K relevant chunks for a query string. Scoped to a project
    * and optionally to specific kinds (e.g., only 'bible' chunks).
@@ -324,21 +368,88 @@ export class RagService {
     minScore?: number;
     tier?: string;
   }): Promise<RagHit[]> {
-    if (!(await this.embeddings.isAvailable())) return [];
     if (!opts.query?.trim()) return [];
+    const topK = opts.topK ?? 8;
+
+    // Check if embedding service is available
+    let embeddingAvailable = false;
     try {
-      const qEmb = await this.embeddings.embed(opts.query);
-      return this.store.searchChunks({
+      embeddingAvailable = await this.embeddings.isAvailable();
+    } catch {
+      embeddingAvailable = false;
+    }
+
+    if (!embeddingAvailable) {
+      this.log.info('Embedding service offline; falling back to local FTS5 keyword match for retrieve', {
         projectId: opts.projectId,
-        queryEmbedding: qEmb.embedding,
+        query: opts.query
+      });
+      return this.store.searchChunksFts({
+        projectId: opts.projectId,
+        query: opts.query,
         kinds: opts.kinds,
-        topK: opts.topK,
-        minScore: opts.minScore,
+        topK,
         tier: opts.tier,
       });
+    }
+
+    try {
+      // 1. Embed query (or fall back to FTS-only on failure)
+      let qEmb: { embedding: number[] };
+      try {
+        qEmb = await this.embeddings.embed(opts.query);
+      } catch (err: any) {
+        this.log.warn('Query embedding failed; falling back to local FTS5 keyword match', {
+          projectId: opts.projectId,
+          query: opts.query,
+          error: err.message
+        });
+        return this.store.searchChunksFts({
+          projectId: opts.projectId,
+          query: opts.query,
+          kinds: opts.kinds,
+          topK,
+          tier: opts.tier,
+        });
+      }
+
+      // 2. Run Vector and FTS searches in parallel
+      const searchLimit = Math.max(topK * 3, 50);
+
+      const [vectorHits, ftsHits] = await Promise.all([
+        this.store.searchChunks({
+          projectId: opts.projectId,
+          queryEmbedding: qEmb.embedding,
+          kinds: opts.kinds,
+          topK: searchLimit,
+          minScore: opts.minScore,
+          tier: opts.tier,
+        }),
+        this.store.searchChunksFts({
+          projectId: opts.projectId,
+          query: opts.query,
+          kinds: opts.kinds,
+          topK: searchLimit,
+          tier: opts.tier,
+        })
+      ]);
+
+      // 3. Merge and rank using RRF
+      return this.fuseRrf(vectorHits, ftsHits, topK);
     } catch (err: any) {
-      this.log.warn('retrieve failed', { error: err.message });
-      return [];
+      this.log.warn('retrieve failed, falling back to local FTS5 keyword match', { error: err.message });
+      try {
+        return this.store.searchChunksFts({
+          projectId: opts.projectId,
+          query: opts.query,
+          kinds: opts.kinds,
+          topK,
+          tier: opts.tier,
+        });
+      } catch (ftsErr: any) {
+        this.log.error('Fallback FTS5 search also failed', { error: ftsErr.message });
+        return [];
+      }
     }
   }
 
@@ -350,20 +461,81 @@ export class RagService {
     minScore?: number;
     tier?: string;
   }): Promise<any[]> {
-    if (!(await this.embeddings.isAvailable())) return [];
     if (!opts.query?.trim()) return [];
+    const topK = opts.topK ?? 8;
+
+    // Check if embedding service is available
+    let embeddingAvailable = false;
     try {
-      const qEmb = await this.embeddings.embed(opts.query);
-      return this.store.searchChunksGlobal({
-        queryEmbedding: qEmb.embedding,
+      embeddingAvailable = await this.embeddings.isAvailable();
+    } catch {
+      embeddingAvailable = false;
+    }
+
+    if (!embeddingAvailable) {
+      this.log.info('Embedding service offline; falling back to local FTS5 keyword match for retrieveGlobal', {
+        query: opts.query
+      });
+      return this.store.searchChunksGlobalFts({
+        query: opts.query,
         kinds: opts.kinds,
-        topK: opts.topK,
-        minScore: opts.minScore,
+        topK,
         tier: opts.tier,
       });
+    }
+
+    try {
+      // 1. Embed query (or fall back to FTS-only on failure)
+      let qEmb: { embedding: number[] };
+      try {
+        qEmb = await this.embeddings.embed(opts.query);
+      } catch (err: any) {
+        this.log.warn('Query embedding failed in retrieveGlobal; falling back to local FTS5 keyword match', {
+          query: opts.query,
+          error: err.message
+        });
+        return this.store.searchChunksGlobalFts({
+          query: opts.query,
+          kinds: opts.kinds,
+          topK,
+          tier: opts.tier,
+        });
+      }
+
+      // 2. Run Vector and FTS searches in parallel
+      const searchLimit = Math.max(topK * 3, 50);
+
+      const [vectorHits, ftsHits] = await Promise.all([
+        this.store.searchChunksGlobal({
+          queryEmbedding: qEmb.embedding,
+          kinds: opts.kinds,
+          topK: searchLimit,
+          minScore: opts.minScore,
+          tier: opts.tier,
+        }),
+        this.store.searchChunksGlobalFts({
+          query: opts.query,
+          kinds: opts.kinds,
+          topK: searchLimit,
+          tier: opts.tier,
+        })
+      ]);
+
+      // 3. Merge and rank using RRF
+      return this.fuseRrf(vectorHits, ftsHits, topK);
     } catch (err: any) {
-      this.log.warn('retrieveGlobal failed', { error: err.message });
-      return [];
+      this.log.warn('retrieveGlobal failed, falling back to local FTS5 keyword match', { error: err.message });
+      try {
+        return this.store.searchChunksGlobalFts({
+          query: opts.query,
+          kinds: opts.kinds,
+          topK,
+          tier: opts.tier,
+        });
+      } catch (ftsErr: any) {
+        this.log.error('Fallback global FTS5 search also failed', { error: ftsErr.message });
+        return [];
+      }
     }
   }
 

@@ -1989,7 +1989,7 @@ export class StateStore {
   listSkillTelemetry(limit = 100): any[] {
     if (this.usingSqlite && this.db) {
       try {
-        return this.db.prepare('SELECT * FROM skill_telemetry ORDER BY created_at DESC LIMIT ?').all(limit);
+        return this.db.prepare('SELECT * FROM skill_telemetry ORDER BY created_at DESC, id DESC LIMIT ?').all(limit);
       } catch { return []; }
     }
     return this.telemetryCache.slice(-limit).reverse();
