@@ -1057,6 +1057,13 @@ export class ProjectEngine {
         this.eventBus.emit('project:completed', { projectId });
       }
     } finally {
+      // Flush VRAM immediately after completion, pause, or crash of execution loop
+      if (typeof this.stepRunner.flushOllamaVram === 'function') {
+        this.stepRunner.flushOllamaVram().catch(err => {
+          this.log.warn('Failed to flush Ollama VRAM on completion', { error: String(err) });
+        });
+      }
+
       releaseProject();
       releaseGlobal();
     }
