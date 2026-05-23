@@ -635,6 +635,7 @@ export function App() {
   const [adminIntelligentTarget, setAdminIntelligentTarget] = useState<'workers' | 'gpu'>('workers');
   const [isIntelligentEnableSearch, setIntelligentEnableSearch] = useState<boolean>(true);
   const [isIntelligentlyEvolving, setIsIntelligentlyEvolving] = useState<boolean>(false);
+  const [evolveLogs, setEvolveLogs] = useState<string[]>([]);
   const [assessmentSessionId, setAssessmentSessionId] = useState<string | null>(null);
   const [assessmentStatus, setAssessmentStatus] = useState<string>('');
   const [assessmentResult, setAssessmentResult] = useState<any | null>(null);
@@ -1017,6 +1018,14 @@ export function App() {
       try {
         const data = JSON.parse(e.data);
         setContextStats(data);
+      } catch { /* ignore parse errors */ }
+    });
+
+    evtSource.addEventListener('intelligent-evolve:log', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const timestamp = data.timestamp ? `[${new Date(data.timestamp).toLocaleTimeString()}] ` : '';
+        setEvolveLogs(prev => [...prev, `${timestamp}${data.message}`]);
       } catch { /* ignore parse errors */ }
     });
 
@@ -1507,6 +1516,10 @@ export function App() {
       return;
     }
 
+    setEvolveLogs([`[${new Date().toLocaleTimeString()}] Initializing guided evolve request...`]);
+    setAssessmentResult(null);
+    setAssessmentError(null);
+    setAssessmentStatus('');
     setIsEvolvingTemplate(true);
     try {
       const res = await fetch(`${API_BASE}/domains/evolve-worktype-to-template`, {
@@ -1542,6 +1555,10 @@ export function App() {
   const handleIntelligentEvolve = async () => {
     if (!confirm(`Do you want to intelligently create a custom template for the "${adminIntelligentWorkType}" domain? This will perform web research for domain best-practices and generate optimized template steps.`)) return;
 
+    setEvolveLogs([`[${new Date().toLocaleTimeString()}] Initializing intelligent evolve request...`]);
+    setAssessmentResult(null);
+    setAssessmentError(null);
+    setAssessmentStatus('');
     setIsIntelligentlyEvolving(true);
     try {
       const res = await fetch(`${API_BASE}/domains/intelligent-evolve-project`, {
@@ -2123,7 +2140,7 @@ export function App() {
                 </div>
 
                 {/* Console / Diagnostics View */}
-                {(isAssessing || assessmentStatus || assessmentResult || assessmentError) && (
+                {(isAssessing || assessmentStatus || assessmentResult || assessmentError || isIntelligentlyEvolving || isEvolvingTemplate || evolveLogs.length > 0) && (
                   <div className="glass-panel" style={{
                     padding: '1.25rem',
                     border: '1px solid var(--panel-border)',
@@ -2133,10 +2150,12 @@ export function App() {
                     gap: '0.75rem'
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '0.5rem' }}>
-                      <span style={{ fontSize: '0.7rem', color: '#9BA4B5', fontWeight: 600, fontFamily: 'monospace' }}>CONSOLE DIAGNOSTICS & TUNING</span>
-                      {isAssessing ? (
+                      <span style={{ fontSize: '0.7rem', color: '#9BA4B5', fontWeight: 600, fontFamily: 'monospace' }}>
+                        {isIntelligentlyEvolving || isEvolvingTemplate || evolveLogs.length > 0 ? 'TEMPLATE EVOLUTION PROCESS' : 'CONSOLE DIAGNOSTICS & TUNING'}
+                      </span>
+                      {isAssessing || isIntelligentlyEvolving || isEvolvingTemplate ? (
                         <span style={{ fontSize: '0.65rem', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: 'monospace' }}>
-                          <Loader2 size={10} className="animate-spin" /> AUDITING DOMAIN
+                          <Loader2 size={10} className="animate-spin" /> {isIntelligentlyEvolving || isEvolvingTemplate ? 'EVOLVING TEMPLATE' : 'AUDITING DOMAIN'}
                         </span>
                       ) : assessmentError ? (
                         <span style={{ fontSize: '0.65rem', color: 'var(--danger)', fontWeight: 600, fontFamily: 'monospace' }}>FAILED</span>
@@ -2153,22 +2172,36 @@ export function App() {
                       fontFamily: 'monospace',
                       fontSize: '0.7rem',
                       color: '#4ADE80',
-                      maxHeight: '160px',
+                      maxHeight: '240px',
                       overflowY: 'auto',
                       border: '1px solid rgba(255,255,255,0.05)',
                       lineHeight: '1.4'
                     }}>
-                      <div>&gt; Initializing workspace self-assessment context...</div>
-                      {assessmentStatus && <div>&gt; {assessmentStatus}</div>}
-                      {isAssessing && <div>&gt; Dispatching agent meta.playbook-analyst to subscription workers...</div>}
-                      {isAssessing && <div>&gt; Performing search indices checks & drift scoring...</div>}
-                      {assessmentError && <div style={{ color: 'var(--danger)' }}>&gt; ERROR: {assessmentError}</div>}
-                      {assessmentResult && (
+                      {evolveLogs.length > 0 ? (
+                        evolveLogs.map((logLine, idx) => {
+                          const isError = logLine.includes('ERROR:');
+                          const isSuccess = logLine.includes('Successfully created') || logLine.includes('generation complete') || logLine.includes('evolution complete') || logLine.includes('template "');
+                          return (
+                            <div key={idx} style={{ color: isError ? 'var(--danger)' : isSuccess ? '#34D399' : '#4ADE80' }}>
+                              &gt; {logLine}
+                            </div>
+                          );
+                        })
+                      ) : (
                         <>
-                          <div style={{ color: '#60A5FA' }}>&gt; Diagnosis complete. Successfully retrieved payload from playbook-analyst.</div>
-                          <div style={{ color: 'white', marginTop: '0.25rem' }}>
-                            {assessmentResult.domainAnalysis?.summary}
-                          </div>
+                          <div>&gt; Initializing workspace self-assessment context...</div>
+                          {assessmentStatus && <div>&gt; {assessmentStatus}</div>}
+                          {isAssessing && <div>&gt; Dispatching agent meta.playbook-analyst to subscription workers...</div>}
+                          {isAssessing && <div>&gt; Performing search indices checks & drift scoring...</div>}
+                          {assessmentError && <div style={{ color: 'var(--danger)' }}>&gt; ERROR: {assessmentError}</div>}
+                          {assessmentResult && (
+                            <>
+                              <div style={{ color: '#60A5FA' }}>&gt; Diagnosis complete. Successfully retrieved payload from playbook-analyst.</div>
+                              <div style={{ color: 'white', marginTop: '0.25rem' }}>
+                                {assessmentResult.domainAnalysis?.summary}
+                              </div>
+                            </>
+                          )}
                         </>
                       )}
                     </div>

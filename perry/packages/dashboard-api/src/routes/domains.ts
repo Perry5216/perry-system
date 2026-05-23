@@ -457,6 +457,10 @@ When this skill is activated:
         }
       }
 
+      if (typeof (projectEngine as any).refreshCustomTemplates === 'function') {
+        (projectEngine as any).refreshCustomTemplates();
+      }
+
       res.json({
         success: true,
         templateType,
@@ -478,11 +482,20 @@ When this skill is activated:
         return res.status(400).json({ error: 'workType is required' });
       }
 
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Starting intelligent template evolution for work type: "${workType}"...`,
+        timestamp: new Date().toISOString()
+      });
+
       let projectTitle = '';
       let projectDesc = '';
       let projectStepsText = '';
 
       if (projectId) {
+        eventBus.emit('intelligent-evolve:log', {
+          message: `Reading context from target project ID: ${projectId}...`,
+          timestamp: new Date().toISOString()
+        });
         const project = stateStore.get(projectId);
         if (project) {
           projectTitle = project.title;
@@ -503,93 +516,7 @@ When this skill is activated:
         projectStepsText = `No existing project context was provided. Generate a complete, end-to-end best-practice template for the "${workType}" domain from scratch.`;
       }
 
-      // Run web search context
-      let searchContext = '';
-      if (enableSearch !== false) {
-        const tavilyKey = process.env.TAVILY_API_KEY;
-        const exaKey = process.env.EXA_API_KEY;
-        const fcKey = process.env.FIRECRAWL_API_KEY;
-        const backend = tavilyKey ? 'tavily' : exaKey ? 'exa' : fcKey ? 'firecrawl' : '';
-
-        if (backend) {
-          try {
-            const query = `${workType} template pipeline steps guidelines best practices workflow`;
-            log.info(`Running intelligent web search via ${backend} for template evolution`, { query });
-            let searchResults: SearchResult[] = [];
-            if (backend === 'tavily' && tavilyKey) {
-              searchResults = await searchTavily(query, 5, tavilyKey, log);
-            } else if (backend === 'exa' && exaKey) {
-              searchResults = await searchExa(query, 5, exaKey, log);
-            } else if (backend === 'firecrawl' && fcKey) {
-              searchResults = await searchFirecrawl(query, 5, fcKey, log);
-            }
-
-            if (searchResults && searchResults.length > 0) {
-              searchContext = searchResults.map(r => `Source: ${r.title} (${r.url})\nContent: ${r.snippet}`).join('\n\n');
-            }
-          } catch (searchErr: any) {
-            log.warn('Web search failed during intelligent template evolution, proceeding without search results', { error: searchErr.message });
-          }
-        } else {
-          log.info('No web search API keys configured, skipping search phase.');
-        }
-      }
-
-      const systemPrompt = [
-        `You are the Perry Intelligent Template Generator. Your job is to analyze the requested domain work type, combine it with web search context showing best-practices and industry guidelines, and generate a highly custom template tailored to that work type.`,
-        ``,
-        `For each step of the new template, you must determine the appropriate taskType and prompt to run.`,
-        `Perry has the following task types and routing target systems:`,
-        `1. 'comfyui_generate', 'text_overlay', 'qwen_text_render': Smartly assigned if the step involves image generation, card/visual design, map layout, or cover creation. These route directly to ComfyUI (Local GPU).`,
-        `2. 'creative_writing', 'revision_execution': Smartly assigned for creative narrative writing, prose generation, or dialogue polishing. These route to the local Writer GPU.`,
-        `3. 'analysis', 'outline', 'book_bible', 'character_bible', 'story_architecture', 'planning', 'research': Smartly assigned for outlines, rule definitions, planning, fact extraction, or research. These route to high-capacity external workers (Claude, Gemini) or local Librarian/Researcher.`,
-        ``,
-        `Smart Worker Assignment Rules:`,
-        `- If workersMode is 'smart': Perry will dynamically route steps to the best provider.`,
-        `  - Image/graphic/visual design steps -> set taskType to 'comfyui_generate'`,
-        `  - Creative writing / prose steps -> set taskType to 'creative_writing'`,
-        `  - Outlining/planning/rule-writing steps -> set taskType to 'outline' or 'planning'`,
-        `  - Analysis / quality checks -> set taskType to 'analysis' or 'pov_check'`,
-        `- If workersMode is 'gpu': Perry forces all text generation steps to use local GPU (such as 'creative_writing' or 'analysis'), and image steps to 'comfyui_generate'.`,
-        `- If workersMode is 'subscription': Perry forces all text steps to route to subscription CLIs (using task types like 'planning' or 'outline' or 'research').`,
-        ``,
-        `Output MUST be a valid JSON object matching the CustomPipelineDef schema:`,
-        `{`,
-        `  "id": "kebab-case-unique-id-prefixed-with-custom",`,
-        `  "name": "Template Display Name",`,
-        `  "description": "Short template description",`,
-        `  "workType": "${workType}",`,
-        `  "steps": [`,
-        `    {`,
-        `      "label": "Step Name",`,
-        `      "phase": "planning | writing | revision | marketing",`,
-        `      "taskType": "comfyui_generate | creative_writing | outline | planning | analysis | pov_check | research",`,
-        `      "prompt": "Highly detailed system prompt instructing the AI on exactly what to do for this step. Include instructions on using inputs from previous steps."`,
-        `    }`,
-        `  ]`,
-        `}`,
-        ``,
-        `Ensure the output is ONLY a valid JSON object. Do not wrap it in markdown code blocks.`,
-      ].join('\n');
-
-      const userPrompt = [
-        `Generate a reusable custom template under the "${workType}" domain.`,
-        ``,
-        `--- Target Domain Context ---`,
-        `Title: ${projectTitle}`,
-        `Description: ${projectDesc}`,
-        `Context: ${projectStepsText}`,
-        ``,
-        `--- Web Search Domain Context ---`,
-        searchContext || 'No search results available.',
-        ``,
-        `--- Requirements ---`,
-        `Template Name: ${name || projectTitle + ' Template'}`,
-        `Template Description: ${description || 'Intelligent template for ' + workType}`,
-        `Worker Mode: ${workersMode || 'smart'}`,
-        `Work Type: ${workType}`,
-      ].join('\n');
-
+      // Early resolve target provider
       let targetProvider = 'gemini';
       let selectedTarget = evolutionTarget || 'workers';
 
@@ -626,6 +553,275 @@ When this skill is activated:
         }
       }
 
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Resolved evolution provider: "${targetProvider}" on "${selectedTarget}" target.`,
+        timestamp: new Date().toISOString()
+      });
+
+      // Checking existing skills in the domain
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Checking existing skill playbooks in domain: "${workType}"...`,
+        timestamp: new Date().toISOString()
+      });
+      const skillDir = join(workspaceDir, 'skills-installed', workType);
+      const existingSkills = await listMarkdownSkills(skillDir, workType);
+      const skillsContextText = existingSkills.length > 0 
+        ? existingSkills.map(s => `- Skill Name: ${s.name}\n  Description: ${s.description}`).join('\n\n')
+        : 'No custom skills are currently installed for this domain.';
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Found ${existingSkills.length} existing skill(s) in domain: "${workType}".`,
+        timestamp: new Date().toISOString()
+      });
+
+      // Phase 1: Self-Questioning
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Formulating research questions for domain "${workType}"...`,
+        timestamp: new Date().toISOString()
+      });
+
+      const questioningSystemPrompt = [
+        `You are the Perry Self-Questioning Coordinator. Given a target domain work type (e.g., 'code', 'dnd', 'books'), generate a list of exactly 5 or 6 specific, deep research questions to query the web.`,
+        `Your questions should focus on:`,
+        `1. Fundamental definition and purpose of this work type (e.g. 'What is code?', 'What is the purpose of code?').`,
+        `2. Industry-standard best practices and common anti-patterns/bad practices.`,
+        `3. Specifically how local LLMs (Ollama) perform with this task, their strengths, limitations, and restrictions.`,
+        `4. Whether this work type benefits from pipelines, structured steps, templates, or guiding prompts.`,
+        `5. Critical validation: Ask "Is this worktype fit for purpose?" to check if the LLM automation matches the objectives.`,
+        ``,
+        `If the work type is 'code', you MUST include questions equivalent or close to:`,
+        `- "What is code?"`,
+        `- "What is the purpose of code?"`,
+        `- "What are good practices of code?"`,
+        `- "What are bad practices of code?"`,
+        `- "What makes Ollama good with code?"`,
+        `- "What restrictions does Ollama need for coding?"`,
+        `- "Do code generation tasks need pipelines or guidings?"`,
+        `- "Is this worktype fit for purpose?"`,
+        ``,
+        `Output must be a valid JSON array of strings:`,
+        `["question 1", "question 2", ...]`,
+        `Do not wrap in markdown block, return only the JSON.`
+      ].join('\n');
+
+      let questions: string[] = [];
+      try {
+        const questioningResponse = await aiRouter.complete({
+          provider: targetProvider,
+          system: questioningSystemPrompt,
+          messages: [{ role: 'user', content: `Generate the research questions for work type: "${workType}".` }],
+          maxTokens: 1000,
+          temperature: 0.2
+        });
+        questions = extractJson(questioningResponse.text);
+      } catch (qErr) {
+        log.warn('Failed to generate dynamic research questions, falling back to static questions', { error: qErr instanceof Error ? qErr.message : String(qErr) });
+      }
+
+      // Ensure fallback questions if extraction failed or is empty
+      if (!Array.isArray(questions) || questions.length === 0) {
+        if (workType.toLowerCase() === 'code') {
+          questions = [
+            "What is code?",
+            "What is the purpose of code?",
+            "What are good practices of code?",
+            "What are bad practices of code?",
+            "What makes Ollama good with code?",
+            "What restrictions does Ollama need for coding?",
+            "Do code generation tasks need pipelines or guidings?",
+            "Is this worktype fit for purpose?"
+          ];
+        } else if (workType.toLowerCase() === 'dnd') {
+          questions = [
+            "What is D&D campaign planning?",
+            "What is the purpose of session prep?",
+            "What are good practices for campaign architecture?",
+            "What are bad practices in session design?",
+            "What makes Ollama good for creative writing?",
+            "What guidelines does D&D dungeon master planning need?",
+            "Is this worktype fit for purpose?"
+          ];
+        } else {
+          questions = [
+            `What is ${workType}?`,
+            `What is the purpose of ${workType}?`,
+            `What are good practices of ${workType}?`,
+            `What are bad practices of ${workType}?`,
+            `What guidelines or pipelines does ${workType} template generation need?`,
+            "Is this worktype fit for purpose?"
+          ];
+        }
+      }
+
+      // Log generated questions
+      for (const q of questions) {
+        eventBus.emit('intelligent-evolve:log', {
+          message: `Formulated self-question: "${q}"`,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Phase 2: Web Scraping and Brainstorming
+      let searchContext = '';
+      const tavilyKey = process.env.TAVILY_API_KEY;
+      const exaKey = process.env.EXA_API_KEY;
+      const fcKey = process.env.FIRECRAWL_API_KEY;
+      const backend = (enableSearch !== false) ? (tavilyKey ? 'tavily' : exaKey ? 'exa' : fcKey ? 'firecrawl' : '') : '';
+
+      for (let i = 0; i < questions.length; i++) {
+        const question = questions[i];
+        if (backend) {
+          eventBus.emit('intelligent-evolve:log', {
+            message: `[${i + 1}/${questions.length}] Scraping web via ${backend} for: "${question}"...`,
+            timestamp: new Date().toISOString()
+          });
+          try {
+            let searchResults: SearchResult[] = [];
+            if (backend === 'tavily' && tavilyKey) {
+              searchResults = await searchTavily(question, 3, tavilyKey, log);
+            } else if (backend === 'exa' && exaKey) {
+              searchResults = await searchExa(question, 3, exaKey, log);
+            } else if (backend === 'firecrawl' && fcKey) {
+              searchResults = await searchFirecrawl(question, 3, fcKey, log);
+            }
+
+            if (searchResults && searchResults.length > 0) {
+              const snippets = searchResults.map(r => `Source: ${r.title} (${r.url})\nContent: ${r.snippet}`).join('\n\n');
+              searchContext += `### Research Topic: ${question}\n\n${snippets}\n\n`;
+              eventBus.emit('intelligent-evolve:log', {
+                message: `[${i + 1}/${questions.length}] Scraped web results successfully.`,
+                timestamp: new Date().toISOString()
+              });
+            } else {
+              eventBus.emit('intelligent-evolve:log', {
+                message: `[${i + 1}/${questions.length}] No web search results. Brainstorming internally...`,
+                timestamp: new Date().toISOString()
+              });
+              throw new Error('No search results');
+            }
+          } catch (scrapeErr: any) {
+            // Fallback to internal LLM answer for this question
+            try {
+              const answerResponse = await aiRouter.complete({
+                provider: targetProvider,
+                system: "You are an expert systems design analyst. Answer the following research question briefly in 2-3 sentences to help construct template guidelines.",
+                messages: [{ role: 'user', content: question }],
+                maxTokens: 500,
+                temperature: 0.3
+              });
+              searchContext += `### Research Topic: ${question}\n\nInternal Model Answer: ${answerResponse.text}\n\n`;
+              eventBus.emit('intelligent-evolve:log', {
+                message: `[${i + 1}/${questions.length}] Internal brainstorming complete.`,
+                timestamp: new Date().toISOString()
+              });
+            } catch (innerErr) {
+              log.error('Internal brainstorming failed', { question, error: innerErr });
+            }
+          }
+        } else {
+          eventBus.emit('intelligent-evolve:log', {
+            message: `[${i + 1}/${questions.length}] Search disabled. Brainstorming internally for: "${question}"...`,
+            timestamp: new Date().toISOString()
+          });
+          try {
+            const answerResponse = await aiRouter.complete({
+              provider: targetProvider,
+              system: "You are an expert systems design analyst. Answer the following research question briefly in 2-3 sentences to help construct template guidelines.",
+              messages: [{ role: 'user', content: question }],
+              maxTokens: 500,
+              temperature: 0.3
+            });
+            searchContext += `### Research Topic: ${question}\n\nInternal Model Answer: ${answerResponse.text}\n\n`;
+            eventBus.emit('intelligent-evolve:log', {
+              message: `[${i + 1}/${questions.length}] Internal brainstorming complete.`,
+              timestamp: new Date().toISOString()
+            });
+          } catch (innerErr) {
+            log.error('Internal brainstorming failed', { question, error: innerErr });
+          }
+        }
+      }
+
+      // Phase 3: Synthesis & Design
+      eventBus.emit('intelligent-evolve:log', {
+        message: 'Synthesizing template structure, custom playbooks, and worker recommendations...',
+        timestamp: new Date().toISOString()
+      });
+
+      const systemPrompt = [
+        `You are the Perry Intelligent Template Generator. Your job is to analyze the requested domain work type, combine it with web search context showing best-practices and industry guidelines, check existing domain skills, and generate a highly custom template tailored to that work type.`,
+        ``,
+        `For each step of the new template, you must determine the appropriate taskType and prompt to run.`,
+        `Perry has the following task types and routing target systems:`,
+        `1. 'comfyui_generate', 'text_overlay', 'qwen_text_render': Smartly assigned if the step involves image generation, card/visual design, map layout, or cover creation. These route directly to ComfyUI (Local GPU).`,
+        `2. 'creative_writing', 'revision_execution': Smartly assigned for creative narrative writing, prose generation, or dialogue polishing. These route to the local Writer GPU.`,
+        `3. 'analysis', 'outline', 'book_bible', 'character_bible', 'story_architecture', 'planning', 'research': Smartly assigned for outlines, rule definitions, planning, fact extraction, or research. These route to high-capacity external workers (Claude, Gemini) or local Librarian/Researcher.`,
+        ``,
+        `Smart Worker Assignment Rules:`,
+        `- If workersMode is 'smart': Perry will dynamically route steps to the best provider.`,
+        `  - Image/graphic/visual design steps -> set taskType to 'comfyui_generate'`,
+        `  - Creative writing / prose steps -> set taskType to 'creative_writing'`,
+        `  - Outlining/planning/rule-writing steps -> set taskType to 'outline' or 'planning'`,
+        `  - Analysis / quality checks -> set taskType to 'analysis' or 'pov_check'`,
+        `- If workersMode is 'gpu': Perry forces all text generation steps to use local GPU (such as 'creative_writing' or 'analysis'), and image steps to 'comfyui_generate'.`,
+        `- If workersMode is 'subscription': Perry forces all text steps to route to subscription CLIs (using task types like 'planning' or 'outline' or 'research').`,
+        ``,
+        `Skill Playbook Gap Analysis:`,
+        `Analyze the existing skills in the domain:`,
+        `${skillsContextText}`,
+        ``,
+        `Determine if additional custom skills/playbooks should be created to help the AI perform specific steps in this template successfully. If so, define them in the 'recommendedNewSkills' list.`,
+        ``,
+        `Compute Worker Resource Recommendations:`,
+        `Evaluate the complexity of this pipeline template. Does it require more parallel workers, or special routing to run efficiently? Recommend worker allocations in 'workerResourceRecommendations'.`,
+        ``,
+        `Output MUST be a valid JSON object matching the CustomPipelineDef schema:`,
+        `{`,
+        `  "id": "kebab-case-unique-id-prefixed-with-custom",`,
+        `  "name": "Template Display Name",`,
+        `  "description": "Short template description",`,
+        `  "workType": "${workType}",`,
+        `  "steps": [`,
+        `    {`,
+        `      "label": "Step Name",`,
+        `      "phase": "planning | writing | revision | marketing",`,
+        `      "taskType": "comfyui_generate | creative_writing | outline | planning | analysis | pov_check | research",`,
+        `      "prompt": "Highly detailed system prompt instructing the AI on exactly what to do for this step. Include instructions on using inputs from previous steps."`,
+        `    }`,
+        `  ],`,
+        `  "recommendedNewSkills": [`,
+        `    {`,
+        `      "name": "skill-name-kebab-case",`,
+        `      "description": "Short description of the skill and why it's needed",`,
+        `      "body": "Complete Markdown skill playbook contents, including frontmatter block at the top containing name, service: ${workType}, and description, followed by detailed instructions."`,
+        `    }`,
+        `  ],`,
+        `  "workerResourceRecommendations": {`,
+        `    "suggestedWorkerCount": number,`,
+        `    "reason": "Detailed explanation of why this count/hardware configuration is recommended."`,
+        `  }`,
+        `}`,
+        ``,
+        `Ensure the output is ONLY a valid JSON object. Do not wrap it in markdown code blocks.`,
+      ].join('\n');
+
+      const userPrompt = [
+        `Generate a reusable custom template under the "${workType}" domain.`,
+        ``,
+        `--- Target Domain Context ---`,
+        `Title: ${projectTitle}`,
+        `Description: ${projectDesc}`,
+        `Context: ${projectStepsText}`,
+        ``,
+        `--- Research/Brainstorming Answers ---`,
+        searchContext || 'No context available.',
+        ``,
+        `--- Requirements ---`,
+        `Template Name: ${name || projectTitle + ' Template'}`,
+        `Template Description: ${description || 'Intelligent template for ' + workType}`,
+        `Worker Mode: ${workersMode || 'smart'}`,
+        `Work Type: ${workType}`,
+      ].join('\n');
+
       log.info('Invoking AI Router to intelligently evolve workType to template', { workType, name, workersMode, targetProvider });
 
       const aiResponse = await aiRouter.complete({
@@ -636,10 +832,20 @@ When this skill is activated:
         temperature: 0.2
       });
 
+      eventBus.emit('intelligent-evolve:log', {
+        message: 'Synthesized raw response. Parsing template JSON structure...',
+        timestamp: new Date().toISOString()
+      });
+
       const generatedJson = extractJson(aiResponse.text);
       if (!generatedJson || !generatedJson.steps || !Array.isArray(generatedJson.steps)) {
         throw new Error('AI failed to return a valid template structure with steps');
       }
+
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Parsed template successfully with ${generatedJson.steps.length} steps. Writing to custom_pipelines.json...`,
+        timestamp: new Date().toISOString()
+      });
 
       const configPath = join(workspaceDir, '.config', 'custom_pipelines.json');
       let pipelines: any[] = [];
@@ -678,12 +884,46 @@ When this skill is activated:
       }
       await writeFile(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
 
-      // Register skill playbooks
-      const skillName = `template-builder-${kebabName}`;
-      const skillDir = join(workspaceDir, 'skills-installed', workType);
-      if (!existsSync(skillDir)) {
-        await mkdir(skillDir, { recursive: true });
+      // Process recommended skills
+      if (generatedJson.recommendedNewSkills && Array.isArray(generatedJson.recommendedNewSkills)) {
+        for (const skill of generatedJson.recommendedNewSkills) {
+          if (!skill.name || !skill.body) continue;
+          
+          eventBus.emit('intelligent-evolve:log', {
+            message: `Synthesizing missing skill playbook: "${skill.name}"...`,
+            timestamp: new Date().toISOString()
+          });
+          
+          const skPath = join(workspaceDir, 'skills-installed', workType, `${skill.name}.md`);
+          // Write skill body
+          await writeFile(skPath, skill.body.trim(), 'utf-8');
+          
+          // Assign to domain default skills
+          const domain = registry.get(workType);
+          if (domain) {
+            const defaultSkills = domain.defaultSkills || [];
+            const skillExists = defaultSkills.some(s => s.service === workType && s.name === skill.name);
+            if (!skillExists) {
+              const updatedSkills = [...defaultSkills, { service: workType, name: skill.name }];
+              registry.update(workType, { defaultSkills: updatedSkills });
+              log.info(`Assigned new custom skill ${workType}/${skill.name} to domain ${workType}`);
+            }
+          }
+          
+          eventBus.emit('intelligent-evolve:log', {
+            message: `Registered new custom skill playbook: "${skill.name}"`,
+            timestamp: new Date().toISOString()
+          });
+        }
       }
+
+      // Register primary skill playbook
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Creating skill playbook skill for template: "template-builder-${kebabName}.md"...`,
+        timestamp: new Date().toISOString()
+      });
+
+      const skillName = `template-builder-${kebabName}`;
       const skillPath = join(skillDir, `${skillName}.md`);
       const now = new Date().toISOString();
       const skillContent = `---
@@ -720,6 +960,29 @@ When this skill is activated:
         }
       }
 
+      // Log worker resource recommendations
+      if (generatedJson.workerResourceRecommendations) {
+        const { suggestedWorkerCount, reason } = generatedJson.workerResourceRecommendations;
+        eventBus.emit('intelligent-evolve:log', {
+          message: `[WORKER ALLOCATION RECOMMENDATION] Suggest assigning ${suggestedWorkerCount || 2} concurrent workers. Reason: ${reason || 'Based on template step analysis.'}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Refresh custom template cache
+      eventBus.emit('intelligent-evolve:log', {
+        message: 'Refreshing template cache in Perry Engine...',
+        timestamp: new Date().toISOString()
+      });
+      if (typeof (opts.projectEngine as any).refreshCustomTemplates === 'function') {
+        (opts.projectEngine as any).refreshCustomTemplates();
+      }
+
+      eventBus.emit('intelligent-evolve:log', {
+        message: `Successfully completed intelligent evolution!`,
+        timestamp: new Date().toISOString()
+      });
+
       res.json({
         success: true,
         templateType,
@@ -729,6 +992,10 @@ When this skill is activated:
       });
     } catch (err: any) {
       log.error('Failed to intelligently evolve project to template', { error: err.message });
+      eventBus.emit('intelligent-evolve:log', {
+        message: `ERROR: ${err.message}`,
+        timestamp: new Date().toISOString()
+      });
       res.status(500).json({ error: err.message });
     }
   });

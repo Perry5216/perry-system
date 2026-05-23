@@ -42,6 +42,7 @@ export class ProjectEngine {
   private contextEngine: ContextEngine;
   private mcpClient: McpClientService;
   private promptBuilder!: PromptBuilder;
+  private customPipelineService: CustomPipelineService;
 
   /** Expose AutoLearningService for MCP-facing routes (pair injection, manual export). */
   public getAutoLearning() { return this.stepRunner.getAutoLearning(); }
@@ -116,8 +117,8 @@ export class ProjectEngine {
     this.contextEngine = contextEngine;
 
     // Load custom pipeline skeletons
-    const customPipelineService = new CustomPipelineService(config.workspaceDir, log.child('pipelines'));
-    for (const tpl of customPipelineService.getTemplates()) {
+    this.customPipelineService = new CustomPipelineService(config.workspaceDir, log.child('pipelines'));
+    for (const tpl of this.customPipelineService.getTemplates()) {
       this.templates.register(tpl);
     }
 
@@ -246,6 +247,7 @@ export class ProjectEngine {
     context?: Partial<ProjectContext>;
     preferredProvider?: string;
   }): Project {
+    this.refreshCustomTemplates();
     const template = this.templates.get(input.type);
     if (!template) {
       throw new Error(`Unknown template type: ${input.type}. Available: ${this.templates.list().map(t => t.type).join(', ')}`);
@@ -449,6 +451,7 @@ export class ProjectEngine {
    * execution path so template fixes propagate to existing projects.
    */
   private refreshPendingPrompts(project: Project): void {
+    this.refreshCustomTemplates();
     const template = this.templates.get(project.type);
     if (!template) return;
     try {
@@ -505,6 +508,7 @@ export class ProjectEngine {
    * and skips steps with a promptOverride (those win over the template).
    */
   countStalePendingPrompts(): { totalProjects: number; staleProjects: number; staleSteps: number; perProject: Array<{ projectId: string; type: string; stale: number }> } {
+    this.refreshCustomTemplates();
     const all = this.stateStore.list();
     const perProject: Array<{ projectId: string; type: string; stale: number }> = [];
     let staleSteps = 0;
@@ -1161,9 +1165,16 @@ export class ProjectEngine {
     return true;
   }
 
-  // ── Templates ───────────────────────────────────────────
+  refreshCustomTemplates(): void {
+    if (this.customPipelineService) {
+      for (const tpl of this.customPipelineService.getTemplates()) {
+        this.templates.register(tpl);
+      }
+    }
+  }
 
   listTemplates(): Array<{ type: string; name: string; description: string; workType: string }> {
+    this.refreshCustomTemplates();
     return this.templates.list().map(t => ({
       type: t.type,
       name: t.name,

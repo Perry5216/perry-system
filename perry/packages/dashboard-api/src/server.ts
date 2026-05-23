@@ -83,6 +83,7 @@ export function createServer(
       'step:started', 'step:progress', 'step:completed', 'step:failed', 'project:paused',
       // Agent system events drive Fleet v2 activity trails + bottom feed.
       'agent:invocation:started', 'agent:invocation:completed', 'agent:invocation:failed',
+      'intelligent-evolve:log',
     ];
     for (const evt of events) {
       const handler = (p: any) => onEvent(evt, p);

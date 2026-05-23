@@ -264,6 +264,10 @@ When this skill is activated:
         }
       }
 
+      if (typeof (engine as any).refreshCustomTemplates === 'function') {
+        (engine as any).refreshCustomTemplates();
+      }
+
       res.json({
         success: true,
         templateType,

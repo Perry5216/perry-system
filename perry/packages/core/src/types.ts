@@ -324,6 +324,7 @@ export interface EventMap {
   'learning:observation': { source: string; kind: string; fingerprint: string; value?: number; metadata?: Record<string, any> };
   'learning:duration':    { source: string; kind: string; fingerprint: string; durationMs: number; metadata?: Record<string, any> };
   'skill:execution':      { service: string; name: string; success: boolean; durationMs: number; error: string | null };
+  'intelligent-evolve:log': { message: string; timestamp: string };
 }
 
 // ═══════════════════════════════════════════════════════════
