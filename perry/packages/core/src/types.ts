@@ -35,9 +35,35 @@ export type ProjectType =
 export type ProjectStatus = 'pending' | 'active' | 'paused' | 'completed' | 'failed';
 export type StepStatus = 'pending' | 'active' | 'completed' | 'failed' | 'skipped';
 
+export interface TicketMetadata {
+  order: {
+    category: string;
+    objective: string;
+  };
+  proof: {
+    baselineState: string;
+    failureLogs?: string;
+  };
+  boundary: {
+    inScope: string[];
+    outOfScope: string[];
+    rules: string[];
+  };
+  budget: {
+    maxIterations: number;
+    tokenLimit: number;
+    costLimitUsd?: number;
+  };
+  fallback: {
+    strategy: 'escalate' | 'switch-provider' | 'default-rollback';
+    escalationTarget: string;
+  };
+}
+
 export interface ProjectStep {
   id: string;
   label: string;
+  ticket?: TicketMetadata;
   phase: string;
   taskType: string;
   /**

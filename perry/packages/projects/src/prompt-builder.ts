@@ -325,6 +325,37 @@ export class PromptBuilder {
       included: false,
     });
 
+    if (step.ticket) {
+      const rulesBlock = step.ticket.boundary.rules.map((r, i) => `  ${i + 1}. ${r}`).join('\n');
+      const inScopeBlock = step.ticket.boundary.inScope.map(item => `  - ${item}`).join('\n');
+      const outOfScopeBlock = step.ticket.boundary.outOfScope.map(item => `  - ${item}`).join('\n');
+      const failureLogsBlock = step.ticket.proof.failureLogs
+        ? `\n### PRIOR FAILURE LOGS (FIX THESE ISSUES):\n${step.ticket.proof.failureLogs}\n`
+        : '';
+
+      const ticketContent = [
+        `## 📋 ACTIVE TICKET DETAILS`,
+        `**Category:** ${step.ticket.order.category}`,
+        `**Objective:** ${step.ticket.order.objective}`,
+        `**Baseline State:** ${step.ticket.proof.baselineState}`,
+        failureLogsBlock,
+        `### BOUNDARY CONSTRAINTS:`,
+        `**In Scope:**\n${inScopeBlock}`,
+        `**Out of Scope:**\n${outOfScopeBlock}`,
+        `**Rules to Enforce:**\n${rulesBlock}`,
+        `\n[INSTRUCTION]: You are acting as the Worker in the Worker-Evaluator Loop. You MUST satisfy the objective while adhering strictly to all boundaries and rules above.`
+      ].join('\n');
+
+      slots.push({
+        label: 'Active Execution Ticket',
+        content: ticketContent,
+        priority: 1,
+        tokenCount: 0,
+        compressible: false,
+        included: false,
+      });
+    }
+
     // BUG FIX N3: Skip Anti-Laziness Protocol for analytical/structured steps.
     // "NEVER summarize" directly conflicts with:
     //   - pov_check/analysis/stat_update: need concise grading reports, not exhaustive creative output

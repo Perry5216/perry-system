@@ -35,6 +35,8 @@ import { BookCoverRunner } from './runners/BookCoverRunner.js';
 import { ResearchRunner } from './runners/ResearchRunner.js';
 import { CompileRunner } from './runners/CompileRunner.js';
 import { StandardLlmRunner } from './runners/StandardLlmRunner.js';
+import { AgentRunner } from './agents/runner.js';
+import { getAgent } from './agents/registry.js';
 
 export interface StepRunnerConfig {
   workspaceDir: string;
@@ -201,6 +203,10 @@ export class StepRunner {
   /**
    * Execute a single step. Finds and delegates to the appropriate runner strategy.
    */
+  /**
+   * Execute a single step. Finds and delegates to the appropriate runner strategy.
+   * Runs the double-loop Worker-Evaluator validation pattern.
+   */
   async execute(project: Project, step: ProjectStep): Promise<string> {
     if (Date.now() - this.directorSkillsLoadedAt > this.DIRECTOR_SKILLS_TTL_MS) {
       this.refreshDirectorSkills();
@@ -215,13 +221,180 @@ export class StepRunner {
       message: `Starting: ${step.label}`,
     });
 
-    for (const strategy of this.strategies) {
-      if (strategy.canHandle(step)) {
-        return await strategy.execute(project, step, this);
+    // Ensure step has a ticket. If not, generate a default ticket wrapper.
+    if (!step.ticket) {
+      step.ticket = {
+        order: {
+          category: step.taskType || 'generic',
+          objective: step.prompt,
+        },
+        proof: {
+          baselineState: 'No output generated yet',
+        },
+        boundary: {
+          inScope: [step.label],
+          outOfScope: [],
+          rules: ['Ensure the output addresses the prompt objective precisely.'],
+        },
+        budget: {
+          maxIterations: 3,
+          tokenLimit: 20000,
+        },
+        fallback: {
+          strategy: 'escalate',
+          escalationTarget: 'meta.director',
+        },
+      };
+    }
+
+    let attempts = 0;
+    const maxIterations = step.ticket.budget.maxIterations || 3;
+    let approved = false;
+    let result = '';
+
+    while (attempts < maxIterations && !approved) {
+      attempts++;
+      this.eventBus.emit('step:progress', {
+        projectId: project.id,
+        stepId: step.id,
+        message: `Worker Loop - Iteration ${attempts}/${maxIterations}`,
+      });
+
+      // Delegate to strategy
+      let strategyExecuted = false;
+      for (const strategy of this.strategies) {
+        if (strategy.canHandle(step)) {
+          // If we are on iteration > 1, the step has already been marked completed by the previous strategy run.
+          // We need to mark it active again in the state store so we can run it again.
+          if (attempts > 1) {
+            this.stateStore.startStep(project.id, step.id);
+          }
+          result = await strategy.execute(project, step, this);
+          strategyExecuted = true;
+          break;
+        }
+      }
+
+      if (!strategyExecuted) {
+        throw new Error(`No execution strategy found for step: ${step.label} (taskType: ${step.taskType})`);
+      }
+
+      // Check validation
+      this.eventBus.emit('step:progress', {
+        projectId: project.id,
+        stepId: step.id,
+        message: `Evaluator Loop - Running meta.evaluator (Iteration ${attempts}/${maxIterations})...`,
+      });
+
+      const evalAgent = getAgent('meta.evaluator');
+      if (!evalAgent) {
+        throw new Error(`meta.evaluator agent definition not found in registry`);
+      }
+
+      const agentRunner = new AgentRunner(
+        this.router,
+        this.stateStore,
+        this.mcpClient,
+        this.eventBus,
+        this.log.child('meta-evaluator')
+      );
+
+      const evalSessionId = this.stateStore.createAgentSession({
+        domain: 'meta',
+        projectId: project.id,
+        title: `Evaluation: ${step.label} (Iteration ${attempts})`
+      });
+
+      const rulesBlock = step.ticket.boundary.rules.map((r, i) => `  ${i + 1}. ${r}`).join('\n');
+      const inScopeBlock = step.ticket.boundary.inScope.map(item => `  - ${item}`).join('\n');
+      const outOfScopeBlock = step.ticket.boundary.outOfScope.map(item => `  - ${item}`).join('\n');
+
+      const evalInput = [
+        `### TICKET DETAILS`,
+        `Category: ${step.ticket.order.category}`,
+        `Objective: ${step.ticket.order.objective}`,
+        `Baseline State: ${step.ticket.proof.baselineState}`,
+        `Boundary In-Scope:\n${inScopeBlock}`,
+        `Boundary Out-of-Scope:\n${outOfScopeBlock}`,
+        `Rules:\n${rulesBlock}`,
+        ``,
+        `### WORKER DRAFT OUTPUT`,
+        `---`,
+        result,
+        `---`,
+        ``,
+        `Please evaluate the worker draft output against the active ticket instructions.`,
+        `You must strictly verify the boundary rules and objective constraints.`,
+        `Return a valid JSON object indicating approval status and failure logs if rejected.`
+      ].join('\n');
+
+      const evalInvocation = await agentRunner.invoke({
+        agent: evalAgent,
+        sessionId: evalSessionId,
+        input: evalInput,
+        penSlug: (project.context as any).penNameSlug || undefined,
+      });
+
+      let failureLogs = 'Invalid evaluator response formatting.';
+      try {
+        let rawOutput = evalInvocation.output || '';
+        const match = rawOutput.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (match) {
+          rawOutput = match[1];
+        }
+        const parsed = JSON.parse(rawOutput.trim());
+        approved = !!parsed.approved;
+        failureLogs = parsed.failureLogs || 'Rejected without specific logs.';
+      } catch (err: any) {
+        approved = false;
+        failureLogs = `Failed to parse evaluator JSON response: ${err.message}. Output was: ${evalInvocation.output}`;
+      }
+
+      if (approved) {
+        this.eventBus.emit('step:progress', {
+          projectId: project.id,
+          stepId: step.id,
+          message: `Evaluator Loop - Approved on iteration ${attempts}!`,
+        });
+      } else {
+        this.log.warn('Evaluator Loop - Rejected draft', {
+          projectId: project.id,
+          stepId: step.id,
+          iteration: attempts,
+          failureLogs,
+        });
+        this.eventBus.emit('step:progress', {
+          projectId: project.id,
+          stepId: step.id,
+          message: `Evaluator Loop - Rejected draft on iteration ${attempts}. Reason: ${failureLogs}`,
+        });
+
+        // Update the failure logs in ticket proof metadata
+        step.ticket.proof.failureLogs = (step.ticket.proof.failureLogs ? step.ticket.proof.failureLogs + '\n' : '') +
+          `[Iteration ${attempts} Failure]: ${failureLogs}`;
+
+        // Save updated project to state store
+        this.stateStore.save(project);
       }
     }
 
-    throw new Error(`No execution strategy found for step: ${step.label} (taskType: ${step.taskType})`);
+    if (!approved) {
+      const fallbackStrategy = step.ticket.fallback.strategy || 'escalate';
+      this.eventBus.emit('step:progress', {
+        projectId: project.id,
+        stepId: step.id,
+        message: `Evaluator Loop - Budget depleted. Executing fallback strategy: ${fallbackStrategy}`,
+      });
+      if (fallbackStrategy === 'escalate') {
+        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Escalating to ${step.ticket.fallback.escalationTarget || 'meta.director'}. Last failure: ${step.ticket.proof.failureLogs}`);
+      } else if (fallbackStrategy === 'switch-provider') {
+        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Fallback requested: switch provider. Last failure: ${step.ticket.proof.failureLogs}`);
+      } else {
+        throw new Error(`Worker-Evaluator Loop failed after ${maxIterations} attempts. Rolling back step. Last failure: ${step.ticket.proof.failureLogs}`);
+      }
+    }
+
+    return result;
   }
 
   /**

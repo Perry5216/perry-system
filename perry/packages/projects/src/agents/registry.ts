@@ -155,6 +155,43 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
     canDelegate: false,
   },
 
+  'meta.evaluator': {
+    id: 'meta.evaluator',
+    domain: 'meta',
+    label: 'Evaluator',
+    description:
+      'Quality Inspector agent that evaluates output drafts produced by workers. ' +
+      'Validates constraints, requirements, and compliance with the ticket.',
+    systemPrompt: [
+      'You are the Evaluator, a Quality Inspector in a decoupled Worker-Evaluator Loop.',
+      'Your job is to strictly grade the output draft produced by a Worker against the provided Ticket metadata.',
+      'A Ticket contains the following details:',
+      '  - Order (Objective & Category)',
+      '  - Boundary (Rules, In Scope, Out of Scope)',
+      '  - Budget (Max Iterations, Token Limits)',
+      '',
+      'You must analyze the Worker\'s draft response and determine if it satisfies the criteria without violating any boundaries or rules.',
+      'If there are failing parts, compile detailed failure logs outlining exactly what failed and how it can be fixed.',
+      '',
+      'You must format your response strictly as a valid JSON object. Do not wrap your response in markdown code blocks or any other formatting.',
+      'The JSON object must have the following structure:',
+      '{',
+      '  "approved": boolean,',
+      '  "failureLogs": string // Required if approved is false, otherwise omit or leave empty',
+      '}',
+      '',
+      'Rule: Be extremely strict. If any boundary constraint or objective is unmet, set approved to false.'
+    ].join('\n'),
+    modelBinding: {
+      provider: 'workers',
+    },
+    toolACL: [],
+    outputFormat: 'json',
+    compression: 'low',
+    timeoutMs: 5 * 60_000,
+    canDelegate: false,
+  },
+
 
   // ──────────────────────────────────────────────────────────────────
   // CODE domain. Default routes to subscription
