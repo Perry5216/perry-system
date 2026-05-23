@@ -21,8 +21,9 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; service?: string; proposedAt?: string; body: string } {
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!m) return { body: raw };
+  const normalized = raw.replace(/\r\n/g, '\n');
+  const m = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { body: normalized };
   const block = m[1];
   const body = m[2];
   const out: any = { body };
@@ -311,6 +312,383 @@ export function setupDomainsRoutes(opts: {
     }
   });
 
+  // Evolve domain workType to Template using Guided Setup Wizard
+  router.post('/evolve-worktype-to-template', async (req, res) => {
+    try {
+      const { workType, name, description, pipelineGoal, workersMode } = req.body || {};
+      if (!workType || !name || !pipelineGoal) {
+        return res.status(400).json({ error: 'workType, name, and pipelineGoal are required' });
+      }
+
+      const systemPrompt = [
+        `You are the Perry Template Generator. Your job is to analyze a user's request for a custom pipeline/template and output a strictly structured JSON definition of the pipeline steps.`,
+        ``,
+        `For each step, you must determine the appropriate taskType and prompt to run.`,
+        `Perry has the following task types and routing target systems:`,
+        `1. 'comfyui_generate', 'text_overlay', 'qwen_text_render': Smartly assigned if the user requests image generation, book cover creation, visual design, or typography overlay. These route directly to ComfyUI (Local GPU).`,
+        `2. 'creative_writing', 'revision_execution': Smartly assigned for creative narrative drafting or prose revisions. These route to the local Writer GPU (Magnum/Gemma LoRA).`,
+        `3. 'analysis', 'outline', 'book_bible', 'character_bible', 'story_architecture', 'planning', 'research': Smartly assigned for outline generation, logical planning, character bibles, data extraction, or network research. These route to high-capacity external workers (Claude, Gemini) or the local Librarian/Researcher model based on settings.`,
+        ``,
+        `Smart Worker Assignment Rules:`,
+        `- If workersMode is 'smart': Perry will dynamically route steps to the best provider.`,
+        `  - Image/cover/graphic steps -> set taskType to 'comfyui_generate'`,
+        `  - Creative prose writing steps -> set taskType to 'creative_writing'`,
+        `  - Logical outlining / planning steps -> set taskType to 'outline' or 'planning'`,
+        `  - Analysis / check steps -> set taskType to 'analysis' or 'pov_check'`,
+        `- If workersMode is 'gpu': Perry forces all text generation steps to use local GPU (such as 'creative_writing' or 'analysis'), and image/cover steps to 'comfyui_generate'.`,
+        `- If workersMode is 'subscription': Perry forces all text steps to route to subscription CLIs (using task types like 'planning' or 'outline' or 'research').`,
+        ``,
+        `Output MUST be a valid JSON object matching the CustomPipelineDef schema:`,
+        `{`,
+        `  "id": "kebab-case-unique-id-prefixed-with-custom",`,
+        `  "name": "Template Display Name",`,
+        `  "description": "Short template description",`,
+        `  "workType": "the target work type (e.g. books, code, dnd, email, hacking)",`,
+        `  "steps": [`,
+        `    {`,
+        `      "label": "Step Name",`,
+        `      "phase": "planning | writing | revision | marketing",`,
+        `      "taskType": "comfyui_generate | creative_writing | outline | planning | analysis | pov_check | research",`,
+        `      "prompt": "Highly detailed system prompt instructing the AI on exactly what to do for this step. Include instructions on using inputs from previous steps."`,
+        `    }`,
+        `  ]`,
+        `}`,
+        ``,
+        `Ensure the output is ONLY a valid JSON object. Do not wrap it in markdown code blocks.`,
+      ].join('\n');
+
+      const userPrompt = [
+        `Generate a template for the workType "${workType}" named "${name}".`,
+        `Description: ${description || ''}`,
+        `Goal/Requirements: ${pipelineGoal}`,
+        `Worker Mode: ${workersMode || 'smart'}`,
+      ].join('\n');
+
+      log.info('Invoking AI Router to evolve workType to template', { workType, name, workersMode });
+
+      const aiResponse = await aiRouter.complete({
+        provider: 'gemini',
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+        maxTokens: 4096,
+        temperature: 0.2
+      });
+
+      const generatedJson = extractJson(aiResponse.text);
+      if (!generatedJson || !generatedJson.steps || !Array.isArray(generatedJson.steps)) {
+        throw new Error('AI failed to return a valid template structure with steps');
+      }
+
+      const configPath = join(workspaceDir, '.config', 'custom_pipelines.json');
+      let pipelines: any[] = [];
+      if (existsSync(configPath)) {
+        try {
+          const raw = await readFile(configPath, 'utf8');
+          pipelines = JSON.parse(raw);
+        } catch (e) {
+          log.error('Failed to parse custom_pipelines.json', { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
+      const kebabName = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      const templateType = `custom-${kebabName}`;
+      
+      const newPipeline = {
+        id: templateType,
+        name: generatedJson.name || name,
+        description: generatedJson.description || description || `Generated template based on work type: ${workType}`,
+        workType,
+        steps: generatedJson.steps.map((s: any) => ({
+          label: s.label,
+          phase: s.phase || 'planning',
+          taskType: s.taskType || 'general',
+          prompt: s.prompt || '',
+        }))
+      };
+
+      pipelines = pipelines.filter((p: any) => p.id !== templateType);
+      pipelines.push(newPipeline);
+
+      const configDir = join(configPath, '..');
+      if (!existsSync(configDir)) {
+        await mkdir(configDir, { recursive: true });
+      }
+      await writeFile(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
+
+      // Register skill playbooks
+      const skillName = `template-builder-${kebabName}`;
+      const skillDir = join(workspaceDir, 'skills-installed', workType);
+      if (!existsSync(skillDir)) {
+        await mkdir(skillDir, { recursive: true });
+      }
+      const skillPath = join(skillDir, `${skillName}.md`);
+      const now = new Date().toISOString();
+      const skillContent = `---
+name: ${skillName}
+service: ${workType}
+description: Skill dedicated to generating and maintaining the custom template ${templateType} (${name}).
+proposed_at: ${now}
+promoted_at: ${now}
+proposed_by: template-evolution
+status: installed
+applies_when:
+  kind: template-builder
+  fingerprint: ${templateType}
+---
+
+# Template Builder Skill: ${name}
+
+This skill belongs to the domain ${workType} and is dedicated to generating and running templates for this domain.
+When this skill is activated:
+- Utilize the structure and prompt strategies defined in the ${name} template.
+- Refine steps, parameters, and prompts to align with domain guidelines.
+- Self-improve the template over time based on execution observations.
+`;
+      await writeFile(skillPath, skillContent, 'utf-8');
+
+      const domain = registry.get(workType);
+      if (domain) {
+        const defaultSkills = domain.defaultSkills || [];
+        const skillExists = defaultSkills.some(s => s.service === workType && s.name === skillName);
+        if (!skillExists) {
+          const updatedSkills = [...defaultSkills, { service: workType, name: skillName }];
+          registry.update(workType, { defaultSkills: updatedSkills });
+          log.info(`Assigned skill ${workType}/${skillName} to domain ${workType}`);
+        }
+      }
+
+      res.json({
+        success: true,
+        templateType,
+        templateName: newPipeline.name,
+        domainId: workType,
+        skillName
+      });
+    } catch (err: any) {
+      log.error('Failed to evolve workType to template', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Intelligent template generator evaluating project + workType + web search
+  router.post('/intelligent-evolve-project', async (req, res) => {
+    try {
+      const { projectId, workType, name, description, workersMode, enableSearch } = req.body || {};
+      if (!projectId || !workType) {
+        return res.status(400).json({ error: 'projectId and workType are required' });
+      }
+
+      const project = stateStore.get(projectId);
+      if (!project) {
+        return res.status(404).json({ error: `Project ${projectId} not found` });
+      }
+
+      // Evaluate the project context
+      const projectTitle = project.title;
+      const projectDesc = project.description;
+      const projectStepsText = project.steps.map((s: any) => {
+        let resultExcerpt = '';
+        if (s.result) {
+          resultExcerpt = s.result.length > 500 ? s.result.slice(0, 500) + '...' : s.result;
+        }
+        return `- Step: ${s.label}\n  Phase: ${s.phase}\n  TaskType: ${s.taskType}\n  Prompt: ${s.prompt}\n  Status: ${s.status}${resultExcerpt ? `\n  Output Sample: ${resultExcerpt}` : ''}`;
+      }).join('\n\n');
+
+      // Run web search context
+      let searchContext = '';
+      if (enableSearch !== false) {
+        const tavilyKey = process.env.TAVILY_API_KEY;
+        const exaKey = process.env.EXA_API_KEY;
+        const fcKey = process.env.FIRECRAWL_API_KEY;
+        const backend = tavilyKey ? 'tavily' : exaKey ? 'exa' : fcKey ? 'firecrawl' : '';
+
+        if (backend) {
+          try {
+            const query = `${workType} template pipeline steps ${projectTitle} structure guidelines`;
+            log.info(`Running intelligent web search via ${backend} for template evolution`, { query });
+            let searchResults: SearchResult[] = [];
+            if (backend === 'tavily' && tavilyKey) {
+              searchResults = await searchTavily(query, 5, tavilyKey, log);
+            } else if (backend === 'exa' && exaKey) {
+              searchResults = await searchExa(query, 5, exaKey, log);
+            } else if (backend === 'firecrawl' && fcKey) {
+              searchResults = await searchFirecrawl(query, 5, fcKey, log);
+            }
+
+            if (searchResults && searchResults.length > 0) {
+              searchContext = searchResults.map(r => `Source: ${r.title} (${r.url})\nContent: ${r.snippet}`).join('\n\n');
+            }
+          } catch (searchErr: any) {
+            log.warn('Web search failed during intelligent template evolution, proceeding without search results', { error: searchErr.message });
+          }
+        } else {
+          log.info('No web search API keys configured, skipping search phase.');
+        }
+      }
+
+      const systemPrompt = [
+        `You are the Perry Intelligent Template Generator. Your job is to analyze a project's existing structure, steps, and output samples, combine them with web search context showing domain best-practices, and generate a highly custom template tailored to that project and work type.`,
+        ``,
+        `For each step of the new template, you must determine the appropriate taskType and prompt to run.`,
+        `Perry has the following task types and routing target systems:`,
+        `1. 'comfyui_generate', 'text_overlay', 'qwen_text_render': Smartly assigned if the step involves image generation, card/visual design, map layout, or cover creation. These route directly to ComfyUI (Local GPU).`,
+        `2. 'creative_writing', 'revision_execution': Smartly assigned for creative narrative writing, prose generation, or dialogue polishing. These route to the local Writer GPU.`,
+        `3. 'analysis', 'outline', 'book_bible', 'character_bible', 'story_architecture', 'planning', 'research': Smartly assigned for outlines, rule definitions, planning, fact extraction, or research. These route to high-capacity external workers (Claude, Gemini) or local Librarian/Researcher.`,
+        ``,
+        `Smart Worker Assignment Rules:`,
+        `- If workersMode is 'smart': Perry will dynamically route steps to the best provider.`,
+        `  - Image/graphic/visual design steps -> set taskType to 'comfyui_generate'`,
+        `  - Creative writing / prose steps -> set taskType to 'creative_writing'`,
+        `  - Outlining/planning/rule-writing steps -> set taskType to 'outline' or 'planning'`,
+        `  - Analysis / quality checks -> set taskType to 'analysis' or 'pov_check'`,
+        `- If workersMode is 'gpu': Perry forces all text generation steps to use local GPU (such as 'creative_writing' or 'analysis'), and image steps to 'comfyui_generate'.`,
+        `- If workersMode is 'subscription': Perry forces all text steps to route to subscription CLIs (using task types like 'planning' or 'outline' or 'research').`,
+        ``,
+        `Output MUST be a valid JSON object matching the CustomPipelineDef schema:`,
+        `{`,
+        `  "id": "kebab-case-unique-id-prefixed-with-custom",`,
+        `  "name": "Template Display Name",`,
+        `  "description": "Short template description",`,
+        `  "workType": "${workType}",`,
+        `  "steps": [`,
+        `    {`,
+        `      "label": "Step Name",`,
+        `      "phase": "planning | writing | revision | marketing",`,
+        `      "taskType": "comfyui_generate | creative_writing | outline | planning | analysis | pov_check | research",`,
+        `      "prompt": "Highly detailed system prompt instructing the AI on exactly what to do for this step. Include instructions on using inputs from previous steps."`,
+        `    }`,
+        `  ]`,
+        `}`,
+        ``,
+        `Ensure the output is ONLY a valid JSON object. Do not wrap it in markdown code blocks.`,
+      ].join('\n');
+
+      const userPrompt = [
+        `Evaluate the following project and generate a reusable custom template under the "${workType}" domain.`,
+        ``,
+        `--- Target Project Evaluation ---`,
+        `Title: ${projectTitle}`,
+        `Description: ${projectDesc}`,
+        `Existing Steps and Output Samples:`,
+        projectStepsText,
+        ``,
+        `--- Web Search Domain Context ---`,
+        searchContext || 'No search results available.',
+        ``,
+        `--- Requirements ---`,
+        `Template Name: ${name || projectTitle + ' Template'}`,
+        `Template Description: ${description || 'Custom template evolved from ' + projectTitle}`,
+        `Worker Mode: ${workersMode || 'smart'}`,
+        `Work Type: ${workType}`,
+      ].join('\n');
+
+      log.info('Invoking AI Router to intelligently evolve project to template', { projectId, workType, name, workersMode });
+
+      const aiResponse = await aiRouter.complete({
+        provider: 'gemini',
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+        maxTokens: 4096,
+        temperature: 0.2
+      });
+
+      const generatedJson = extractJson(aiResponse.text);
+      if (!generatedJson || !generatedJson.steps || !Array.isArray(generatedJson.steps)) {
+        throw new Error('AI failed to return a valid template structure with steps');
+      }
+
+      const configPath = join(workspaceDir, '.config', 'custom_pipelines.json');
+      let pipelines: any[] = [];
+      if (existsSync(configPath)) {
+        try {
+          const raw = await readFile(configPath, 'utf8');
+          pipelines = JSON.parse(raw);
+        } catch (e) {
+          log.error('Failed to parse custom_pipelines.json', { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
+      const templateName = generatedJson.name || name || `${projectTitle} Template`;
+      const kebabName = templateName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      const templateType = `custom-${kebabName}`;
+
+      const newPipeline = {
+        id: templateType,
+        name: templateName,
+        description: generatedJson.description || description || `Generated template evolved from project: ${projectTitle}`,
+        workType,
+        steps: generatedJson.steps.map((s: any) => ({
+          label: s.label,
+          phase: s.phase || 'planning',
+          taskType: s.taskType || 'general',
+          prompt: s.prompt || '',
+        }))
+      };
+
+      pipelines = pipelines.filter((p: any) => p.id !== templateType);
+      pipelines.push(newPipeline);
+
+      const configDir = join(configPath, '..');
+      if (!existsSync(configDir)) {
+        await mkdir(configDir, { recursive: true });
+      }
+      await writeFile(configPath, JSON.stringify(pipelines, null, 2), 'utf8');
+
+      // Register skill playbooks
+      const skillName = `template-builder-${kebabName}`;
+      const skillDir = join(workspaceDir, 'skills-installed', workType);
+      if (!existsSync(skillDir)) {
+        await mkdir(skillDir, { recursive: true });
+      }
+      const skillPath = join(skillDir, `${skillName}.md`);
+      const now = new Date().toISOString();
+      const skillContent = `---
+name: ${skillName}
+service: ${workType}
+description: Skill dedicated to generating and maintaining the custom template ${templateType} (${templateName}).
+proposed_at: ${now}
+promoted_at: ${now}
+proposed_by: template-evolution
+status: installed
+applies_when:
+  kind: template-builder
+  fingerprint: ${templateType}
+---
+
+# Template Builder Skill: ${templateName}
+
+This skill belongs to the domain ${workType} and is dedicated to generating and running templates for this domain.
+When this skill is activated:
+- Utilize the structure and prompt strategies defined in the ${templateName} template.
+- Refine steps, parameters, and prompts to align with domain guidelines.
+- Self-improve the template over time based on execution observations.
+`;
+      await writeFile(skillPath, skillContent, 'utf-8');
+
+      const domain = registry.get(workType);
+      if (domain) {
+        const defaultSkills = domain.defaultSkills || [];
+        const skillExists = defaultSkills.some(s => s.service === workType && s.name === skillName);
+        if (!skillExists) {
+          const updatedSkills = [...defaultSkills, { service: workType, name: skillName }];
+          registry.update(workType, { defaultSkills: updatedSkills });
+          log.info(`Assigned skill ${workType}/${skillName} to domain ${workType}`);
+        }
+      }
+
+      res.json({
+        success: true,
+        templateType,
+        templateName: newPipeline.name,
+        domainId: workType,
+        skillName
+      });
+    } catch (err: any) {
+      log.error('Failed to intelligently evolve project to template', { error: err.message });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Install custom skill
   router.post('/install-skill', async (req, res) => {
     try {
@@ -366,4 +744,62 @@ export function setupDomainsRoutes(opts: {
   });
 
   return router;
+}
+
+interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  score?: number;
+  source?: string;
+}
+
+async function searchTavily(q: string, limit: number, apiKey: string, log: any): Promise<SearchResult[]> {
+  const r = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey, query: q, max_results: limit, search_depth: 'basic' }),
+  });
+  if (!r.ok) throw new Error(`Tavily ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const data: any = await r.json();
+  return (data.results || []).map((x: any) => ({
+    title: x.title || '',
+    url: x.url || '',
+    snippet: x.content || x.snippet || '',
+    score: x.score,
+    source: 'tavily',
+  }));
+}
+
+async function searchExa(q: string, limit: number, apiKey: string, log: any): Promise<SearchResult[]> {
+  const r = await fetch('https://api.exa.ai/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body: JSON.stringify({ query: q, num_results: limit }),
+  });
+  if (!r.ok) throw new Error(`Exa ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const data: any = await r.json();
+  return (data.results || []).map((x: any) => ({
+    title: x.title || '',
+    url: x.url || '',
+    snippet: x.text || x.snippet || '',
+    score: x.score,
+    source: 'exa',
+  }));
+}
+
+async function searchFirecrawl(q: string, limit: number, apiKey: string, log: any): Promise<SearchResult[]> {
+  const r = await fetch('https://api.firecrawl.dev/v1/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify({ query: q, limit }),
+  });
+  if (!r.ok) throw new Error(`Firecrawl ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const data: any = await r.json();
+  return (data.data || data.results || []).map((x: any) => ({
+    title: x.title || x.metadata?.title || '',
+    url: x.url || '',
+    snippet: x.description || x.markdown?.slice(0, 200) || '',
+    source: 'firecrawl',
+  }));
 }

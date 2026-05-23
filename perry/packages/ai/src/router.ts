@@ -226,15 +226,6 @@ export class AIRouter {
       repeatPenalty: ollamaRepeatPenalty,
     } as any);
 
-    if (await ollama.checkAvailability()) {
-      this.providers.set('ollama', ollama);
-      this.log.info('Writer GPU initialized (Ollama primary)', { model: ollamaModel, endpoint: ollamaEndpoint });
-      // Register Writer GPU for context watching
-      this.contextWatcher.addGpu('Writer (5090)', ollamaEndpoint, 'writer', ollamaContextWindow);
-    } else {
-      this.log.warn('Writer GPU failed to initialize', { model: ollamaModel, endpoint: ollamaEndpoint });
-    }
-
     // ── Ollama Secondary = "The Librarian" (5070 Ti) ──
     const librarianEndpoint    = this.config.get<string>('ai.ollama.librarianEndpoint') || process.env.OLLAMA_LIBRARIAN_BASE_URL || 'http://localhost:11435';
     const librarianModel       = this.config.get<string>('ai.ollama.librarianModel') || process.env.OLLAMA_LIBRARIAN_MODEL || 'gemma3:12b';
@@ -262,23 +253,6 @@ export class AIRouter {
       topK:          librarianTopK,
       repeatPenalty: librarianRepeat,
     } as any);
-
-    if (await librarian.checkAvailability()) {
-      this.providers.set('librarian', librarian);
-      this.compressor.setLibrarian(librarian);
-      this.log.info('Librarian GPU initialized (Ollama secondary)', {
-        model: librarianModel,
-        endpoint: librarianEndpoint,
-        contextWindow: librarianCtx,
-        temperature: librarianTemperature,
-      });
-      // Register Librarian GPU for context watching
-      this.contextWatcher.addGpu('Librarian (5070 Ti)', librarianEndpoint, 'librarian', librarianCtx);
-    } else {
-      this.log.warn('Librarian GPU not available — context compression disabled', {
-        endpoint: librarianEndpoint,
-      });
-    }
 
     // ── Ollama Tertiary = "The Researcher" (configurable endpoint) ──
     // Book-planning research phase (Concept Keywords + 5 live-data scouts + Market &
@@ -324,20 +298,6 @@ export class AIRouter {
       repeatPenalty: 1.0,
     } as any);
 
-    if (await researcher.checkAvailability()) {
-      this.providers.set('researcher', researcher);
-      this.log.info('Researcher initialized (Ollama on 5090, swap w/ writer)', {
-        model: researcherModel,
-        endpoint: researcherEndpoint,
-        contextWindow: researcherCtx,
-      });
-    } else {
-      this.log.warn('Researcher not available — book-planning research will fall back to librarian', {
-        model: researcherModel,
-        endpoint: researcherEndpoint,
-      });
-    }
-
     // ── Ollama Quaternary = "Perry-Agent" (locally-trained tool-using LoRA) ──
     // Slot for the future home-trained agent LoRA(s). Defaults to the
     // librarian endpoint (5070 Ti) since the trainer will produce small
@@ -355,8 +315,9 @@ export class AIRouter {
     const perryAgentModel = process.env.OLLAMA_PERRY_AGENT_MODEL
       || this.config.get<string>('ai.ollama.perryAgentModel', '');
 
+    let perryAgent: any = null;
     if (perryAgentModel) {
-      const perryAgent = new OllamaProvider({
+      perryAgent = new OllamaProvider({
         id: 'perry-agent',
         name: 'Perry-Agent (locally-trained)',
         model: perryAgentModel,
@@ -373,7 +334,66 @@ export class AIRouter {
         topK: 40,
         repeatPenalty: 1.0,
       } as any);
-      if (await perryAgent.checkAvailability()) {
+    }
+
+    // Run all checks in parallel
+    const checks: Promise<any>[] = [];
+    let ollamaAvailable = false;
+    let librarianAvailable = false;
+    let researcherAvailable = false;
+    let perryAgentAvailable = false;
+
+    checks.push(ollama.checkAvailability().then((res: boolean) => { ollamaAvailable = res; }).catch(() => {}));
+    checks.push(librarian.checkAvailability().then((res: boolean) => { librarianAvailable = res; }).catch(() => {}));
+    checks.push(researcher.checkAvailability().then((res: boolean) => { researcherAvailable = res; }).catch(() => {}));
+    if (perryAgent) {
+      checks.push(perryAgent.checkAvailability().then((res: boolean) => { perryAgentAvailable = res; }).catch(() => {}));
+    }
+
+    await Promise.all(checks);
+
+    if (ollamaAvailable) {
+      this.providers.set('ollama', ollama);
+      this.log.info('Writer GPU initialized (Ollama primary)', { model: ollamaModel, endpoint: ollamaEndpoint });
+      // Register Writer GPU for context watching
+      this.contextWatcher.addGpu('Writer (5090)', ollamaEndpoint, 'writer', ollamaContextWindow);
+    } else {
+      this.log.warn('Writer GPU failed to initialize', { model: ollamaModel, endpoint: ollamaEndpoint });
+    }
+
+    if (librarianAvailable) {
+      this.providers.set('librarian', librarian);
+      this.compressor.setLibrarian(librarian);
+      this.log.info('Librarian GPU initialized (Ollama secondary)', {
+        model: librarianModel,
+        endpoint: librarianEndpoint,
+        contextWindow: librarianCtx,
+        temperature: librarianTemperature,
+      });
+      // Register Librarian GPU for context watching
+      this.contextWatcher.addGpu('Librarian (5070 Ti)', librarianEndpoint, 'librarian', librarianCtx);
+    } else {
+      this.log.warn('Librarian GPU not available — context compression disabled', {
+        endpoint: librarianEndpoint,
+      });
+    }
+
+    if (researcherAvailable) {
+      this.providers.set('researcher', researcher);
+      this.log.info('Researcher initialized (Ollama on 5090, swap w/ writer)', {
+        model: researcherModel,
+        endpoint: researcherEndpoint,
+        contextWindow: researcherCtx,
+      });
+    } else {
+      this.log.warn('Researcher not available — book-planning research will fall back to librarian', {
+        model: researcherModel,
+        endpoint: researcherEndpoint,
+      });
+    }
+
+    if (perryAgentModel) {
+      if (perryAgentAvailable) {
         this.providers.set('perry-agent', perryAgent);
         this.log.info('Perry-Agent initialized (locally-trained LoRA)', {
           model: perryAgentModel,
@@ -594,14 +614,43 @@ export class AIRouter {
    * Complete a request, with automatic fallback on failure.
    */
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    const provider = this.providers.get(request.provider);
-    if (!provider) throw new Error(`Provider "${request.provider}" not found`);
+    let resolvedProviderId = request.provider;
+    let resolvedModel = request.model;
+
+    if (resolvedProviderId === 'librarian') {
+      const hasOllama = this.providers.has('ollama');
+      const hasGemini = this.providers.has('gemini');
+      const hasClaude = this.providers.has('claude');
+
+      if (hasOllama) {
+        resolvedProviderId = 'ollama';
+        const ollamaProv = this.providers.get('ollama')!;
+        resolvedModel = ollamaProv.model;
+      } else if (hasGemini) {
+        resolvedProviderId = 'gemini';
+        const geminiProv = this.providers.get('gemini')!;
+        resolvedModel = geminiProv.model;
+      } else if (hasClaude) {
+        resolvedProviderId = 'claude';
+        const claudeProv = this.providers.get('claude')!;
+        resolvedModel = claudeProv.model;
+      }
+    }
+
+    const provider = this.providers.get(resolvedProviderId);
+    if (!provider) throw new Error(`Provider "${resolvedProviderId}" not found`);
+
+    const requestToComplete = {
+      ...request,
+      provider: resolvedProviderId,
+      model: resolvedModel || provider.model
+    };
 
     // Phase 3: per-request pen-aware writer model override. When the caller
     // supplies penSlug and the configured resolver returns a model, we swap
     // request.model for the ollama provider. Other providers (claude, gemini,
     // etc.) ignore pen-slug because they don't run pen-specific LoRAs.
-    const effectiveRequest = this.applyPenAwareModel(request);
+    const effectiveRequest = this.applyPenAwareModel(requestToComplete);
 
     // Build the ordered list of fallback providers to try
     const triedIds = new Set<string>([effectiveRequest.provider]);

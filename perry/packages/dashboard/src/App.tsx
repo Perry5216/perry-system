@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { Play, Pause, AlertCircle, CheckCircle2, Circle, Loader2, Plus, X, Settings, Trash2, ChevronDown, ChevronRight, RotateCcw, Radio, Eye, EyeOff, ArrowDownToLine, ArrowUpFromLine, BarChart3, GitBranch, Cpu, Users } from 'lucide-react';
+import { Play, Pause, AlertCircle, CheckCircle2, Circle, Loader2, Plus, X, Settings, Trash2, ChevronDown, ChevronRight, RotateCcw, Radio, Eye, EyeOff, ArrowDownToLine, ArrowUpFromLine, BarChart3, GitBranch, Cpu, Users, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { Project, ProjectStep } from '@perry/core';
 import { FleetCanvas } from './components/FleetCanvas';
@@ -195,12 +195,44 @@ function parseDeviceAuth(logs: string): { url: string; code: string } | null {
 }
 
 
+export const workTypeDetails: Record<string, { label: string; description: string }> = {
+  books: {
+    label: 'Books',
+    description: 'Novel-writing pipeline with per-pen-name fine-tuning, scout, audit, and revision.'
+  },
+  code: {
+    label: 'Code',
+    description: 'Software development pipeline with code review, architecting, and implementation.'
+  },
+  dnd: {
+    label: 'D&D',
+    description: 'D&D campaign planning, session preparation, and character design.'
+  },
+  email: {
+    label: 'Email',
+    description: 'Inbox triage and drafting replies in the user\'s voice.'
+  },
+  hacking: {
+    label: 'Hacking',
+    description: 'Defensive security analysis of vulnerabilities, CVEs, and recon dossiers.'
+  }
+};
+
+
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [isGeneratingTemplate, setIsGeneratingTemplate] = useState(false);
+
+  // TopStatusBar Telemetry Counts
+  const [agentsCount, setAgentsCount] = useState<number>(0);
+  const [domainsCount, setDomainsCount] = useState<number>(0);
+  const [activeCount, setActiveCount] = useState<number>(0);
+  const [doneCount, setDoneCount] = useState<number>(0);
+  const [, setActiveInvocations] = useState<Set<string>>(() => new Set());
 
   // Tick once per second so active-step elapsed timers (re)render. Kept
   // tiny — just a number that changes — so React's diff only updates
@@ -248,17 +280,31 @@ export function App() {
   // activeTab === 'projects'. No compatibility shim needed.
 
   // Work-type filter on the Projects panel. 'all' shows everything; the
-  // others (code / email / hacking / meta) match the agent domains.
-  type WorkType = 'all' | 'code' | 'email' | 'hacking' | 'meta';
-  const [projectWorkType, setProjectWorkType] = useState<WorkType>('all');
+  // others (code / email / hacking / meta / book / dnd) match the agent domains.
+  type WorkType = 'all' | 'code' | 'email' | 'hacking' | 'meta' | 'books' | 'dnd';
+  const [projectWorkType, setProjectWorkType] = useState<WorkType>('meta');
 
   /** Derive a project's work type from whatever signal we can find: an
-   *  explicit `metadata.workType` field if set, otherwise inferred from the
+   *  explicit `p.workType` or `metadata.workType` field if set, otherwise inferred from the
    *  step types in the project. Falls back to 'code'. */
   const inferProjectWorkType = (p: Project): Exclude<WorkType, 'all'> => {
+    if (p.workType) {
+      if ((p.workType as string) === 'book') return 'books';
+      return p.workType as any;
+    }
     const meta = (p as any).metadata || {};
-    if (meta.workType && ['code','email','hacking','meta'].includes(meta.workType)) {
-      return meta.workType;
+    if (meta.workType && ['code','email','hacking','meta','books','book','dnd'].includes(meta.workType)) {
+      return (meta.workType as string) === 'book' ? 'books' : (meta.workType as any);
+    }
+    if (['book-planning', 'style-calibration', 'novel-pipeline', 'deep-revision', 'revision-execution', 'book-production', 'amazon-kdp-launch', 'short-story', 'book-cover'].includes(p.type)) {
+      return 'books';
+    }
+    if (['dnd-campaign-planning', 'dnd-session-prep', 'dnd-character-design'].includes(p.type)) {
+      return 'dnd';
+    }
+    const tpl = templates.find(t => t.type === p.type);
+    if (tpl && tpl.workType) {
+      return (tpl.workType as string) === 'book' ? 'books' : (tpl.workType as any);
     }
     const stepTypes = new Set((p.steps || []).map(s => s.taskType));
     if ([...stepTypes].some(t => t.startsWith('code'))) return 'code';
@@ -572,6 +618,29 @@ export function App() {
   // Delete Project State
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Admin Operations State
+  const [adminEvolveProjectId, setAdminEvolveProjectId] = useState<string>('');
+  const [adminEvolveWorkType, setAdminEvolveWorkType] = useState<string>('books');
+  const [isAssessing, setIsAssessing] = useState<boolean>(false);
+  
+  // Evolve WorkType to Template Wizard State
+  const [isEvolveModalOpen, setIsEvolveModalOpen] = useState(false);
+  const [evolveTemplateName, setEvolveTemplateName] = useState('');
+  const [evolveTemplateDesc, setEvolveTemplateDesc] = useState('');
+  const [evolvePipelineGoal, setEvolvePipelineGoal] = useState('');
+  const [evolveWorkersMode, setEvolveWorkersMode] = useState('smart');
+  const [isEvolvingTemplate, setIsEvolvingTemplate] = useState(false);
+  const [adminIntelligentProjectId, setAdminIntelligentProjectId] = useState<string>('');
+  const [adminIntelligentWorkType, setAdminIntelligentWorkType] = useState<string>('dnd');
+  const [isIntelligentEnableSearch, setIntelligentEnableSearch] = useState<boolean>(true);
+  const [isIntelligentlyEvolving, setIsIntelligentlyEvolving] = useState<boolean>(false);
+  const [assessmentSessionId, setAssessmentSessionId] = useState<string | null>(null);
+  const [assessmentStatus, setAssessmentStatus] = useState<string>('');
+  const [assessmentResult, setAssessmentResult] = useState<any | null>(null);
+  const [assessmentError, setAssessmentError] = useState<string | null>(null);
+  const [installingSkills, setInstallingSkills] = useState<boolean>(false);
+  const [installSuccessMessage, setInstallSuccessMessage] = useState<string | null>(null);
 
   // Sidebar Accordion State
   const [expandedSeries, setExpandedSeries] = useState<Set<string>>(new Set());
@@ -906,6 +975,42 @@ export function App() {
     evtSource.addEventListener('project:paused', () => {
       fetchData();
     });
+
+    evtSource.addEventListener('agent:invocation:started', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.invocationId) {
+          setActiveInvocations(prev => {
+            if (prev.has(data.invocationId)) return prev;
+            const next = new Set(prev);
+            next.add(data.invocationId);
+            setActiveCount(c => c + 1);
+            return next;
+          });
+        }
+      } catch {}
+    });
+
+    const handleAgentInvocationEnded = (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.invocationId) {
+          setActiveInvocations(prev => {
+            const next = new Set(prev);
+            next.delete(data.invocationId);
+            setActiveCount(c => Math.max(0, c - 1));
+            setDoneCount(c => c + 1);
+            return next;
+          });
+        } else {
+          setActiveCount(c => Math.max(0, c - 1));
+          setDoneCount(c => c + 1);
+        }
+      } catch {}
+    };
+
+    evtSource.addEventListener('agent:invocation:completed', handleAgentInvocationEnded);
+    evtSource.addEventListener('agent:invocation:failed', handleAgentInvocationEnded);
 
     // GPU Context Watcher — live stats from the server
     evtSource.addEventListener('context:stats', (e) => {
@@ -1256,13 +1361,22 @@ export function App() {
       // Templates moved to a one-shot effect at boot (see useEffect below).
       // They don't change after compile time, so re-fetching them on every
       // SSE event was just burning the network.
-      const [projRes, sysRes] = await Promise.all([
+      const [projRes, sysRes, telemetryRes] = await Promise.all([
         fetch(`${API_BASE}/projects`),
         fetch(`${API_BASE}/system/status`),
+        fetch(`${API_BASE}/agents/telemetry-stats`).catch(() => null),
       ]);
       const projData = await projRes.json();
       setProjects(projData);
       setSystemStatus(await sysRes.json());
+
+      if (telemetryRes && telemetryRes.ok) {
+        const telemetryData = await telemetryRes.json();
+        setAgentsCount(telemetryData.agentsCount || 0);
+        setDomainsCount(telemetryData.domainsCount || 0);
+        setDoneCount(telemetryData.doneCount || 0);
+        setActiveCount(telemetryData.activeCount || 0);
+      }
 
       setSelectedProject(currentSelected => {
         if (currentSelected) {
@@ -1302,6 +1416,31 @@ export function App() {
     }
   };
 
+  const handleGenerateTemplate = async () => {
+    if (!selectedProject) return;
+    if (!confirm(`Do you want to evolve this project "${selectedProject.title}" into a reusable template? This will create a template for the ${selectedProject.workType || 'books'} domain and register an AI template skill.`)) return;
+    setIsGeneratingTemplate(true);
+    try {
+      const res = await fetch(`${API_BASE}/projects/${selectedProject.id}/generate-template`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to generate template');
+      alert(`Successfully evolved to template: ${data.templateName}!\nA skill "${data.skillName}" has been assigned to the ${data.domainId} domain.`);
+      // Refresh templates
+      const templatesRes = await fetch(`${API_BASE}/system/templates`);
+      if (templatesRes.ok) {
+        const tData = await templatesRes.json();
+        setTemplates(tData);
+      }
+    } catch (err: any) {
+      alert(`Error generating template: ${err.message}`);
+    } finally {
+      setIsGeneratingTemplate(false);
+    }
+  };
+
   // Load audit verdicts for the selected project. Refreshes when any step
   // completes (so newly-landed audit results show up promptly).
   const fetchStepVerdicts = useCallback(async (projectId: string) => {
@@ -1321,6 +1460,193 @@ export function App() {
     const intervalId = setInterval(() => fetchStepVerdicts(selectedProject.id), 15_000);
     return () => clearInterval(intervalId);
   }, [selectedProject, fetchStepVerdicts]);
+
+  // Admin Operations Handlers
+  const handleAdminEvolveProject = async () => {
+    if (!adminEvolveProjectId) return;
+    const targetProject = projects.find(p => p.id === adminEvolveProjectId);
+    if (!targetProject) return;
+    if (!confirm(`Do you want to evolve the project "${targetProject.title}" into a reusable template? This will create a template for the ${targetProject.workType || 'books'} domain and register an AI template skill.`)) return;
+    
+    setIsGeneratingTemplate(true);
+    try {
+      const res = await fetch(`${API_BASE}/projects/${targetProject.id}/generate-template`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to generate template');
+      alert(`Successfully evolved to template: ${data.templateName}!\nA skill "${data.skillName}" has been assigned to the ${data.domainId} domain.`);
+      
+      // Refresh templates
+      const templatesRes = await fetch(`${API_BASE}/system/templates`);
+      if (templatesRes.ok) {
+        const tData = await templatesRes.json();
+        setTemplates(tData);
+      }
+      setAdminEvolveProjectId('');
+    } catch (err: any) {
+      alert(`Error generating template: ${err.message}`);
+    } finally {
+      setIsGeneratingTemplate(false);
+    }
+  };
+
+  const handleAdminEvolveWorkType = () => {
+    setEvolveTemplateName('');
+    setEvolveTemplateDesc('');
+    setEvolvePipelineGoal('');
+    setEvolveWorkersMode('smart');
+    setIsEvolveModalOpen(true);
+  };
+
+  const handleAdminEvolveWorkTypeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!evolveTemplateName.trim() || !evolvePipelineGoal.trim()) {
+      alert('Template Name and Pipeline Goal are required.');
+      return;
+    }
+
+    setIsEvolvingTemplate(true);
+    try {
+      const res = await fetch(`${API_BASE}/domains/evolve-worktype-to-template`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workType: adminEvolveWorkType,
+          name: evolveTemplateName,
+          description: evolveTemplateDesc,
+          pipelineGoal: evolvePipelineGoal,
+          workersMode: evolveWorkersMode
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to evolve template');
+
+      alert(`Successfully evolved work type "${adminEvolveWorkType}" to template: ${data.templateName}!\nA skill "${data.skillName}" has been assigned to the ${data.domainId} domain.`);
+
+      // Refresh templates
+      const templatesRes = await fetch(`${API_BASE}/system/templates`);
+      if (templatesRes.ok) {
+        const tData = await templatesRes.json();
+        setTemplates(tData);
+      }
+      setIsEvolveModalOpen(false);
+    } catch (err: any) {
+      alert(`Error evolving template: ${err.message}`);
+    } finally {
+      setIsEvolvingTemplate(false);
+    }
+  };
+
+  const handleIntelligentEvolve = async () => {
+    if (!adminIntelligentProjectId) {
+      alert('Please select a target project.');
+      return;
+    }
+    const targetProject = projects.find(p => p.id === adminIntelligentProjectId);
+    if (!targetProject) return;
+
+    if (!confirm(`Do you want to intelligently evolve the project "${targetProject.title}" into a custom template for the "${adminIntelligentWorkType}" domain? This will evaluate the project, perform web research for domain best-practices, and generate optimized template steps.`)) return;
+
+    setIsIntelligentlyEvolving(true);
+    try {
+      const res = await fetch(`${API_BASE}/domains/intelligent-evolve-project`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: adminIntelligentProjectId,
+          workType: adminIntelligentWorkType,
+          enableSearch: isIntelligentEnableSearch,
+          workersMode: 'smart'
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to intelligently evolve template');
+
+      alert(`Successfully evolved project with intelligent search!\nCreated template: ${data.templateName}\nAssigned skill "${data.skillName}" to the ${data.domainId} domain.`);
+
+      // Refresh templates
+      const templatesRes = await fetch(`${API_BASE}/system/templates`);
+      if (templatesRes.ok) {
+        const tData = await templatesRes.json();
+        setTemplates(tData);
+      }
+      setAdminIntelligentProjectId('');
+    } catch (err: any) {
+      alert(`Error during intelligent template evolution: ${err.message}`);
+    } finally {
+      setIsIntelligentlyEvolving(false);
+    }
+  };
+
+  const handleInstallProposedSkills = async () => {
+    if (!assessmentResult?.suggestedNewSkills || assessmentResult.suggestedNewSkills.length === 0) return;
+    setInstallingSkills(true);
+    setInstallSuccessMessage(null);
+    try {
+      let count = 0;
+      for (const skill of assessmentResult.suggestedNewSkills) {
+        const res = await fetch(`${API_BASE}/domains/install-skill`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: skill.name,
+            description: skill.description,
+            service: adminEvolveWorkType,
+            body: skill.body
+          })
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          if (res.status !== 409) {
+            throw new Error(data.error || `Failed to install skill ${skill.name}`);
+          }
+        } else {
+          count++;
+        }
+      }
+      setInstallSuccessMessage(`Successfully installed ${count} new custom skill playbooks to ${adminEvolveWorkType} domain!`);
+    } catch (err: any) {
+      alert(`Error installing skills: ${err.message}`);
+    } finally {
+      setInstallingSkills(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!assessmentSessionId || !isAssessing) return;
+    
+    const intervalId = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/domains/assess-playbook/status/${assessmentSessionId}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        
+        if (data.status === 'completed') {
+          setAssessmentResult(data.result);
+          setIsAssessing(false);
+          setAssessmentSessionId(null);
+        } else if (data.status === 'failed') {
+          setAssessmentError(data.error || 'Playbook assessment failed');
+          setIsAssessing(false);
+          setAssessmentSessionId(null);
+        } else {
+          setAssessmentStatus(prev => {
+            if (prev.endsWith('...')) return prev.slice(0, -3) + '..';
+            if (prev.endsWith('..')) return prev.slice(0, -2) + '.';
+            return prev + '..';
+          });
+        }
+      } catch (err: any) {
+        setAssessmentError(err.message || 'Error checking assessment status');
+        setIsAssessing(false);
+        setAssessmentSessionId(null);
+      }
+    }, 2000);
+    
+    return () => clearInterval(intervalId);
+  }, [assessmentSessionId, isAssessing, adminEvolveWorkType]);
 
   const executeProject = async (id: string) => {
     await fetch(`${API_BASE}/projects/${id}/execute`, { method: 'POST' });
@@ -1372,7 +1698,13 @@ export function App() {
       }}>
       {/* Top status bar — slim 36px chrome with brand, container health,
           active pen, uptime. Always visible across every screen. */}
-      <TopStatusBar activePen={(selectedProject as any)?.metadata?.pen || (selectedProject as any)?.pen_slug} />
+      <TopStatusBar
+        activePen={(selectedProject as any)?.metadata?.pen || (selectedProject as any)?.pen_slug}
+        agentsCount={agentsCount}
+        domainsCount={domainsCount}
+        activeCount={activeCount}
+        doneCount={doneCount}
+      />
 
       {/* Left navigation — Discord-style vertical sidebar pinned to the left
           edge. Replaces the BridgePlanet metaphor with a conventional rail
@@ -1500,11 +1832,13 @@ export function App() {
           }}>
             <div className="eyebrow" style={{ marginBottom: 8, paddingLeft: 6 }}>Work types</div>
             {([
-              { id: 'all',     label: 'All projects', icon: '✦', color: 'var(--accent)' },
+              { id: 'meta',    label: 'Meta / admin', icon: '◉',  color: '#E2E8F0' },
+              { id: 'all',     label: 'All projects', icon: '✦',  color: 'var(--accent)' },
               { id: 'code',    label: 'Code',         icon: '⌬',  color: '#7CFC00' },
+              { id: 'books',   label: 'Books',        icon: '📖', color: '#22d3ee' },
+              { id: 'dnd',     label: 'D&D',          icon: '🎲', color: '#ef4444' },
               { id: 'email',   label: 'Email',        icon: '✉',  color: '#22D3EE' },
               { id: 'hacking', label: 'Hacking',      icon: '⌖',  color: '#FF6B6B' },
-              { id: 'meta',    label: 'Meta / admin', icon: '◉',  color: '#E2E8F0' },
             ] as const).map(t => {
               const count = (() => {
                 if (t.id === 'all') return projects.length;
@@ -1543,37 +1877,422 @@ export function App() {
             })}
           </div>
 
-          {/* Project list (right) */}
-          <div style={{ padding: '18px 24px', flex: 1, overflowY: 'auto' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h3 style={{
-              fontFamily: 'monospace',
-              fontSize: '0.6rem',
-              color: '#9BA4B5',
-              textTransform: 'uppercase',
-              letterSpacing: '0.2em',
-              margin: 0,
-            }}>// PROJECTS</h3>
-            <button
-              onClick={() => setIsCreateModalOpen(true)}
-              style={{
-                padding: '4px 10px',
-                fontSize: '0.65rem',
+          {/* Project list or Admin Buttons (right) */}
+          <div style={{ padding: '18px 24px', flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3 style={{
                 fontFamily: 'monospace',
-                background: 'rgba(168,85,247,0.15)',
-                color: '#A855F7',
-                border: '1px solid rgba(168,85,247,0.4)',
-                borderRadius: 4,
-                cursor: 'pointer',
-                letterSpacing: '0.1em',
-                display: 'flex', alignItems: 'center', gap: 4,
-              }}
-            >
-              <Plus size={12} /> NEW
-            </button>
-          </div>
+                fontSize: '0.6rem',
+                color: '#9BA4B5',
+                textTransform: 'uppercase',
+                letterSpacing: '0.2em',
+                margin: 0,
+              }}>
+                {projectWorkType === 'meta' ? '// ADMIN BUTTONS' : '// PROJECTS'}
+              </h3>
+              
+              {projectWorkType !== 'meta' && (
+                <button
+                  onClick={() => {
+                    const filtered = templates.filter(t => projectWorkType === 'all' || t.workType === projectWorkType);
+                    setNewProject(prev => ({
+                      ...prev,
+                      type: filtered[0]?.type || templates[0]?.type || ''
+                    }));
+                    setIsCreateModalOpen(true);
+                  }}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: '0.65rem',
+                    fontFamily: 'monospace',
+                    background: 'rgba(168,85,247,0.15)',
+                    color: '#A855F7',
+                    border: '1px solid rgba(168,85,247,0.4)',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    letterSpacing: '0.1em',
+                    display: 'flex', alignItems: 'center', gap: 4,
+                  }}
+                >
+                  <Plus size={12} /> NEW
+                </button>
+              )}
+            </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {projectWorkType === 'meta' ? (
+              /* Admin Buttons Layout */
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                <div className="glass-panel" style={{ padding: '1rem', border: '1px solid rgba(155, 164, 181, 0.15)', background: 'rgba(255, 255, 255, 0.02)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                    <Cpu size={16} color="var(--accent)" />
+                    <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'white' }}>Meta Operations & System Tuning</span>
+                  </div>
+                  <p className="text-muted" style={{ fontSize: '0.75rem', margin: 0 }}>
+                    Execute administrative commands to self-assess the workspace, evolve domain playbooks, and promote active projects into reusable templates.
+                  </p>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
+                  {/* Action 1: Evolve to Template */}
+                  <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', border: '1px solid var(--panel-border)', background: 'rgba(10,14,31,0.4)' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <Sparkles size={16} color="#A855F7" />
+                        <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 600, color: 'white', fontFamily: 'monospace' }}>EVOLVE PROJECT TO TEMPLATE</h4>
+                      </div>
+                      <p className="text-muted" style={{ fontSize: '0.7rem', margin: 0 }}>
+                        Compile the pipeline steps and prompts from an existing project into a reusable template.
+                      </p>
+                    </div>
+                    
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: 'auto' }}>
+                      <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT TARGET PROJECT</label>
+                      <select
+                        value={adminEvolveProjectId}
+                        onChange={(e) => setAdminEvolveProjectId(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '0.4rem',
+                          borderRadius: '4px',
+                          border: '1px solid var(--panel-border)',
+                          background: 'var(--bg-main)',
+                          color: 'white',
+                          fontSize: '0.75rem',
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="">-- Choose a project --</option>
+                        {projects
+                          .filter(p => p.type !== 'system-evolution' && p.type !== 'template-generator')
+                          .map(p => (
+                            <option key={p.id} value={p.id}>{p.title} ({p.type})</option>
+                          ))}
+                      </select>
+                      
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleAdminEvolveProject}
+                        disabled={!adminEvolveProjectId || isGeneratingTemplate}
+                        style={{
+                          fontSize: '0.75rem',
+                          padding: '0.5rem',
+                          fontFamily: 'monospace',
+                          background: 'rgba(168,85,247,0.2)',
+                          color: '#C084FC',
+                          border: '1px solid rgba(168,85,247,0.5)',
+                          marginTop: '0.25rem'
+                        }}
+                      >
+                        {isGeneratingTemplate ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} EVOLVE TO TEMPLATE
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Action 2: Evolve WorkType to Template */}
+                  <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', border: '1px solid var(--panel-border)', background: 'rgba(10,14,31,0.4)' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <Cpu size={16} color="var(--accent)" />
+                        <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 600, color: 'white', fontFamily: 'monospace' }}>EVOLVE WORKTYPE TO TEMPLATE</h4>
+                      </div>
+                      <p className="text-muted" style={{ fontSize: '0.7rem', margin: 0 }}>
+                        Evolve a domain work type into a custom template. Perry will structure the steps and route them to standard workers, GPUs, or ComfyUI.
+                      </p>
+                    </div>
+                    
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: 'auto' }}>
+                      <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT WORK TYPE</label>
+                      <select
+                        value={adminEvolveWorkType}
+                        onChange={(e) => setAdminEvolveWorkType(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '0.4rem',
+                          borderRadius: '4px',
+                          border: '1px solid var(--panel-border)',
+                          background: 'var(--bg-main)',
+                          color: 'white',
+                          fontSize: '0.75rem',
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="books">Books</option>
+                        <option value="code">Code</option>
+                        <option value="dnd">D&D</option>
+                        <option value="email">Email</option>
+                        <option value="hacking">Hacking</option>
+                      </select>
+                      
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleAdminEvolveWorkType}
+                        disabled={isEvolvingTemplate}
+                        style={{
+                          fontSize: '0.75rem',
+                          padding: '0.5rem',
+                          fontFamily: 'monospace',
+                          background: 'rgba(34,211,238,0.15)',
+                          color: '#22d3ee',
+                          border: '1px solid rgba(34,211,238,0.4)',
+                          marginTop: '0.25rem'
+                        }}
+                      >
+                        {isEvolvingTemplate ? <Loader2 size={12} className="animate-spin" /> : <Cpu size={12} />} EVOLVE WORKTYPE
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Action 3: Intelligent Project & Work Type Evolution */}
+                  <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', border: '1px solid var(--panel-border)', background: 'rgba(10,14,31,0.4)' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <Sparkles size={16} color="#10B981" />
+                        <h4 style={{ margin: 0, fontSize: '0.85rem', fontWeight: 600, color: 'white', fontFamily: 'monospace' }}>INTELLIGENT EVOLVE</h4>
+                      </div>
+                      <p className="text-muted" style={{ fontSize: '0.7rem', margin: 0 }}>
+                        Evaluate a project and generate an optimized custom template for a work type (e.g. D&D) using web search context.
+                      </p>
+                    </div>
+                    
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: 'auto' }}>
+                      <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT TARGET PROJECT</label>
+                      <select
+                        value={adminIntelligentProjectId}
+                        onChange={(e) => setAdminIntelligentProjectId(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '0.4rem',
+                          borderRadius: '4px',
+                          border: '1px solid var(--panel-border)',
+                          background: 'var(--bg-main)',
+                          color: 'white',
+                          fontSize: '0.75rem',
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="">-- Choose a project --</option>
+                        {projects
+                          .filter(p => p.type !== 'system-evolution' && p.type !== 'template-generator')
+                          .map(p => (
+                            <option key={p.id} value={p.id}>{p.title} ({p.type})</option>
+                          ))}
+                      </select>
+
+                      <label style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>SELECT WORK TYPE</label>
+                      <select
+                        value={adminIntelligentWorkType}
+                        onChange={(e) => setAdminIntelligentWorkType(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '0.4rem',
+                          borderRadius: '4px',
+                          border: '1px solid var(--panel-border)',
+                          background: 'var(--bg-main)',
+                          color: 'white',
+                          fontSize: '0.75rem',
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="dnd">D&D</option>
+                        <option value="books">Books</option>
+                        <option value="code">Code</option>
+                        <option value="email">Email</option>
+                        <option value="hacking">Hacking</option>
+                        <option value="meta">Meta</option>
+                      </select>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: '0.25rem 0' }}>
+                        <input
+                          type="checkbox"
+                          id="enableSearchCheckbox"
+                          checked={isIntelligentEnableSearch}
+                          onChange={(e) => setIntelligentEnableSearch(e.target.checked)}
+                          style={{ cursor: 'pointer' }}
+                        />
+                        <label htmlFor="enableSearchCheckbox" style={{ fontSize: '0.7rem', color: 'white', cursor: 'pointer', fontFamily: 'monospace' }}>
+                          Enable Web Search Context
+                        </label>
+                      </div>
+                      
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleIntelligentEvolve}
+                        disabled={!adminIntelligentProjectId || isIntelligentlyEvolving}
+                        style={{
+                          fontSize: '0.75rem',
+                          padding: '0.5rem',
+                          fontFamily: 'monospace',
+                          background: 'rgba(16,185,129,0.15)',
+                          color: '#10B981',
+                          border: '1px solid rgba(16,185,129,0.4)',
+                          marginTop: '0.25rem'
+                        }}
+                      >
+                        {isIntelligentlyEvolving ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} INTELLIGENT EVOLVE
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Console / Diagnostics View */}
+                {(isAssessing || assessmentStatus || assessmentResult || assessmentError) && (
+                  <div className="glass-panel" style={{
+                    padding: '1.25rem',
+                    border: '1px solid var(--panel-border)',
+                    background: 'rgba(5,7,17,0.85)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.75rem'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '0.5rem' }}>
+                      <span style={{ fontSize: '0.7rem', color: '#9BA4B5', fontWeight: 600, fontFamily: 'monospace' }}>CONSOLE DIAGNOSTICS & TUNING</span>
+                      {isAssessing ? (
+                        <span style={{ fontSize: '0.65rem', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontFamily: 'monospace' }}>
+                          <Loader2 size={10} className="animate-spin" /> AUDITING DOMAIN
+                        </span>
+                      ) : assessmentError ? (
+                        <span style={{ fontSize: '0.65rem', color: 'var(--danger)', fontWeight: 600, fontFamily: 'monospace' }}>FAILED</span>
+                      ) : (
+                        <span style={{ fontSize: '0.65rem', color: 'var(--success)', fontWeight: 600, fontFamily: 'monospace' }}>COMPLETE</span>
+                      )}
+                    </div>
+
+                    {/* Scrolling terminal window */}
+                    <div style={{
+                      background: 'black',
+                      padding: '0.75rem',
+                      borderRadius: '4px',
+                      fontFamily: 'monospace',
+                      fontSize: '0.7rem',
+                      color: '#4ADE80',
+                      maxHeight: '160px',
+                      overflowY: 'auto',
+                      border: '1px solid rgba(255,255,255,0.05)',
+                      lineHeight: '1.4'
+                    }}>
+                      <div>&gt; Initializing workspace self-assessment context...</div>
+                      {assessmentStatus && <div>&gt; {assessmentStatus}</div>}
+                      {isAssessing && <div>&gt; Dispatching agent meta.playbook-analyst to subscription workers...</div>}
+                      {isAssessing && <div>&gt; Performing search indices checks & drift scoring...</div>}
+                      {assessmentError && <div style={{ color: 'var(--danger)' }}>&gt; ERROR: {assessmentError}</div>}
+                      {assessmentResult && (
+                        <>
+                          <div style={{ color: '#60A5FA' }}>&gt; Diagnosis complete. Successfully retrieved payload from playbook-analyst.</div>
+                          <div style={{ color: 'white', marginTop: '0.25rem' }}>
+                            {assessmentResult.domainAnalysis?.summary}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Assessment results - interactive list of skills to install */}
+                    {assessmentResult && (
+                      <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.5rem' }}>
+                        
+                        {/* Domain Analysis stats */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.5rem', fontSize: '0.7rem' }}>
+                          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            <div style={{ color: 'var(--text-muted)' }}>RECOMMENDED TEAM</div>
+                            <div style={{ color: 'white', fontSize: '0.85rem', fontWeight: 600, marginTop: '2px' }}>
+                              {assessmentResult.domainAnalysis?.suggestedTeamSize || 2} Agents
+                            </div>
+                          </div>
+                          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            <div style={{ color: 'var(--text-muted)' }}>REQUIRED MCP SERVERS</div>
+                            <div style={{ color: 'white', fontSize: '0.8rem', fontWeight: 600, marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {assessmentResult.domainAnalysis?.requiredMcpServers?.join(', ') || 'None'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* List of recommended existing skills */}
+                        {assessmentResult.recommendedSkills && assessmentResult.recommendedSkills.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: '0.65rem', color: '#9BA4B5', fontWeight: 600, fontFamily: 'monospace', marginBottom: '0.25rem' }}>RECOMMENDED EXISTING SKILLS</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                              {assessmentResult.recommendedSkills.map((sk: any, i: number) => (
+                                <div key={i} style={{ fontSize: '0.7rem', padding: '0.35rem', background: 'rgba(255,255,255,0.02)', borderLeft: '2px solid var(--accent)', display: 'flex', flexDirection: 'column' }}>
+                                  <span style={{ color: 'white', fontWeight: 500 }}>{sk.name}</span>
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem' }}>{sk.reason}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* List of suggested new skills */}
+                        {assessmentResult.suggestedNewSkills && assessmentResult.suggestedNewSkills.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: '0.65rem', color: '#9BA4B5', fontWeight: 600, fontFamily: 'monospace', marginBottom: '0.25rem' }}>
+                              SYNTHESIZED PLAYBOOK SKILLS ({assessmentResult.suggestedNewSkills.length})
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                              {assessmentResult.suggestedNewSkills.map((sk: any, i: number) => (
+                                <div key={i} style={{ background: 'rgba(255,255,255,0.02)', padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                                    <span style={{ color: 'var(--accent)', fontWeight: 600, fontSize: '0.75rem', fontFamily: 'monospace' }}>{sk.name}</span>
+                                    <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>proposed playbook</span>
+                                  </div>
+                                  <div style={{ fontSize: '0.68rem', color: 'white', marginBottom: '0.4rem' }}>{sk.description}</div>
+                                  
+                                  {/* Playbook Body Code Block */}
+                                  <pre style={{
+                                    background: 'rgba(0,0,0,0.5)',
+                                    padding: '0.4rem',
+                                    borderRadius: '3px',
+                                    fontSize: '0.65rem',
+                                    color: '#A78BFA',
+                                    overflowX: 'auto',
+                                    maxHeight: '120px',
+                                    margin: 0,
+                                    border: '1px solid rgba(255,255,255,0.03)'
+                                  }}><code>{sk.body}</code></pre>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Success message / Install button */}
+                        {installSuccessMessage ? (
+                          <div style={{
+                            padding: '0.5rem',
+                            background: 'rgba(16,185,129,0.1)',
+                            border: '1px solid rgba(16,185,129,0.3)',
+                            color: '#34D399',
+                            fontSize: '0.72rem',
+                            borderRadius: '4px',
+                            textAlign: 'center',
+                            fontFamily: 'monospace'
+                          }}>
+                            ✓ {installSuccessMessage}
+                          </div>
+                        ) : (
+                          <button
+                            className="btn btn-primary"
+                            onClick={handleInstallProposedSkills}
+                            disabled={installingSkills || !assessmentResult.suggestedNewSkills || assessmentResult.suggestedNewSkills.length === 0}
+                            style={{
+                              fontSize: '0.75rem',
+                              padding: '0.6rem',
+                              fontFamily: 'monospace',
+                              background: 'rgba(16,185,129,0.2)',
+                              color: '#34D399',
+                              borderColor: 'rgba(16,185,129,0.4)',
+                              marginTop: '0.5rem'
+                            }}
+                          >
+                            {installingSkills ? <Loader2 size={12} className="animate-spin" /> : '✓ INSTALL SYNTHESIZED PLAYBOOKS'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* Standard Projects List Layout */
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             {projects
               .filter(p => !p.parentId)
               .filter(p => projectWorkType === 'all' || inferProjectWorkType(p) === projectWorkType)
@@ -1661,8 +2380,9 @@ export function App() {
               </div>
             )}
           </div>
-          </div>{/* close right column */}
-        </div>{/* close 2-col grid */}
+        )}
+      </div>{/* close right column */}
+    </div>{/* close 2-col grid */}
 
 
       </aside>
@@ -1740,7 +2460,7 @@ export function App() {
             {activeTab === 'domains' && <DomainsPanel />}
             {activeTab === 'operator' && <OperatorPanel />}
             {activeTab === 'cron' && <CronPanel />}
-            {activeTab === 'integrations' && <IntegrationsPanel />}
+            {activeTab === 'integrations' && <IntegrationsPanel contextStats={contextStats} />}
             {activeTab === 'goals' && <GoalsPanel selectedProject={selectedProject} onSelectProject={setSelectedProject} />}
           </div>
         )}
@@ -1872,30 +2592,43 @@ export function App() {
                     <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
                       <Radio size={18} color="var(--accent)" /> Chat with Director
                     </h3>
-                    {chatHistory.length > 0 && (
-                      <button
-                        className="btn btn-outline"
-                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderColor: 'var(--danger)', color: 'var(--danger)' }}
-                        onClick={async () => {
-                          if (!confirm('Are you sure you want to clear the chat history?')) return;
-                          try {
-                            const r = await fetch(`${API_BASE}/projects/${selectedProject!.id}/chat`, { method: 'DELETE' });
-                            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-                            // Only clear local state AFTER server confirms — avoids
-                            // showing an empty chat to the user if the DELETE failed
-                            // (then a periodic refetch would re-populate, looking
-                            // like a flicker / "the chat came back by itself").
-                            setChatHistory([]);
-                          } catch (e: any) {
-                            console.error('clear chat failed', e);
-                            alert(`Couldn\'t clear chat history: ${e.message || e}`);
-                          }
-                        }}
-                        title="Clear Chat History"
-                      >
-                        <Trash2 size={14} /> Clear Chat
-                      </button>
-                    )}
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      {selectedProject && (
+                        <button
+                          className="btn btn-outline"
+                          onClick={handleGenerateTemplate}
+                          disabled={isGeneratingTemplate}
+                          style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderColor: 'var(--accent)', color: 'var(--accent)' }}
+                          title="Evolve this project into a reusable template"
+                        >
+                          {isGeneratingTemplate ? <Loader2 className="animate-spin" size={14} /> : <Sparkles size={14} />} Evolve to Template
+                        </button>
+                      )}
+                      {chatHistory.length > 0 && (
+                        <button
+                          className="btn btn-outline"
+                          style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderColor: 'var(--danger)', color: 'var(--danger)' }}
+                          onClick={async () => {
+                            if (!confirm('Are you sure you want to clear the chat history?')) return;
+                            try {
+                              const r = await fetch(`${API_BASE}/projects/${selectedProject!.id}/chat`, { method: 'DELETE' });
+                              if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                              // Only clear local state AFTER server confirms — avoids
+                              // showing an empty chat to the user if the DELETE failed
+                              // (then a periodic refetch would re-populate, looking
+                              // like a flicker / "the chat came back by itself").
+                              setChatHistory([]);
+                            } catch (e: any) {
+                              console.error('clear chat failed', e);
+                              alert(`Couldn\'t clear chat history: ${e.message || e}`);
+                            }
+                          }}
+                          title="Clear Chat History"
+                        >
+                          <Trash2 size={14} /> Clear Chat
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {/* Director Agent Configuration */}
@@ -3959,9 +4692,28 @@ export function App() {
                   required
                   style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
                 >
-                  {templates.map(t => (
-                    <option key={t.type} value={t.type}>{t.name}</option>
-                  ))}
+                  {projectWorkType !== 'all' ? (
+                    templates
+                      .filter(t => t.workType === projectWorkType)
+                      .map(t => (
+                        <option key={t.type} value={t.type}>{t.name}</option>
+                      ))
+                  ) : (
+                    Array.from(new Set(templates.map(t => t.workType || 'other'))).map(wt => {
+                      const groupTemplates = templates.filter(t => (t.workType || 'other') === wt);
+                      if (groupTemplates.length === 0) return null;
+                      let label = wt === 'dnd' ? 'D&D' : wt === 'other' ? 'Other' : wt.charAt(0).toUpperCase() + wt.slice(1) + 's';
+                      if (wt === 'books') label = 'Books';
+                      if (wt === 'code') label = 'Code';
+                      return (
+                        <optgroup key={wt} label={label}>
+                          {groupTemplates.map(t => (
+                            <option key={t.type} value={t.type}>{t.name}</option>
+                          ))}
+                        </optgroup>
+                      );
+                    })
+                  )}
                 </select>
                 <p className="text-xs text-muted mt-1">
                   {templates.find(t => t.type === newProject.type)?.description}
@@ -4023,6 +4775,86 @@ export function App() {
                 {isDeleting ? <Loader2 size={16} className="animate-spin" /> : 'Yes, Delete Project'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Evolve WorkType to Template Modal */}
+      {isEvolveModalOpen && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100
+        }}>
+          <div className="glass-panel" style={{ width: '100%', maxWidth: '550px', position: 'relative' }}>
+            <button
+              onClick={() => setIsEvolveModalOpen(false)}
+              style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+            >
+              <X size={20} />
+            </button>
+            <h2 className="mb-4" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'white' }}>
+              <Cpu size={20} color="var(--accent)" /> Evolve {adminEvolveWorkType.toUpperCase()} to Template
+            </h2>
+            <p className="text-xs text-muted mb-4">
+              Describe what you want the custom pipeline to do. Perry will analyze your goal and smartly assign steps to standard workers, local GPUs, or ComfyUI.
+            </p>
+            <form onSubmit={handleAdminEvolveWorkTypeSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div>
+                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Template Name</label>
+                <input
+                  type="text"
+                  value={evolveTemplateName}
+                  onChange={e => setEvolveTemplateName(e.target.value)}
+                  placeholder="e.g., Short Story Creator"
+                  required
+                  style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
+                />
+              </div>
+              <div>
+                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Description</label>
+                <input
+                  type="text"
+                  value={evolveTemplateDesc}
+                  onChange={e => setEvolveTemplateDesc(e.target.value)}
+                  placeholder="e.g., Generates characters, writes a draft, and runs ComfyUI cover art."
+                  style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
+                />
+              </div>
+              <div>
+                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Pipeline Goal & Steps</label>
+                <textarea
+                  value={evolvePipelineGoal}
+                  onChange={e => setEvolvePipelineGoal(e.target.value)}
+                  placeholder="e.g., First create a narrative blueprint, then write the scene prose, then run an analysis/critique step, and finally generate cover artwork using ComfyUI."
+                  required
+                  rows={4}
+                  style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white', fontSize: '0.8rem' }}
+                />
+              </div>
+              <div>
+                <label className="text-sm text-muted mb-1" style={{ display: 'block' }}>Smart Worker & Resource Routing</label>
+                <select
+                  value={evolveWorkersMode}
+                  onChange={e => setEvolveWorkersMode(e.target.value)}
+                  required
+                  style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--panel-border)', background: 'var(--bg-main)', color: 'white' }}
+                >
+                  <option value="smart">Smart Routing (Decide automatically based on step requirements)</option>
+                  <option value="gpu">Local GPU Only (Force LLM steps to Ollama local GPU)</option>
+                  <option value="subscription">Subscription CLI Only (Force LLM steps to Claude/Gemini)</option>
+                </select>
+                <p className="text-xs text-muted mt-1">
+                  * Note: Image generation steps will always bypass LLM workers and route directly to ComfyUI if detected.
+                </p>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
+                <button type="button" className="btn btn-outline" onClick={() => setIsEvolveModalOpen(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={isEvolvingTemplate} style={{ background: 'rgba(34,211,238,0.15)', color: '#22d3ee', border: '1px solid rgba(34,211,238,0.4)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  {isEvolvingTemplate ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} Evolve to Template
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
