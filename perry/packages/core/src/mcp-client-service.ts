@@ -99,7 +99,56 @@ export class McpClientService {
       };
     });
   }
+  async registerAndConnectServer(serverId: string, srvConfig: McpServerConfig): Promise<boolean> {
+    try {
+      this.config.set(`ai.mcpServers.${serverId}`, srvConfig);
 
+      let transport;
+      if (srvConfig.type === 'sse' && srvConfig.url) {
+        transport = new SSEClientTransport(new URL(srvConfig.url));
+      } else if (srvConfig.type === 'stdio' && srvConfig.command) {
+        transport = new StdioClientTransport({
+          command: srvConfig.command,
+          args: srvConfig.args || [],
+          env: process.env as Record<string, string>,
+        });
+      } else {
+        this.log.warn(`Invalid dynamic MCP config for ${serverId}`);
+        return false;
+      }
+
+      const client = new Client({ name: 'perry-local-agent', version: '1.0.0' }, { capabilities: {} });
+      await client.connect(transport);
+
+      const existingClient = this.clients.get(serverId);
+      if (existingClient) {
+        try {
+          await existingClient.close();
+        } catch (closeErr: any) {
+          this.log.error(`Error closing existing MCP client for ${serverId}:`, closeErr);
+        }
+      }
+
+      this.clients.set(serverId, client);
+      this.log.info(`Connected dynamically to MCP server: ${serverId}`);
+
+      for (const [toolName, reg] of this.availableTools.entries()) {
+        if (reg.serverId === serverId) {
+          this.availableTools.delete(toolName);
+        }
+      }
+
+      const { tools } = await client.listTools();
+      for (const tool of tools) {
+        this.availableTools.set(tool.name, { serverId, tool });
+      }
+
+      return true;
+    } catch (err: any) {
+      this.log.error(`Failed to dynamically connect to MCP server ${serverId}:`, { error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  }
 
   async executeTool(name: string, args: Record<string, unknown>): Promise<any> {
     const registration = this.availableTools.get(name);

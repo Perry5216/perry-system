@@ -1311,7 +1311,7 @@ When this skill is activated:
   // Provision domain team (agents, default abilities, and souls)
   router.post('/provision-team', async (req, res) => {
     try {
-      const { domainId, teamRoles, recommendedAbilities, suggestedNewAbilities, recommendedSkills, suggestedNewSkills } = req.body || {};
+      const { domainId, teamRoles, recommendedAbilities, suggestedNewAbilities, recommendedSkills, suggestedNewSkills, recommendedMcpServers } = req.body || {};
       if (typeof domainId !== 'string' || !domainId.trim()) {
         return res.status(400).json({ error: 'domainId is required' });
       }
@@ -1439,9 +1439,90 @@ When this skill is activated:
           }
         }
 
+        // 4. Handle recommended MCP servers dynamic registration and configuration
+        const updatedMcpList = [...(domain.allowedMcpServers || [])];
+        if (recommendedMcpServers) {
+          const MCP_SERVER_TEMPLATES: Record<string, any> = {
+            'local-filesystem': {
+              type: 'stdio',
+              command: 'node',
+              args: ['--import', 'tsx', 'packages/mcp-server/src/index.ts']
+            },
+            'kali-linux-runner': {
+              type: 'stdio',
+              command: 'docker',
+              args: ['run', '-i', '--rm', 'kali-linux-runner']
+            },
+            'burp-suite-api': {
+              type: 'sse',
+              url: 'http://localhost:8080/mcp'
+            },
+            'shodan-api': {
+              type: 'sse',
+              url: 'http://localhost:3000/sse'
+            },
+            'nvd-cve': {
+              type: 'sse',
+              url: 'http://localhost:3001/sse'
+            },
+            'github': {
+              type: 'stdio',
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-github']
+            },
+            'web-search': {
+              type: 'stdio',
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-search']
+            },
+            'obsidian': {
+              type: 'sse',
+              url: 'http://localhost:4000/mcp'
+            },
+            'notion': {
+              type: 'stdio',
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-notion']
+            },
+            'network-gateway': {
+              type: 'sse',
+              url: 'http://localhost:5000/sse'
+            }
+          };
+
+          if (Array.isArray(recommendedMcpServers)) {
+            for (const serverId of recommendedMcpServers) {
+              if (typeof serverId === 'string' && MCP_SERVER_TEMPLATES[serverId]) {
+                try {
+                  const ok = await mcpClient.registerAndConnectServer(serverId, MCP_SERVER_TEMPLATES[serverId]);
+                  if (ok && !updatedMcpList.includes(serverId)) {
+                    updatedMcpList.push(serverId);
+                  }
+                } catch (err: any) {
+                  log.error(`Failed to dynamically register MCP server ${serverId}`, { error: err.message });
+                }
+              }
+            }
+          } else if (typeof recommendedMcpServers === 'object') {
+            for (const [serverId, srvConfig] of Object.entries(recommendedMcpServers)) {
+              if (srvConfig && typeof srvConfig === 'object') {
+                try {
+                  const ok = await mcpClient.registerAndConnectServer(serverId, srvConfig as any);
+                  if (ok && !updatedMcpList.includes(serverId)) {
+                    updatedMcpList.push(serverId);
+                  }
+                } catch (err: any) {
+                  log.error(`Failed to dynamically register MCP server ${serverId}`, { error: err.message });
+                }
+              }
+            }
+          }
+        }
+
         registry.update(domainId, {
           defaultAbilities: updatedAbilities,
-          defaultSkills: updatedAbilities
+          defaultSkills: updatedAbilities,
+          allowedMcpServers: updatedMcpList.length > 0 ? updatedMcpList : undefined
         });
         log.info(`Assigned ${updatedAbilities.length} abilities to domain ${domainId}`);
       }

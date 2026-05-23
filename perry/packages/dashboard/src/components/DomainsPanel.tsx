@@ -845,6 +845,7 @@ export function DomainsPanel() {
           teamRoles: assessmentResults.domainAnalysis.suggestedTeamRoles,
           recommendedAbilities: assessmentResults.recommendedSkills || [],
           suggestedNewAbilities: assessmentResults.suggestedNewSkills || [],
+          recommendedMcpServers: assessmentResults.domainAnalysis.requiredMcpServers || [],
         }),
       });
 
